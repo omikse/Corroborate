@@ -99,14 +99,18 @@ output how it processed it. Each module lives in its own file under `src/modules
   recording it identifies a 60 Hz grid (US) and tracks the drift within about ±40 mHz.
 
 The CLI picks modules with `--modules planes,enf` (the default). The viewer shows both:
-- Each module has its own box in the right panel. Click a finding to jump to it; **view ▸** switches to
-  that module's view.
-- **view: full / planes / ENF** picks a band quickly. The **frequency bar** on the left shows the whole
+- Each module has its own box in the right panel. Click a finding to jump to it. Click the coloured
+  header of a box (green for planes, blue for ENF) to show that module's view.
+- **View ▸ Full spectrogram** shows the whole 0–8 kHz band. **View ▸ Waveform** and **View ▸ Spectrum slice**
+  show or hide the waveform above the spectrogram and the spectrum slice to its right, giving the spectrogram more room.
+- The **frequency bar** on the left shows the whole
   0–8 kHz band on a log scale, with passes and hum marked. Its box is the visible band: drag the box to
   move it, drag its top or bottom edge to zoom, or click outside it to centre there.
 - Findings outside the visible band show as ▲/▼ arrows on the edge.
 - The **minimap** (toggle in the top bar) shows the whole 0–8 kHz band while zoomed in.
-- ENF has its own drift graph, in mHz (millihertz) against the nominal frequency.
+- The **ENF** view shows the spectrogram around the hum with the measured hum frequency dashed over it, and a
+  drift strip underneath in mHz (millihertz) against the nominal frequency. The drift (tens of mHz) is far
+  smaller than one spectrogram bin (0.49 Hz), so it only shows in the strip.
 
 ### Event fields
 

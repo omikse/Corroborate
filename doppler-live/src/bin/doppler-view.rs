@@ -109,6 +109,10 @@ struct Settings {
     light: bool,
     /// Show the whole-band minimap while zoomed in.
     minimap: bool,
+    /// Show the waveform above the spectrogram.
+    show_wave: bool,
+    /// Show the spectrum slice to the right of the spectrogram.
+    show_slice: bool,
     rec: RecSettings,
 }
 
@@ -125,6 +129,8 @@ impl Settings {
         let mut s = Settings {
             light: true,
             minimap: true,
+            show_wave: true,
+            show_slice: true,
             // Default: straight into the folder the app runs from, ready to record at once.
             rec: RecSettings { folder: cwd.to_string_lossy().into_owned(), raw: true, prefix: "doppler".into() },
         };
@@ -135,6 +141,8 @@ impl Settings {
                 match k.trim() {
                     "theme" => s.light = v.trim() != "dark",
                     "minimap" => s.minimap = v.trim() != "off",
+                    "show_wave" => s.show_wave = v.trim() != "off",
+                    "show_slice" => s.show_slice = v.trim() != "off",
                     // Earlier builds saved their defaults (recordings/, "rec"): treat those as unset.
                     "rec_folder" if !v.trim().is_empty() && v.trim() != old_default_folder => {
                         s.rec.folder = v.trim().to_string()
@@ -154,9 +162,11 @@ impl Settings {
             let _ = std::fs::create_dir_all(d);
         }
         let text = format!(
-            "theme={}\nminimap={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
+            "theme={}\nminimap={}\nshow_wave={}\nshow_slice={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
             if self.light { "light" } else { "dark" },
             if self.minimap { "on" } else { "off" },
+            if self.show_wave { "on" } else { "off" },
+            if self.show_slice { "on" } else { "off" },
             self.rec.folder,
             if self.rec.raw { "raw" } else { "wav" },
             self.rec.prefix
@@ -842,6 +852,7 @@ enum Action {
     OpenFile,
     OpenStream,
     Theme(bool),
+    FullView,
 }
 
 /// A stream link being resolved by yt-dlp in the background: (link, result when done).
@@ -896,8 +907,8 @@ struct App {
 /// What a drag on the frequency bar moves.
 #[derive(Clone, Copy)]
 enum FbarDrag {
-    /// The whole view; the bar position (0–1) grabbed, relative to the view's centre.
-    Move(f32),
+    /// The whole view: where it was grabbed above its bottom edge and its height, both in bar units (0–1).
+    Move(f32, f32),
     /// The top edge (upper frequency).
     Top,
     /// The bottom edge (lower frequency).
@@ -963,6 +974,24 @@ impl App {
         self.plot_enf = false;
         self.fspan = 410.0;
         self.fcenter = 245.0;
+    }
+
+    /// The ENF view: the spectrogram around the hum (the harmonic in use, or `harmonic`), with the
+    /// drift strip below. Before a grid is identified: 40–210 Hz, where the first harmonics of
+    /// both 50 and 60 Hz grids lie.
+    fn view_enf(&mut self, s: &Shared, harmonic: Option<u32>) {
+        self.plot_enf = true;
+        let h = harmonic.or_else(|| s.enf_points.iter().rev().find(|q| q.ok).map(|q| q.harmonic)).unwrap_or(1);
+        match s.enf_nominal {
+            Some(n) => {
+                self.fcenter = n * h as f64;
+                self.fspan = 30.0;
+            }
+            None => {
+                self.fcenter = 125.0;
+                self.fspan = 170.0;
+            }
+        }
     }
 
     /// Hand the current recording settings to the session (read when REC starts).
@@ -1128,6 +1157,7 @@ impl eframe::App for App {
 
         // ------------------------------------------------ menu bar
         let mut action: Option<Action> = None;
+        let (mut show_wave, mut show_slice) = (self.settings.show_wave, self.settings.show_slice);
         egui::Panel::top("menu").frame(egui::Frame::new().fill(panel()).inner_margin(egui::Margin::symmetric(6, 2))).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Source", |ui| {
@@ -1139,6 +1169,15 @@ impl eframe::App for App {
                         action = Some(Action::OpenStream);
                         ui.close();
                     }
+                });
+                ui.menu_button("View", |ui| {
+                    if ui.button("Full spectrogram").clicked() {
+                        action = Some(Action::FullView);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut show_wave, "Waveform");
+                    ui.checkbox(&mut show_slice, "Spectrum slice");
                 });
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Recording…").clicked() {
@@ -1158,6 +1197,12 @@ impl eframe::App for App {
                 });
             });
         });
+
+        if (show_wave, show_slice) != (self.settings.show_wave, self.settings.show_slice) {
+            self.settings.show_wave = show_wave;
+            self.settings.show_slice = show_slice;
+            self.settings.save();
+        }
 
         // ------------------------------------------------ recording settings
         if self.rec_dialog {
@@ -1302,13 +1347,11 @@ impl eframe::App for App {
             if end {
                 self.follow = true;
             }
-            if !self.plot_enf {
-                if pg_up {
-                    self.fcenter += self.fspan * 0.9;
-                }
-                if pg_dn {
-                    self.fcenter -= self.fspan * 0.9;
-                }
+            if pg_up {
+                self.fcenter += self.fspan * 0.9;
+            }
+            if pg_dn {
+                self.fcenter -= self.fspan * 0.9;
             }
         }
 
@@ -1590,39 +1633,31 @@ impl eframe::App for App {
         let (mut fcenter, mut fspan) = (self.fcenter, self.fspan);
         let mut fbar_drag = self.fbar_drag;
         let plot_enf = self.plot_enf;
-        let show_minimap = self.settings.minimap && zoomed && !plot_enf;
+        let show_minimap = self.settings.minimap && zoomed;
+        let (show_wave, show_slice) = (self.settings.show_wave, self.settings.show_slice);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(bg()).inner_margin(10.0)).show(ui, |ui| {
             let avail = ui.available_size();
             let wave_h = (avail.y * 0.14).clamp(60.0, 130.0);
 
-            let (wrect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
-            draw_wave(ui, wrect, &s, is_file && !self.audio);
-            ui.add_space(6.0);
+            if show_wave {
+                let (wrect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
+                draw_wave(ui, wrect, &s, is_file && !self.audio);
+                ui.add_space(6.0);
+            }
 
-            // View toolbar: quick views, frequency zoom, what is drawn.
+            // Toolbar: visible time span and what the layers are.
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("view").font(mono(11.0)).color(DIM));
-                if ui.selectable_label(!plot_enf && !zoomed, "full").clicked() {
-                    view_act = Some(ViewAct::Full);
-                }
-                if ui.selectable_label(!plot_enf && (f_lo - 40.0).abs() < 1.0 && (f_hi - 450.0).abs() < 1.0, "planes").clicked() {
-                    view_act = Some(ViewAct::Planes);
-                }
-                if ui.selectable_label(plot_enf, "ENF").clicked() {
-                    view_act = Some(ViewAct::Enf);
-                }
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(format!("time {}", fmt_span(span))).font(mono(11.0)))
                     .on_hover_text("Visible time span. Ctrl+wheel zooms it; the box on the timeline bar shows it.");
                 ui.add_space(12.0);
-                let layer = if plot_enf {
-                    "ENF drift graph · readings every 1 s (16 s windows)".to_string()
-                } else if fine_visible(fspan, f_lo, f_hi, &s.freqs) {
+                let enf_note = if plot_enf { " · ENF: measured hum dashed, drift strip below" } else { "" };
+                let layer = if fine_visible(fspan, f_lo, f_hi, &s.freqs) {
                     format!("{:.0}–{:.0} Hz · planes layer 0.49 Hz bins inside 40–450 Hz, full layer 15.6 Hz bins elsewhere", f_lo, f_hi)
                 } else {
                     format!("{:.0}–{:.0} Hz · full layer 15.6 Hz bins", f_lo, f_hi)
                 };
-                ui.label(egui::RichText::new(layer).font(mono(10.5)).color(DIM));
+                ui.label(egui::RichText::new(layer + enf_note).font(mono(10.5)).color(DIM));
             });
             ui.add_space(2.0);
 
@@ -1635,17 +1670,31 @@ impl eframe::App for App {
             let axis_b = 20.0;
             let bar_h = 16.0;
             let (area, _) = ui.allocate_exact_size(rest, Sense::hover());
-            let spec_rect = Rect::from_min_max(
+            let right_gap = if show_slice { slice_w + 10.0 } else { 0.0 };
+            let plot_rect = Rect::from_min_max(
                 pos2(area.left() + pos_w + axis_l, area.top()),
-                pos2(area.right() - slice_w - 10.0, area.bottom() - axis_b - bar_h - 8.0),
+                pos2(area.right() - right_gap, area.bottom() - axis_b - bar_h - 8.0),
             );
+            // ENF view: the drift strip takes the lower third, under the spectrogram.
+            let strip_h = if plot_enf { (plot_rect.height() * 0.32).max(90.0) } else { 0.0 };
+            let spec_rect = if plot_enf {
+                Rect::from_min_max(plot_rect.min, pos2(plot_rect.right(), plot_rect.bottom() - strip_h - 18.0))
+            } else {
+                plot_rect
+            };
+            let enf_rect = Rect::from_min_max(pos2(plot_rect.left(), plot_rect.bottom() - strip_h), plot_rect.max);
             let fbar_rect = Rect::from_min_max(
                 pos2(area.left() + fbar_lbl, spec_rect.top()),
                 pos2(area.left() + fbar_lbl + fbar_w, spec_rect.bottom()),
             );
             let slice_rect = Rect::from_min_max(pos2(spec_rect.right() + 10.0, spec_rect.top()), pos2(area.right(), spec_rect.bottom()));
-            let bar_rect = Rect::from_min_max(pos2(spec_rect.left(), area.bottom() - bar_h), pos2(spec_rect.right(), area.bottom()));
-            let live_rect = Rect::from_min_max(pos2(slice_rect.left(), bar_rect.top()), pos2(slice_rect.right(), bar_rect.bottom()));
+            // The timeline bar runs under the spectrogram; LIVE sits under the slice column, or in
+            // the bottom-right corner when the slice is hidden.
+            let bar_right = if show_slice { spec_rect.right() } else { area.right() - slice_w - 10.0 };
+            let bar_rect = Rect::from_min_max(pos2(spec_rect.left(), area.bottom() - bar_h), pos2(bar_right, area.bottom()));
+            let live_left = if show_slice { slice_rect.left() } else { area.right() - slice_w };
+            let live_rect = Rect::from_min_max(pos2(live_left, bar_rect.top()), pos2(area.right(), bar_rect.bottom()));
+            let enf_slice_rect = Rect::from_min_max(pos2(slice_rect.left(), enf_rect.top()), pos2(slice_rect.right(), enf_rect.bottom()));
 
             let x_of = |t: f64| spec_rect.left() + ((t - t_left) / span) as f32 * spec_rect.width();
             let t_of = |x: f32| t_left + ((x - spec_rect.left()) / spec_rect.width()) as f64 * span;
@@ -1654,44 +1703,74 @@ impl eframe::App for App {
             // the visible band. Drag the box to move, its top or bottom edge to zoom, click to centre.
             let fb_y = |f: f64| fbar_rect.bottom() - fbar_u(f) as f32 * fbar_rect.height();
             let fb_f = |y: f32| fbar_f(((fbar_rect.bottom() - y) / fbar_rect.height()) as f64);
-            let fb = ui.interact(fbar_rect, Id::unique("fbar"), if plot_enf { Sense::hover() } else { Sense::click_and_drag() });
+            let fb_u = |y: f32| ((fbar_rect.bottom() - y) / fbar_rect.height()) as f64;
+            let fb = ui.interact(fbar_rect, Id::unique("fbar"), Sense::click_and_drag());
             let (box_top, box_bot) = (fb_y(f_hi), fb_y(f_lo));
-            if let Some(pp) = fb.interact_pointer_pos().or(fb.hover_pos()) {
-                let near_edge = (pp.y - box_top).abs() < 5.0 || (pp.y - box_bot).abs() < 5.0;
-                if !plot_enf && fb.hovered() {
-                    ui.ctx().set_cursor_icon(if near_edge { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::Grab });
+            // Edge grips: 5 px outside the box, up to a third of the box inside it.
+            let zone = ((box_bot - box_top) / 3.0).min(5.0);
+            let grip = |y: f32| -> Option<FbarDrag> {
+                if y >= box_top - 5.0 && y <= box_top + zone {
+                    Some(FbarDrag::Top)
+                } else if y >= box_bot - zone && y <= box_bot + 5.0 {
+                    Some(FbarDrag::Bottom)
+                } else if y > box_top && y < box_bot {
+                    let u_lo = fbar_u(f_lo);
+                    Some(FbarDrag::Move((fb_u(y) - u_lo) as f32, (fbar_u(f_hi) - u_lo) as f32))
+                } else {
+                    None
                 }
-                if fb.drag_started() {
-                    fbar_drag = Some(if (pp.y - box_top).abs() < 5.0 {
-                        FbarDrag::Top
-                    } else if (pp.y - box_bot).abs() < 5.0 {
-                        FbarDrag::Bottom
-                    } else if pp.y > box_top && pp.y < box_bot {
-                        FbarDrag::Move(((fb_f(pp.y) - f_lo) / fspan) as f32)
-                    } else {
-                        fcenter = fb_f(pp.y);
-                        FbarDrag::Move(0.5)
+            };
+            if let Some(hp) = fb.hover_pos() {
+                if fb.dragged() {
+                    ui.ctx().set_cursor_icon(match fbar_drag {
+                        Some(FbarDrag::Move(..)) => egui::CursorIcon::Grabbing,
+                        _ => egui::CursorIcon::ResizeVertical,
+                    });
+                } else {
+                    ui.ctx().set_cursor_icon(match grip(hp.y) {
+                        Some(FbarDrag::Top) | Some(FbarDrag::Bottom) => egui::CursorIcon::ResizeVertical,
+                        Some(FbarDrag::Move(..)) => egui::CursorIcon::Grab,
+                        None => egui::CursorIcon::PointingHand,
                     });
                 }
-                if fb.dragged() {
-                    let f = fb_f(pp.y);
-                    match fbar_drag {
-                        Some(FbarDrag::Top) => {
-                            let hi = f.max(f_lo + MIN_FSPAN);
-                            fspan = hi - f_lo;
-                            fcenter = f_lo + fspan / 2.0;
-                        }
-                        Some(FbarDrag::Bottom) => {
-                            let lo = f.min(f_hi - MIN_FSPAN);
-                            fspan = f_hi - lo;
-                            fcenter = lo + fspan / 2.0;
-                        }
-                        Some(FbarDrag::Move(frac)) => fcenter = f - frac as f64 * fspan + fspan / 2.0,
-                        None => {}
+            }
+            if fb.drag_started() {
+                // Decide from where the button went down, not where the pointer is now.
+                let y0 = ui.input(|i| i.pointer.press_origin()).map_or(box_top, |p| p.y);
+                fbar_drag = Some(grip(y0).unwrap_or_else(|| {
+                    // Outside the box: jump there, then move it.
+                    let wu = (fbar_u(f_hi) - fbar_u(f_lo)) as f32;
+                    FbarDrag::Move(wu / 2.0, wu)
+                }));
+            }
+            if let (true, Some(pp)) = (fb.dragged(), fb.interact_pointer_pos()) {
+                let f = fb_f(pp.y);
+                match fbar_drag {
+                    Some(FbarDrag::Top) => {
+                        let hi = f.max(f_lo + MIN_FSPAN);
+                        fspan = hi - f_lo;
+                        fcenter = f_lo + fspan / 2.0;
                     }
+                    Some(FbarDrag::Bottom) => {
+                        let lo = f.min(f_hi - MIN_FSPAN);
+                        fspan = f_hi - lo;
+                        fcenter = lo + fspan / 2.0;
+                    }
+                    Some(FbarDrag::Move(du, wu)) => {
+                        // The box keeps its size on the bar, so it stays under the pointer.
+                        let u_lo = (fb_u(pp.y) - du as f64).clamp(0.0, 1.0 - wu as f64);
+                        let (lo, hi) = (fbar_f(u_lo), fbar_f(u_lo + wu as f64));
+                        fspan = (hi - lo).clamp(MIN_FSPAN, FULL_MAX);
+                        fcenter = (lo + hi) / 2.0;
+                    }
+                    None => {}
                 }
-                if fb.clicked() && !(pp.y > box_top && pp.y < box_bot) {
-                    fcenter = fb_f(pp.y);
+            }
+            if fb.clicked() {
+                if let Some(pp) = fb.interact_pointer_pos() {
+                    if grip(pp.y).is_none() {
+                        fcenter = fb_f(pp.y);
+                    }
                 }
             }
             if fb.drag_stopped() {
@@ -1699,7 +1778,7 @@ impl eframe::App for App {
             }
             {
                 let p = ui.painter();
-                let dim = if plot_enf { 0.35 } else { 1.0 };
+                let dim = 1.0;
                 p.rect_filled(fbar_rect, 2.0, FIELD);
                 // The planes module's band, faint.
                 let pb = Rect::from_min_max(pos2(fbar_rect.left(), fb_y(s.freqs[nb - 1])), pos2(fbar_rect.right(), fb_y(s.freqs[0])));
@@ -1719,10 +1798,8 @@ impl eframe::App for App {
                     let lbl = if f >= 1000.0 { format!("{:.0}k", f / 1000.0) } else { format!("{f:.0}") };
                     p.text(pos2(fbar_rect.left() - 5.0, y), Align2::RIGHT_CENTER, lbl, mono(9.5), DIM);
                 }
-                if !plot_enf {
-                    let bx = Rect::from_min_max(pos2(fbar_rect.left(), box_top), pos2(fbar_rect.right(), box_bot.max(box_top + 3.0)));
-                    p.rect_stroke(bx, 1.0, Stroke::new(1.5, HEAD), egui::StrokeKind::Inside);
-                }
+                let bx = Rect::from_min_max(pos2(fbar_rect.left(), box_top), pos2(fbar_rect.right(), box_bot.max(box_top + 3.0)));
+                p.rect_stroke(bx, 1.0, Stroke::new(1.5, HEAD), egui::StrokeKind::Inside);
                 p.rect_stroke(fbar_rect, 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
                 p.text(pos2(fbar_rect.center().x, fbar_rect.top() - 2.0), Align2::CENTER_BOTTOM, "Hz", mono(9.5), DIM);
             }
@@ -1732,16 +1809,19 @@ impl eframe::App for App {
             // frequency up/down, Ctrl+wheel = time span, Shift+wheel or sideways = time scroll.
             // Click (files) sets the playhead.
             let spec_resp = ui.interact(spec_rect, Id::unique("spec"), Sense::click());
-            if spec_resp.hovered() || fb_hover {
+            let strip_resp = ui.interact(enf_rect, Id::unique("enf_strip"), Sense::hover());
+            if spec_resp.hovered() || fb_hover || (plot_enf && strip_resp.hovered()) {
                 let (d, zoom, alt, ptr) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt, i.pointer.hover_pos()));
                 let over_spec = spec_resp.hovered();
+                let over_plot = over_spec || strip_resp.hovered();
+                // Ctrl+wheel arrives as a zoom factor (> 1 zooms in).
                 if zoom != 1.0 {
                     let new = (span / zoom as f64).clamp(10.0, t_max);
                     new_tspan = Some(new);
                     if !self.follow {
                         // Keep the time under the pointer where it is.
                         let tc = match ptr {
-                            Some(pp) if over_spec => t_of(pp.x),
+                            Some(pp) if over_plot => t_of(pp.x),
                             _ => t_right - span / 2.0,
                         };
                         new_view = Some(tc + (t_right - tc) * new / span);
@@ -1751,9 +1831,7 @@ impl eframe::App for App {
                     new_view = Some(t_right - d.x as f64 / spec_rect.width() as f64 * span);
                 }
                 if d.y != 0.0 {
-                    if plot_enf {
-                        new_view = Some(t_right - d.y as f64 / spec_rect.width() as f64 * span);
-                    } else if alt {
+                    if alt {
                         fcenter += d.y as f64 / spec_rect.height() as f64 * fspan;
                     } else {
                         let new = (fspan * (-(d.y as f64) * 0.004).exp()).clamp(MIN_FSPAN, FULL_MAX);
@@ -1778,9 +1856,7 @@ impl eframe::App for App {
             let clip = p.with_clip_rect(spec_rect);
             let at_edge = (s.now - t_right).abs() < HOP_S * 1.5;
 
-            if plot_enf {
-                draw_enf(&clip, p, spec_rect, &s, t_left, t_right, &x_of);
-            } else {
+            {
                 let y_of = |f: f64| spec_rect.bottom() - ((f - f_lo) / (f_hi - f_lo)) as f32 * spec_rect.height();
                 // Coarse full band first, then the fine planes layer where it is sharper.
                 if let Some(t) = &self.tex_full {
@@ -1847,6 +1923,31 @@ impl eframe::App for App {
                     );
                 }
 
+                // ENF view: the measured hum frequency, dashed over the spectrogram at each
+                // harmonic in view, so the raw line shows between the dashes.
+                if plot_enf {
+                    for k in 1..=4u32 {
+                        let mut line: Vec<Pos2> = Vec::new();
+                        let mut last_t: Option<f64> = None;
+                        for q in s.enf_points.iter().filter(|q| q.ok && q.t >= t_left - 2.0 && q.t <= t_right + 2.0) {
+                            let f = q.hz * k as f64;
+                            if last_t.is_some_and(|lt| q.t - lt > 2.5) {
+                                if line.len() > 1 {
+                                    clip.extend(Shape::dashed_line(&line, Stroke::new(1.5, ENF_C), 5.0, 5.0));
+                                }
+                                line.clear();
+                            }
+                            if f >= f_lo && f <= f_hi {
+                                line.push(pos2(x_of(q.t), y_of(f)));
+                            }
+                            last_t = Some(q.t);
+                        }
+                        if line.len() > 1 {
+                            clip.extend(Shape::dashed_line(&line, Stroke::new(1.5, ENF_C), 5.0, 5.0));
+                        }
+                    }
+                }
+
                 // Findings outside the visible band: arrows pinned to the top or bottom edge.
                 let mut marks: Vec<(f32, bool, Color32, ViewAct, f64)> = Vec::new();
                 for e in &s.events {
@@ -1892,6 +1993,7 @@ impl eframe::App for App {
                 }
 
                 // Spectrum slice: the visible layer at the playhead (files) or right edge.
+                if show_slice {
                 p.rect_filled(slice_rect, 0.0, FIELD);
                 let slice_t = if is_file { head } else { t_right };
                 let x_of_z = |z: f32| slice_rect.left() + ((z - Z_LO) / (Z_HI - Z_LO + 1.0)).clamp(0.0, 1.0) * slice_rect.width();
@@ -1921,8 +2023,11 @@ impl eframe::App for App {
                 if pts.len() > 1 {
                     p.with_clip_rect(slice_rect).add(Shape::line(pts, Stroke::new(1.0, WAVE)));
                 }
-                let x0 = x_of_z(0.0);
-                p.line_segment([pos2(x0, slice_rect.top()), pos2(x0, slice_rect.bottom())], Stroke::new(0.5, DIM));
+                }
+                if show_slice {
+                    let x0 = slice_rect.left() + (-Z_LO / (Z_HI - Z_LO + 1.0)) * slice_rect.width();
+                    p.line_segment([pos2(x0, slice_rect.top()), pos2(x0, slice_rect.bottom())], Stroke::new(0.5, DIM));
+                }
 
                 // Minimap: the whole band for the same time span; frame = visible band; click/drag to move.
                 if show_minimap {
@@ -1957,19 +2062,33 @@ impl eframe::App for App {
                 }
             }
 
+            // ENF view: drift strip under the spectrogram, same time axis; latest reading beside it.
+            if plot_enf {
+                p.rect_filled(enf_rect, 0.0, FIELD);
+                draw_enf(&p.with_clip_rect(enf_rect), p, enf_rect, &s, t_left, t_right, &x_of);
+                p.rect_stroke(enf_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                if show_slice {
+                    draw_enf_slice(p, enf_slice_rect, &s);
+                    p.rect_stroke(enf_slice_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                }
+            }
+
             // Time grid on absolute marks, so it moves with the data; labels are stream time.
             let tstep = time_step(span);
             let mut tg = (t_left / tstep).ceil() * tstep;
             while tg <= t_right {
                 let x = x_of(tg);
                 p.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
-                if x > spec_rect.left() + 24.0 && x < spec_rect.right() - 40.0 {
-                    p.text(pos2(x, spec_rect.bottom() + 4.0), Align2::CENTER_TOP, stamp(&s, tg), mono(10.5), DIM);
+                if plot_enf {
+                    p.line_segment([pos2(x, enf_rect.top()), pos2(x, enf_rect.bottom())], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
+                }
+                if x > plot_rect.left() + 24.0 && x < plot_rect.right() - 40.0 {
+                    p.text(pos2(x, plot_rect.bottom() + 4.0), Align2::CENTER_TOP, stamp(&s, tg), mono(10.5), DIM);
                 }
                 tg += tstep;
             }
             let edge = if at_edge { "now".to_string() } else { format!("{} ◂", stamp(&s, t_right)) };
-            p.text(pos2(spec_rect.right(), spec_rect.bottom() + 4.0), Align2::RIGHT_TOP, edge, mono(10.5), if at_edge { HIGH } else { MED });
+            p.text(pos2(plot_rect.right(), plot_rect.bottom() + 4.0), Align2::RIGHT_TOP, edge, mono(10.5), if at_edge { HIGH } else { MED });
 
             // Playhead (files).
             if is_file && head >= t_left && head <= t_right {
@@ -1978,17 +2097,16 @@ impl eframe::App for App {
                 clip.text(pos2(x + 4.0, spec_rect.top() + 2.0), Align2::LEFT_TOP, if self.audio { "▶" } else { "▮" }, mono(11.0), HEAD);
             }
             p.rect_stroke(spec_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
-            if plot_enf {
-                draw_enf_slice(p, slice_rect, &s);
+            if show_slice {
+                p.rect_stroke(slice_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                p.text(
+                    pos2(slice_rect.center().x, slice_rect.bottom() + 4.0),
+                    Align2::CENTER_TOP,
+                    if is_file { "z at ▮" } else if at_edge { "z now" } else { "z at edge" },
+                    mono(10.5),
+                    DIM,
+                );
             }
-            p.rect_stroke(slice_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
-            p.text(
-                pos2(slice_rect.center().x, slice_rect.bottom() + 4.0),
-                Align2::CENTER_TOP,
-                if plot_enf { "latest reading" } else if is_file { "z at ▮" } else if at_edge { "z now" } else { "z at edge" },
-                mono(10.5),
-                DIM,
-            );
 
             // Timeline bar: everything kept; the thumb is the visible window. Click or drag to move.
             let total = (s.now - t_first).max(span);
@@ -2044,18 +2162,14 @@ impl eframe::App for App {
             self.tspan = v;
         }
         match view_act {
-            Some(ViewAct::Full) => {
-                self.plot_enf = false;
-                self.fspan = FULL_MAX;
-                self.fcenter = FULL_MAX / 2.0;
-            }
             Some(ViewAct::Planes) => self.view_planes(),
-            Some(ViewAct::Enf) => self.plot_enf = true,
+            Some(ViewAct::Enf) => self.view_enf(&s, None),
             None => {}
         }
         if let Some((id, t)) = snap_enf {
             self.selected_enf = Some(id);
-            self.plot_enf = true;
+            let h = s.enf_segments.iter().find(|g| g.id == id).map(|g| g.harmonic);
+            self.view_enf(&s, h);
             self.follow = false;
             self.view_right = t + span * 0.5;
         }
@@ -2110,6 +2224,11 @@ impl eframe::App for App {
                 self.stream_dialog = true;
                 self.open_error = None;
             }
+            Some(Action::FullView) => {
+                self.plot_enf = false;
+                self.fspan = FULL_MAX;
+                self.fcenter = FULL_MAX / 2.0;
+            }
             Some(Action::Theme(l)) => {
                 LIGHT.store(l, Ordering::Relaxed);
                 apply_theme(ctx);
@@ -2126,7 +2245,6 @@ impl eframe::App for App {
 /// Quick views the panel, toolbar and edge arrows can ask for.
 #[derive(Clone, Copy, PartialEq)]
 enum ViewAct {
-    Full,
     Planes,
     Enf,
 }
@@ -2159,24 +2277,21 @@ fn fine_visible(fspan: f64, f_lo: f64, f_hi: f64, freqs: &[f64]) -> bool {
     fspan <= 2000.0 && f_hi > freqs[0] && f_lo < freqs[freqs.len() - 1]
 }
 
-/// A module's box in the right panel: a header strip (colour stripe, name, what it finds and
-/// a view button) above its own contents. Returns true when the view button was clicked.
+/// A module's box in the right panel: a coloured header strip (name and what it finds) above its
+/// contents. Clicking the header shows the module's view. Returns true when it was clicked.
 fn module_box(ui: &mut egui::Ui, size: egui::Vec2, title: &str, what: &str, col: Color32, body: impl FnOnce(&mut egui::Ui)) -> bool {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter().clone();
-    p.rect_filled(rect, 3.0, bg());
     let head = Rect::from_min_size(rect.min, vec2(rect.width(), 34.0));
-    p.rect_filled(head, 3.0, col.gamma_multiply(0.14));
+    let hr = ui.interact(head, Id::unique(("module_head", title)), Sense::click());
+    let hover = hr.hovered();
+    p.rect_filled(rect, 3.0, bg());
+    p.rect_filled(head, 3.0, col.gamma_multiply(if hover { 0.28 } else { 0.14 }));
     p.rect_filled(Rect::from_min_size(head.min, vec2(4.0, head.height())), 0.0, col);
     p.line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, GRID));
     p.text(head.min + vec2(12.0, 4.0), Align2::LEFT_TOP, title, mono(13.0), text());
     p.text(head.min + vec2(12.0, 20.0), Align2::LEFT_TOP, what, mono(10.0), DIM);
-    let btn = Rect::from_min_size(pos2(head.right() - 64.0, head.top() + 7.0), vec2(56.0, 20.0));
-    let r = ui.interact(btn, Id::unique(("module_view", title)), Sense::click());
-    let bc = if r.hovered() { text() } else { DIM };
-    p.rect_stroke(btn, 2.0, Stroke::new(1.0, bc), egui::StrokeKind::Inside);
-    p.text(btn.center(), Align2::CENTER_CENTER, "view ▸", mono(10.5), bc);
-    let clicked = r.on_hover_text(format!("Show the {title} view")).clicked();
+    let clicked = hr.on_hover_text(format!("Click to show the {title} view")).clicked();
     let inner = Rect::from_min_max(pos2(rect.left() + 8.0, head.bottom() + 6.0), pos2(rect.right() - 8.0, rect.bottom() - 6.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
     child.set_clip_rect(inner);
