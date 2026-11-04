@@ -45,8 +45,11 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
 
 - **Menu bar**: **Source ▸ Open file…** (native file dialog) or **Open stream…** (paste a URL; YouTube
   links are resolved with yt-dlp). Opening a new source closes the current one cleanly. **Settings ▸
-  Theme** switches between dark and light. The plot areas stay dark in both themes.
-  `doppler-view` can also start with no arguments.
+  Recording…** sets the output folder, the format (raw stream copy or decoded WAV) and the file-name
+  prefix. **Settings ▸ Theme** switches between light and dark; the plot areas stay dark in both.
+  Settings are saved in `%APPDATA%\doppler-view\settings.txt`. `doppler-view` can also start with no
+  arguments.
+- **Defaults**: light theme, smooth on, audio on. Audio stays as you left it when you switch sources.
 
 - **Recordings**: analysed as fast as the machine allows, so the whole timeline can be scrolled
   straight away. Click the spectrogram to set the playhead, and tick **audio** to listen from there.

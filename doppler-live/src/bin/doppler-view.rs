@@ -82,6 +82,76 @@ fn grade_text(g: &str) -> Color32 {
     }
 }
 const FIELD: Color32 = Color32::from_rgb(4, 5, 8);
+
+// ---------------------------------------------------------------- settings
+
+/// How REC saves a stream.
+#[derive(Clone)]
+struct RecSettings {
+    /// Output folder (absolute).
+    folder: String,
+    /// true: raw copy of the stream (original codec); false: WAV of the decoded audio.
+    raw: bool,
+    /// File names: `<prefix>-<UTC>.mka|wav` plus `.json`.
+    prefix: String,
+}
+
+/// User settings, kept between runs in a small `key=value` text file.
+struct Settings {
+    light: bool,
+    rec: RecSettings,
+}
+
+impl Settings {
+    fn file() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("APPDATA")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+        Some(base.join("doppler-view").join("settings.txt"))
+    }
+
+    fn load() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut s = Settings {
+            light: true,
+            rec: RecSettings { folder: cwd.join("recordings").to_string_lossy().into_owned(), raw: true, prefix: "rec".into() },
+        };
+        if let Some(text) = Self::file().and_then(|p| std::fs::read_to_string(p).ok()) {
+            for line in text.lines() {
+                let Some((k, v)) = line.split_once('=') else { continue };
+                match k.trim() {
+                    "theme" => s.light = v.trim() != "dark",
+                    "rec_folder" if !v.trim().is_empty() => s.rec.folder = v.trim().to_string(),
+                    "rec_format" => s.rec.raw = v.trim() != "wav",
+                    "rec_prefix" => s.rec.prefix = v.trim().to_string(),
+                    _ => {}
+                }
+            }
+        }
+        s
+    }
+
+    fn save(&self) {
+        let Some(p) = Self::file() else { return };
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let text = format!(
+            "theme={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
+            if self.light { "light" } else { "dark" },
+            self.rec.folder,
+            if self.rec.raw { "raw" } else { "wav" },
+            self.rec.prefix
+        );
+        let _ = std::fs::write(p, text);
+    }
+}
+
+/// Keep file-name prefixes to safe characters.
+fn clean_prefix(p: &str) -> String {
+    let s: String = p.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect();
+    if s.is_empty() { "rec".into() } else { s }
+}
 const GRID: Color32 = Color32::from_rgb(34, 38, 44);
 const DIM: Color32 = Color32::from_rgb(110, 118, 128);
 const WAVE: Color32 = Color32::from_rgb(120, 220, 160);
@@ -201,6 +271,8 @@ struct Controls {
     record: AtomicBool,
     /// Ask the worker to finish (source switched or closed).
     stop: AtomicBool,
+    /// Where and how REC saves; read when REC starts.
+    rec: Mutex<RecSettings>,
 }
 
 /// Samples at PLAY_SR waiting for the audio output.
@@ -253,9 +325,12 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn start(src: &Source, rel_start: f64, analysis: Option<&Anchor>) -> Result<Self, String> {
-        std::fs::create_dir_all("recordings").map_err(|e| e.to_string())?;
-        let stem = format!("recordings/rec-{}", timebase::utc_stamp(timebase::now_unix()));
+    fn start(src: &Source, rel_start: f64, analysis: Option<&Anchor>, rs: &RecSettings) -> Result<Self, String> {
+        std::fs::create_dir_all(&rs.folder).map_err(|e| format!("{}: {e}", rs.folder))?;
+        let stem = std::path::Path::new(&rs.folder)
+            .join(format!("{}-{}", clean_prefix(&rs.prefix), timebase::utc_stamp(timebase::now_unix())))
+            .to_string_lossy()
+            .into_owned();
         let anchor: SharedAnchor = Default::default();
         let mut r = Self {
             stem: stem.clone(),
@@ -270,7 +345,7 @@ impl Recorder {
             secs: 0.0,
         };
         if let Source::Ffmpeg(url, _) = src {
-            if url.contains("://") {
+            if url.contains("://") && rs.raw {
                 let file = format!("{stem}.mka");
                 let raw = ingest::RawCopy::start(url, &file)?;
                 // Separate connection: approximate until the stream's own capture times resolve.
@@ -286,7 +361,8 @@ impl Recorder {
                 return Ok(r);
             }
         }
-        r.start_wav(analysis, "WAV 16 kHz 16-bit mono of the decoded audio (this source cannot be copied raw)")?;
+        let why = if rs.raw { "this source cannot be copied raw" } else { "chosen in recording settings" };
+        r.start_wav(analysis, &format!("WAV 16 kHz 16-bit mono of the decoded audio ({why})"))?;
         r.source_host = match src {
             Source::Stdin => "stdin".into(),
             Source::Ffmpeg(p, _) | Source::Wav(p) => host_of(p),
@@ -461,7 +537,8 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
             let an = anchor.lock().unwrap().clone();
             let mut rec_error: Option<String> = None;
             if recording && rec.is_none() {
-                match Recorder::start(&src, n as f64 / PLAY_SR, an.as_ref()) {
+                let rs = ctl.rec.lock().unwrap().clone();
+                match Recorder::start(&src, n as f64 / PLAY_SR, an.as_ref(), &rs) {
                     Ok(r) => rec = Some(r),
                     Err(e) => {
                         ctl.record.store(false, Ordering::Relaxed);
@@ -720,6 +797,11 @@ struct App {
     stream_url: String,
     resolving: Option<Resolving>,
     open_error: Option<String>,
+    /// Saved settings and the recording-settings window.
+    settings: Settings,
+    rec_dialog: bool,
+    /// Turn audio on once a source is open (on by default; kept across source switches).
+    autostart_audio: bool,
 }
 
 /// Fonts and chrome colours for the current light/dark setting.
@@ -761,11 +843,21 @@ impl App {
             stream_url: String::new(),
             resolving: None,
             open_error: None,
+            settings: Settings::load(),
+            rec_dialog: false,
+            autostart_audio: true,
         }
+    }
+
+    /// Hand the current recording settings to the session (read when REC starts).
+    fn push_rec_settings(&self) {
+        *self.sess.ctl.rec.lock().unwrap() = self.settings.rec.clone();
     }
 
     /// Close the current source and start analysing `src`.
     fn switch(&mut self, src: Source, label: String) {
+        // Audio stays as the user left it: restarted on the new source if it was on.
+        self.autostart_audio = self.audio || self.autostart_audio;
         if self.audio {
             self.stop_audio();
             self.audio = false;
@@ -774,6 +866,7 @@ impl App {
         self.sess.close();
         self.sess = Session::open(src, label);
         self.sess.ctl.smooth.store(self.smooth, Ordering::Relaxed);
+        self.push_rec_settings();
         self.play_from = 0.0;
         self.follow = true;
         self.view_right = 0.0;
@@ -930,6 +1023,10 @@ impl eframe::App for App {
                     }
                 });
                 ui.menu_button("Settings", |ui| {
+                    if ui.button("Recording…").clicked() {
+                        self.rec_dialog = true;
+                        ui.close();
+                    }
                     ui.menu_button("Theme", |ui| {
                         if ui.radio(!light(), "Dark").clicked() {
                             action = Some(Action::Theme(false));
@@ -943,6 +1040,73 @@ impl eframe::App for App {
                 });
             });
         });
+
+        // ------------------------------------------------ recording settings
+        if self.rec_dialog {
+            let mut open = true;
+            let mut changed = false;
+            let mut browse = false;
+            let rs = &mut self.settings.rec;
+            egui::Window::new("Recording settings")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    egui::Grid::new("rec_grid").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+                        ui.label("Folder");
+                        ui.horizontal(|ui| {
+                            changed |= ui.add(egui::TextEdit::singleline(&mut rs.folder).desired_width(380.0)).changed();
+                            browse = ui.button("Browse…").clicked();
+                        });
+                        ui.end_row();
+
+                        ui.label("Format");
+                        ui.vertical(|ui| {
+                            changed |= ui
+                                .radio_value(&mut rs.raw, true, "Raw stream copy (.mka): original audio, untouched")
+                                .changed();
+                            changed |= ui
+                                .radio_value(&mut rs.raw, false, "WAV (.wav): decoded 16 kHz mono, as analysed")
+                                .changed();
+                            ui.label(
+                                egui::RichText::new("Sources that cannot be copied raw are always saved as WAV.")
+                                    .font(mono(10.5))
+                                    .color(DIM),
+                            );
+                        });
+                        ui.end_row();
+
+                        ui.label("File name");
+                        ui.horizontal(|ui| {
+                            changed |= ui.add(egui::TextEdit::singleline(&mut rs.prefix).desired_width(120.0)).changed();
+                            ui.label(
+                                egui::RichText::new(format!("{}-YYYYMMDD-HHMMSS (UTC) + .json", clean_prefix(&rs.prefix)))
+                                    .font(mono(11.0))
+                                    .color(DIM),
+                            );
+                        });
+                        ui.end_row();
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Changes apply to the next recording.").font(mono(10.5)).color(DIM),
+                    );
+                });
+            if browse {
+                if let Some(d) = rfd::FileDialog::new().set_title("Recording folder").set_directory(&rs.folder).pick_folder() {
+                    rs.folder = d.to_string_lossy().into_owned();
+                    changed = true;
+                }
+            }
+            if changed {
+                self.settings.save();
+                self.push_rec_settings();
+            }
+            if !open {
+                self.rec_dialog = false;
+            }
+        }
 
         // ------------------------------------------------ open-stream dialog
         if self.stream_dialog {
@@ -1064,9 +1228,10 @@ impl eframe::App for App {
                     } else {
                         egui::RichText::new("○ REC").font(mono(12.0)).color(DIM)
                     };
-                    ui.toggle_value(&mut record, label).on_hover_text(
-                        "Keep the timeline from now (scroll back, no limit) and save the stream audio to recordings/",
-                    );
+                    ui.toggle_value(&mut record, label).on_hover_text(format!(
+                        "Keep the timeline from now (scroll back, no limit) and save the stream to\n{}\n(Settings ▸ Recording… to change)",
+                        self.settings.rec.folder
+                    ));
                     if let Some(p) = &s.rec_path {
                         ui.label(egui::RichText::new(format!("→ {p}")).font(mono(11.0)).color(DIM))
                             .on_hover_text(format!("{}\nplus {} describing it", s.rec_format, p.rsplit_once('.').map_or(p.as_str(), |x| x.0).to_string() + ".json"));
@@ -1080,14 +1245,17 @@ impl eframe::App for App {
                 ui.label(egui::RichText::new(&s.source).color(DIM));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let high = s.events.iter().filter(|e| e.grade() == "high").count();
+                    // Live state is shown once, on the LIVE button under the spectrogram.
                     let state = if s.done {
                         s.status.clone()
                     } else if s.live {
-                        "● LIVE".into()
+                        String::new()
                     } else {
                         format!("▶ ANALYSING {:.0}× real time", s.audio_s / s.wall_s.max(1e-9))
                     };
-                    ui.label(egui::RichText::new(state).color(if s.done { DIM } else { MED }));
+                    if !state.is_empty() {
+                        ui.label(egui::RichText::new(state).color(if s.done { DIM } else { MED }));
+                    }
                     let load = if s.live {
                         format!("DSP {:5.2}%", 100.0 * s.dsp_s / s.audio_s.max(1e-9))
                     } else {
@@ -1360,6 +1528,7 @@ impl eframe::App for App {
             }
         });
         let (now, offset) = (s.now, s.offset);
+        let s_has_source = s.live || is_file;
         drop(s);
 
         if let Some((id, tc)) = snap {
@@ -1385,6 +1554,18 @@ impl eframe::App for App {
                 self.view_right = v;
             }
         }
+        // Audio on by default once there is something to hear.
+        let has_source = s_has_source;
+        let audio = if self.autostart_audio && has_source {
+            self.autostart_audio = false;
+            true
+        } else {
+            audio
+        };
+        if !audio && self.audio {
+            // User turned it off: do not turn it back on at the next source.
+            self.autostart_audio = false;
+        }
         self.apply_toggles(smooth, audio, record, offset);
         match action {
             Some(Action::OpenFile) => self.open_file_dialog(),
@@ -1395,6 +1576,8 @@ impl eframe::App for App {
             Some(Action::Theme(l)) => {
                 LIGHT.store(l, Ordering::Relaxed);
                 apply_theme(ctx);
+                self.settings.light = l;
+                self.settings.save();
             }
             None => {}
         }
@@ -1489,6 +1672,7 @@ fn main() -> Result<(), String> {
             s => input = Some(s.to_string()),
         }
     }
+    LIGHT.store(Settings::load().light, Ordering::Relaxed);
     let session = if stdin {
         Session::open(Source::Stdin, "stdin".into())
     } else if let Some(i) = input {
@@ -1569,6 +1753,8 @@ impl Session {
             audio: AtomicBool::new(false),
             record: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            // Replaced by the app's saved settings as soon as the session is handed over.
+            rec: Mutex::new(Settings::load().rec),
         })
     }
 
