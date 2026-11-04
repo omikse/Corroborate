@@ -6,3 +6,4 @@ target/
 *.csv
 *.png
 events.jsonl
+recordings/

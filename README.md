@@ -32,14 +32,28 @@ doppler-live listen --url "<stream url>" --events events.jsonl
 ffmpeg -i <src> -ac 1 -ar 4000 -f f32le - | doppler-live listen --stdin
 
 # Viewer
-doppler-view recording.mp3 --start 1990 --speed 6
-doppler-view "<stream url>"
+doppler-view recording.mp3        # analysed at full speed; scroll the whole timeline
+doppler-view "<stream url>"       # live; press REC to keep the timeline and save a WAV
 
 # A 10-minute synthetic test recording
 doppler-live synth test.wav
 ```
 
 For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <video url>`.
+
+### Viewer controls
+
+- **Recordings**: analysed as fast as the machine allows, so the whole timeline can be scrolled
+  straight away. Click the spectrogram to set the playhead, and tick **audio** to listen from there.
+  Clicking a pass in the list jumps to it and plays from 20 s before its closest approach.
+- **Live streams**: only the visible 160 s is kept. **● REC** keeps the timeline from that moment, with
+  no limit, and writes the stream audio to `recordings/rec-<UTC>.wav` (16 kHz, 16-bit). You can open
+  that file later as a recording.
+- **smooth**: on, live streams play out through a 4 s buffer and the view scrolls between frames.
+  Off is the raw view: data appears exactly as it arrives, network bursts and 0.25 s steps included.
+- **audio**: plays the sound as received. A choppy stream sounds choppy.
+- Scroll with the timeline bar or the mouse wheel. **End** or the LIVE / FOLLOW button returns to the
+  live edge.
 
 ### How it works
 

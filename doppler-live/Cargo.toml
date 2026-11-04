@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "doppler-live"
 version = "0.1.0"
 edition = "2024"
@@ -9,9 +9,10 @@ hound = "3.5.1"
 realfft = "3.5.1"
 # Viewer only (`--features gui`); the detector binary does not link it.
 eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+cpal = { version = "0.18.2", optional = true }
 
 [features]
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:cpal"]
 
 [[bin]]
 name = "doppler-view"
