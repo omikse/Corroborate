@@ -78,6 +78,26 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
 5. **Reporting**: candidates are held for 10 s. Overlapping curves (the same pass found again, on a harmonic,
    or as a tail) are merged and the best version is reported. Each event gets a provisional grade.
 
+### Modules
+
+All modules read the same decoded stream (16 kHz mono, one shared clock) and each says in the
+output how it processed it. Each module lives in its own file under `src/modules/`.
+
+- **planes** (`planes.rs`): aircraft Doppler curves, as described above.
+- **enf** (`enf.rs`): ENF (Electrical Network Frequency), the mains hum and its drift. A 16 s window every
+  second, a 262 144-point FFT (Fast Fourier Transform) with 0.015 Hz bins, the best of harmonics 1–4 of 50 and
+  60 Hz, and a vote for the grid's nominal frequency. Readings that jump more than 30 mHz from the recent median
+  are flagged as outliers, kept but not used. Runs of clear hum of 30 s or more are reported. On the reference
+  recording it identifies a 60 Hz grid (US) and tracks the drift within about ±40 mHz.
+
+The CLI picks modules with `--modules planes,enf` (the default). The viewer shows both:
+- The **PLANES** and **ENF** sections in the right panel jump to a finding, or switch to that module's view.
+- **view: full / planes / ENF**, a **zoom** slider and a vertical **position** slider choose the frequency band.
+  Ctrl+wheel zooms and Shift+wheel moves.
+- Findings outside the visible band show as ▲/▼ arrows on the edge.
+- The **minimap** (toggle in the top bar) shows the whole 0–8 kHz band while zoomed in.
+- ENF has its own drift graph, in mHz (millihertz) against the nominal frequency.
+
 ### Event fields
 
 `t_cpa` (closest approach, seconds from stream start), `f0_hz` (rest frequency), `f_pre_hz`/`f_post_hz`

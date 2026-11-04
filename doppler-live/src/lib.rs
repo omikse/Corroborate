@@ -1,18 +1,24 @@
-//! Lean real-time detector for aircraft Doppler curves in audio.
+//! Lean real-time detectors for audio, as modules sharing one decoded stream.
 //!
-//! Pipeline: whitened low-band STFT (`spectro`) → Viterbi ridge (`ridge`) → straight-pass
-//! Doppler fit (`fit`) → gates and de-duplication (`detect`). `ingest` reads WAV files and
-//! ffmpeg/stdin streams; `synth` makes test audio.
+//! - `module`: the interface: 16 kHz mono samples in, findings out.
+//! - `modules::planes`: aircraft Doppler curves. Whitened low-band STFT (`spectro`) →
+//!   Viterbi ridge (`ridge`) → straight-pass Doppler fit (`fit`) → gates (`detect`).
+//! - `modules::enf`: ENF (Electrical Network Frequency), the mains hum and its drift.
+//! - `ingest` reads WAV files and ffmpeg/stdin streams; `timebase` handles UTC
+//!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
 pub mod detect;
 pub mod fit;
 pub mod ingest;
+pub mod module;
+pub mod modules;
 pub mod ridge;
 pub mod spectro;
 pub mod synth;
 pub mod timebase;
 
 pub use detect::{Config, Detector, Event};
+pub use module::{Finding, Module, INPUT_SR};
 
 /// Run helper tools (ffmpeg, ffprobe, curl, yt-dlp) without opening a console window of
 /// their own on Windows; elsewhere this does nothing.

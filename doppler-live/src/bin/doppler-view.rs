@@ -18,7 +18,10 @@
 
 use doppler_live::fit::model;
 use doppler_live::timebase::{self, Anchor, SharedAnchor};
-use doppler_live::{ingest, Config, Detector, Event};
+use doppler_live::modules::enf::{Enf, EnfPoint, EnfSegment};
+use doppler_live::modules::planes::Planes;
+use doppler_live::spectro::Frontend;
+use doppler_live::{ingest, Config, Detector, Event, Finding, Module};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Id, Key, Pos2, Rect, Sense, Shape, Stroke,
     TextureHandle, TextureOptions,
@@ -49,6 +52,8 @@ const PLAY_SR: f64 = 16_000.0;
 /// Seconds of audio held back on live streams (smooth on) to absorb network bursts.
 const LIVE_BUFFER_S: f64 = 4.0;
 const HOP_S: f64 = 0.25;
+/// Full-band display layer: 1024-point FFT at 16 kHz (15.6 Hz bins, 0–8 kHz).
+const FULL_NFFT: usize = 1024;
 /// z range mapped onto one byte of history.
 const Z_LO: f32 = -1.0;
 const Z_HI: f32 = 6.0;
@@ -102,6 +107,8 @@ struct RecSettings {
 /// User settings, kept between runs in a small `key=value` text file.
 struct Settings {
     light: bool,
+    /// Show the whole-band minimap while zoomed in.
+    minimap: bool,
     rec: RecSettings,
 }
 
@@ -117,6 +124,7 @@ impl Settings {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut s = Settings {
             light: true,
+            minimap: true,
             // Default: straight into the folder the app runs from, ready to record at once.
             rec: RecSettings { folder: cwd.to_string_lossy().into_owned(), raw: true, prefix: "doppler".into() },
         };
@@ -126,6 +134,7 @@ impl Settings {
                 let Some((k, v)) = line.split_once('=') else { continue };
                 match k.trim() {
                     "theme" => s.light = v.trim() != "dark",
+                    "minimap" => s.minimap = v.trim() != "off",
                     // Earlier builds saved their defaults (recordings/, "rec"): treat those as unset.
                     "rec_folder" if !v.trim().is_empty() && v.trim() != old_default_folder => {
                         s.rec.folder = v.trim().to_string()
@@ -145,8 +154,9 @@ impl Settings {
             let _ = std::fs::create_dir_all(d);
         }
         let text = format!(
-            "theme={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
+            "theme={}\nminimap={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
             if self.light { "light" } else { "dark" },
+            if self.minimap { "on" } else { "off" },
             self.rec.folder,
             if self.rec.raw { "raw" } else { "wav" },
             self.rec.prefix
@@ -193,6 +203,16 @@ struct Shared {
     ridges: Vec<Vec<(f64, f64)>>,
     pending: Vec<Event>,
     events: Vec<Event>,
+    /// Full-band display layer (0–8 kHz, coarse), same byte encoding, own frame times.
+    full_freqs: Vec<f64>,
+    full_hist: Vec<u8>,
+    full_t: Vec<f64>,
+    /// ENF (Electrical Network Frequency): every reading, the runs found, the grid's nominal.
+    enf_points: Vec<EnfPoint>,
+    enf_segments: Vec<EnfSegment>,
+    enf_nominal: Option<f64>,
+    /// What each module does to the stream (for display and the recording's JSON).
+    module_desc: Vec<String>,
     dsp_s: f64,
     audio_s: f64,
     wall_s: f64,
@@ -413,7 +433,8 @@ impl Recorder {
 
     /// Write `<name>.json`: what the file is, its UTC start and source, and the passes
     /// detected while recording with their time inside the file.
-    fn sidecar(&mut self, analysis: Option<&Anchor>, events: &[Event]) {
+    fn sidecar(&mut self, analysis: Option<&Anchor>, s: &Shared) {
+        let events = &s.events;
         self.last_sidecar = Instant::now();
         let rec = self.anchor.lock().unwrap().clone();
         let stream_exact = |a: &Anchor| a.source.starts_with("stream PROGRAM-DATE-TIME");
@@ -444,10 +465,12 @@ impl Recorder {
             None => j.push_str("  \"utc_start\": null,\n  \"utc_source\": \"none\",\n"),
         }
         j.push_str(&format!("  \"duration_s\": {:.2},\n", self.secs));
-        j.push_str(&format!(
-            "  \"detector\": {{ \"band_hz\": [40, 450], \"nfft\": 8192, \"hop_s\": 0.25, \"window_s\": 160, \"analysis_rel_at_rec_start_s\": {:.3} }},\n",
-            self.rel_start
-        ));
+        j.push_str(&format!("  \"analysis_rel_at_rec_start_s\": {:.3},\n", self.rel_start));
+        j.push_str("  \"modules\": [");
+        for (i, d) in s.module_desc.iter().enumerate() {
+            j.push_str(&format!("{}\n    \"{}\"", if i == 0 { "" } else { "," }, timebase::json_escape(d)));
+        }
+        j.push_str("\n  ],\n");
         j.push_str(&format!("  \"event_time_in_file_accuracy\": \"{accuracy}\",\n"));
         j.push_str("  \"events\": [");
         let mut first = true;
@@ -459,15 +482,24 @@ impl Recorder {
             j.push_str(&ej);
             first = false;
         }
+        j.push_str(if first { "],\n" } else { "\n  ],\n" });
+        // ENF runs overlapping the recording (times in the analysis timeline, plus UTC).
+        j.push_str("  \"enf\": [");
+        let mut first = true;
+        for seg in s.enf_segments.iter().filter(|g| g.t_end >= self.rel_start) {
+            j.push_str(if first { "\n    " } else { ",\n    " });
+            j.push_str(&seg.to_json(analysis));
+            first = false;
+        }
         j.push_str(if first { "]\n}\n" } else { "\n  ]\n}\n" });
         let _ = std::fs::write(format!("{}.json", self.stem), j);
     }
 
-    fn stop(mut self, analysis: Option<&Anchor>, events: &[Event]) {
+    fn stop(mut self, analysis: Option<&Anchor>, s: &Shared) {
         if let Some(w) = self.wav.take() {
             let _ = w.finalize();
         }
-        self.sidecar(analysis, events);
+        self.sidecar(analysis, s);
         if let Some(raw) = self.raw.take() {
             // ffmpeg needs a moment to close the file cleanly; do not hold up the analysis.
             thread::spawn(move || raw.stop());
@@ -477,11 +509,13 @@ impl Recorder {
 
 fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
     let cfg = Config::default();
-    let sr = cfg.sr;
     let c = cfg.c;
-    let mut det = Detector::new(cfg);
-    let mut rs = ingest::Resampler::new(PLAY_SR, sr);
-    let mut det_in: Vec<f32> = Vec::with_capacity(1024);
+    // Modules, all reading the same 16 kHz chunks; plus a coarse full-band spectrogram for display.
+    let mut planes = Planes::new(cfg);
+    let mut enf = Enf::new();
+    let mut full = Frontend::new(PLAY_SR, FULL_NFFT, (HOP_S * PLAY_SR) as usize, 0.0, PLAY_SR / 2.0);
+    let mut full_frame = vec![0.0f32; full.nb];
+    sh.lock().unwrap().module_desc = vec![planes.describe(), enf.describe()];
     let mut n: u64 = 0;
     let live = src.is_live();
     let t0 = Instant::now();
@@ -501,7 +535,7 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
         }
     }
 
-    let mut handle = |x: &[f32], det: &mut Detector| {
+    let mut handle = |x: &[f32]| {
         if live && n == 0 {
             let mut a = anchor.lock().unwrap();
             if a.is_none() {
@@ -560,14 +594,19 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                     r.write(piece, an.as_ref());
                 }
             } else if let Some(r) = rec.take() {
-                r.stop(an.as_ref(), &sh.lock().unwrap().events);
+                r.stop(an.as_ref(), &sh.lock().unwrap());
             }
 
             let tick = Instant::now();
-            det_in.clear();
-            rs.process(piece, &mut det_in);
             let mut frames: Vec<(f64, Vec<u8>)> = Vec::new();
-            let evs = det.push_with(&det_in, |t, z| frames.push((t, z.iter().map(|&v| quantise(v)).collect())));
+            let evs = planes.push_with(piece, |t, z| frames.push((t, z.iter().map(|&v| quantise(v)).collect())));
+            let enf_found = enf.push(piece);
+            let enf_pts = enf.take_points();
+            full.feed(piece);
+            let mut full_frames: Vec<(f64, Vec<u8>)> = Vec::new();
+            while let Some(t) = full.next_frame(&mut full_frame) {
+                full_frames.push((t, full_frame.iter().map(|&v| quantise(v)).collect()));
+            }
             let cost = tick.elapsed().as_secs_f64();
             n += piece.len() as u64;
 
@@ -598,16 +637,35 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                 s.frames_total += 1;
                 s.now = t;
                 s.frame_wall = Instant::now();
-                s.ridges = det.ridges().to_vec();
-                s.pending = det.pending().cloned().collect();
+                s.ridges = planes.detector().ridges().to_vec();
+                s.pending = planes.detector().pending().cloned().collect();
+            }
+            for (t, q) in full_frames {
+                s.full_hist.extend_from_slice(&q);
+                s.full_t.push(t);
+            }
+            s.enf_points.extend(enf_pts);
+            s.enf_nominal = enf.nominal();
+            for f in &enf_found {
+                if let Finding::Enf(seg) = f {
+                    println!("{}", f.to_json(an.as_ref()));
+                    s.enf_segments.push(seg.clone());
+                }
             }
             // Live and not recording: keep only the visible window (trimmed in batches).
             if live && !recording && s.hist_t.len() > 2 * s.cols {
                 let k = s.hist_t.len() - s.cols;
                 s.hist.drain(..k * nb);
                 s.hist_t.drain(..k);
+                let fnb = s.full_freqs.len();
+                let kf = s.full_t.len().saturating_sub(s.cols);
+                s.full_hist.drain(..kf * fnb);
+                s.full_t.drain(..kf);
+                let t_keep = s.hist_t.first().copied().unwrap_or(0.0);
+                let kp = s.enf_points.partition_point(|p| p.t < t_keep);
+                s.enf_points.drain(..kp);
             }
-            let new_events = !evs.is_empty();
+            let new_events = !evs.is_empty() || !enf_found.is_empty();
             for e in evs {
                 println!("{}", e.to_json(an.as_ref()));
                 s.events.push(e);
@@ -615,7 +673,7 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
             // Keep the sidecar current: on new passes, and every few seconds (anchor upgrades).
             if let Some(r) = rec.as_mut() {
                 if new_events || r.last_sidecar.elapsed() > Duration::from_secs(3) {
-                    r.sidecar(an.as_ref(), &s.events);
+                    r.sidecar(an.as_ref(), &s);
                 }
             }
             s.dsp_s += cost;
@@ -626,7 +684,7 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
     };
 
     let r = match &src {
-        Source::Wav(p) => ingest::read_wav(p, PLAY_SR, |x| handle(x, &mut det)),
+        Source::Wav(p) => ingest::read_wav(p, PLAY_SR, |x| handle(x)),
         Source::Ffmpeg(p, start) => match ingest::spawn_ffmpeg_logged(p, PLAY_SR as u32, *start) {
             Ok((mut child, rx, first)) => {
                 if live {
@@ -637,7 +695,7 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                         let _ = child.kill();
                         break;
                     }
-                    handle(&x, &mut det);
+                    handle(&x);
                 }
                 let _ = child.wait();
                 Ok(())
@@ -649,20 +707,29 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                 if ctl.stop.load(Ordering::Relaxed) {
                     break;
                 }
-                handle(&x, &mut det);
+                handle(&x);
             }
             Ok(())
         }
     };
-    let evs = det.flush();
+    drop(handle);
+    let evs = planes.flush_events();
+    let enf_found = enf.flush();
+    let enf_pts = enf.take_points();
     let an = anchor.lock().unwrap().clone();
     let mut s = sh.lock().unwrap();
     for e in evs {
         println!("{}", e.to_json(an.as_ref()));
         s.events.push(e);
     }
+    s.enf_points.extend(enf_pts);
+    for f in enf_found {
+        if let Finding::Enf(seg) = f {
+            s.enf_segments.push(seg);
+        }
+    }
     if let Some(r) = rec.take() {
-        r.stop(an.as_ref(), &s.events);
+        r.stop(an.as_ref(), &s);
     }
     s.pending.clear();
     s.done = true;
@@ -811,6 +878,15 @@ struct App {
     rec_dialog: bool,
     /// Turn audio on once a source is open (on by default; kept across source switches).
     autostart_audio: bool,
+    /// Full-band layer texture.
+    tex_full: Option<TextureHandle>,
+    tex_full_key: (u64, usize),
+    img_full: Vec<u8>,
+    /// Frequency view: span (zoom) and centre (position), Hz; or the ENF drift graph.
+    fspan: f64,
+    fcenter: f64,
+    plot_enf: bool,
+    selected_enf: Option<u64>,
 }
 
 /// Fonts and chrome colours for the current light/dark setting.
@@ -855,7 +931,21 @@ impl App {
             settings: Settings::load(),
             rec_dialog: false,
             autostart_audio: true,
+            tex_full: None,
+            tex_full_key: (u64::MAX, usize::MAX),
+            img_full: Vec::new(),
+            fspan: 410.0,
+            fcenter: 245.0,
+            plot_enf: false,
+            selected_enf: None,
         }
+    }
+
+    /// The plane band, 40–450 Hz, on the spectrogram.
+    fn view_planes(&mut self) {
+        self.plot_enf = false;
+        self.fspan = 410.0;
+        self.fcenter = 245.0;
     }
 
     /// Hand the current recording settings to the session (read when REC starts).
@@ -883,6 +973,8 @@ impl App {
         self.audio_err = None;
         self.open_error = None;
         self.tex_key = (u64::MAX, usize::MAX);
+        self.tex_full_key = (u64::MAX, usize::MAX);
+        self.selected_enf = None;
     }
 
     fn open_file_dialog(&mut self) {
@@ -1194,32 +1286,42 @@ impl eframe::App for App {
         };
         let t_left = t_right - span;
 
-        // Frames covering the view: those with time ≤ t_right, the last `cols` of them.
+        // Frequency view: [f_lo, f_hi] from zoom (span) and position (centre).
+        self.fspan = self.fspan.clamp(MIN_FSPAN, FULL_MAX);
+        self.fcenter = self.fcenter.clamp(self.fspan / 2.0, FULL_MAX - self.fspan / 2.0);
+        let (f_lo, f_hi) = (self.fcenter - self.fspan / 2.0, self.fcenter + self.fspan / 2.0);
+        let zoomed = self.fspan < FULL_MAX * 0.95;
+
+        // Two layers, each the last `cols` frames up to t_right: the planes module's fine
+        // spectrogram (40–450 Hz, 0.49 Hz bins) and the coarse full band (0–8 kHz, 15.6 Hz bins).
+        let follow_key = if self.follow { s.frames_total } else { 0 };
         let idx_r = s.hist_t.partition_point(|&t| t <= t_right);
-        let key = (if self.follow { s.frames_total } else { 0 }, idx_r);
-        if key != self.tex_key || self.tex.is_none() {
-            self.tex_key = key;
-            let (w, h) = (s.cols, nb);
-            self.img.resize(w * h * 4, 0);
-            for col in 0..w {
-                let fi = idx_r as isize - w as isize + col as isize;
-                for row in 0..h {
-                    let bin = h - 1 - row;
-                    let px = if fi >= 0 { self.lut[s.hist[fi as usize * nb + bin] as usize] } else { [4, 5, 8, 255] };
-                    let i = (row * w + col) * 4;
-                    self.img[i..i + 4].copy_from_slice(&px);
-                }
-            }
-            let image = ColorImage::from_rgba_unmultiplied([w, h], &self.img);
+        if (follow_key, idx_r) != self.tex_key || self.tex.is_none() {
+            self.tex_key = (follow_key, idx_r);
+            fill_image(&mut self.img, &self.lut, &s.hist, nb, s.cols, idx_r);
+            let image = ColorImage::from_rgba_unmultiplied([s.cols, nb], &self.img);
             match &mut self.tex {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
                 None => self.tex = Some(ctx.load_texture("spec", image, TextureOptions::LINEAR)),
             }
         }
         let t_img = if idx_r > 0 { s.hist_t[idx_r - 1] } else { t_right };
+        let fnb = s.full_freqs.len();
+        let idx_full = s.full_t.partition_point(|&t| t <= t_right);
+        if (follow_key, idx_full) != self.tex_full_key || self.tex_full.is_none() {
+            self.tex_full_key = (follow_key, idx_full);
+            fill_image(&mut self.img_full, &self.lut, &s.full_hist, fnb, s.cols, idx_full);
+            let image = ColorImage::from_rgba_unmultiplied([s.cols, fnb], &self.img_full);
+            match &mut self.tex_full {
+                Some(t) => t.set(image, TextureOptions::LINEAR),
+                None => self.tex_full = Some(ctx.load_texture("spec_full", image, TextureOptions::LINEAR)),
+            }
+        }
+        let t_img_full = if idx_full > 0 { s.full_t[idx_full - 1] } else { t_right };
 
         // ------------------------------------------------ top bar
         let (mut smooth, mut audio, mut record) = (self.smooth, self.audio, self.record);
+        let mut minimap = self.settings.minimap;
         let audio_err = self.audio_err.clone();
         egui::Panel::top("top").frame(egui::Frame::new().fill(bg()).inner_margin(8.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1229,6 +1331,8 @@ impl eframe::App for App {
                     "On: live streams play out through a 4 s buffer and the view scrolls between 0.25 s frames.\n\
                      Off (raw): data is shown exactly as it arrives, bursts and steps included.",
                 );
+                ui.checkbox(&mut minimap, egui::RichText::new("minimap").font(mono(12.0)))
+                    .on_hover_text("While zoomed in, show the whole 0–8 kHz band in the corner, with your view framed.");
                 ui.checkbox(&mut audio, egui::RichText::new("audio").font(mono(12.0))).on_hover_text(if is_file {
                     "Play from the playhead (click the spectrogram to set it)."
                 } else {
@@ -1314,44 +1418,120 @@ impl eframe::App for App {
             );
         });
 
-        // ------------------------------------------------ event list
+        // ------------------------------------------------ modules panel
         let mut snap: Option<(u64, f64)> = None;
-        egui::Panel::right("events").exact_size(330.0).frame(egui::Frame::new().fill(panel()).inner_margin(10.0)).show(ui, |ui| {
-            ui.label(egui::RichText::new("DETECTED PASSES").font(mono(13.0)).color(text()).strong());
+        let mut snap_enf: Option<(u64, f64)> = None;
+        let mut view_act: Option<ViewAct> = None;
+        egui::Panel::right("modules").exact_size(340.0).frame(egui::Frame::new().fill(panel()).inner_margin(10.0)).show(ui, |ui| {
+            let avail_h = ui.available_height();
+
+            // PLANES
+            let head = ui.add(
+                egui::Label::new(egui::RichText::new("PLANES  ▸ view").font(mono(13.0)).color(text()).strong())
+                    .sense(Sense::click()),
+            );
+            if head.on_hover_text("Aircraft Doppler curves. Click to show the plane band (40–450 Hz).").clicked() {
+                view_act = Some(ViewAct::Planes);
+            }
             ui.label(egui::RichText::new("click a pass to jump to it").font(mono(10.5)).color(DIM));
-            ui.add_space(4.0);
             ui.label(egui::RichText::new(" #  T_CPA     f0     v     d    grade").font(mono(11.0)).color(DIM));
             ui.separator();
-            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                for e in &s.events {
-                    let sel = self.selected == Some(e.id);
-                    let line = format!(
-                        "{}{:>2}  {}  {:5.1}  {:3.0}  {:4.1}k  {}",
-                        if sel { "▸" } else { " " },
-                        e.id,
-                        stamp(&s, e.t_cpa),
-                        e.f0,
-                        e.speed,
-                        e.dist / 1000.0,
-                        e.grade()
-                    );
-                    let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
-                    let r = ui
-                        .vertical(|ui| {
-                            ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_text(e.grade())));
-                            ui.label(egui::RichText::new(detail).font(mono(10.5)).color(DIM));
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if r.hovered() {
-                        ui.painter().rect_stroke(r.rect.expand(2.0), 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+            egui::ScrollArea::vertical()
+                .id_salt("planes_list")
+                .max_height(avail_h * 0.45)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for e in &s.events {
+                        let sel = self.selected == Some(e.id);
+                        let line = format!(
+                            "{}{:>2}  {}  {:5.1}  {:3.0}  {:4.1}k  {}",
+                            if sel { "▸" } else { " " },
+                            e.id,
+                            stamp(&s, e.t_cpa),
+                            e.f0,
+                            e.speed,
+                            e.dist / 1000.0,
+                            e.grade()
+                        );
+                        let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
+                        let r = ui
+                            .vertical(|ui| {
+                                ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_text(e.grade())));
+                                ui.label(egui::RichText::new(detail).font(mono(10.5)).color(DIM));
+                            })
+                            .response
+                            .interact(Sense::click());
+                        if r.hovered() {
+                            ui.painter().rect_stroke(r.rect.expand(2.0), 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                        }
+                        if r.clicked() {
+                            snap = Some((e.id, e.t_cpa));
+                        }
                     }
-                    if r.clicked() {
-                        snap = Some((e.id, e.t_cpa));
+                    if s.events.is_empty() {
+                        ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listening…" }).color(DIM));
+                    }
+                });
+
+            ui.add_space(10.0);
+            // ENF
+            let head = ui.add(
+                egui::Label::new(egui::RichText::new("ENF  ▸ view").font(mono(13.0)).color(text()).strong())
+                    .sense(Sense::click()),
+            );
+            if head
+                .on_hover_text("ENF (Electrical Network Frequency): mains hum and its drift. Click to show the drift graph.")
+                .clicked()
+            {
+                view_act = Some(ViewAct::Enf);
+            }
+            match s.enf_nominal {
+                Some(n) => {
+                    ui.label(egui::RichText::new(grid_region(n)).font(mono(10.5)).color(DIM));
+                    if let Some(p) = s.enf_points.iter().rev().find(|p| p.ok) {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "now {:.4} Hz ({:+.1} mHz)  snr {:.0} dB  h{}",
+                                p.hz,
+                                (p.hz - n) * 1000.0,
+                                p.snr_db,
+                                p.harmonic
+                            ))
+                            .font(mono(11.5))
+                            .color(enf_text()),
+                        );
                     }
                 }
-                if s.events.is_empty() {
-                    ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listening…" }).color(DIM));
+                None => {
+                    ui.label(
+                        egui::RichText::new(if s.enf_points.is_empty() { "waiting for 16 s of audio…" } else { "no clear grid hum (yet)" })
+                            .font(mono(10.5))
+                            .color(DIM),
+                    );
+                }
+            }
+            ui.label(egui::RichText::new(" #  start      dur    mean Hz   range mHz").font(mono(11.0)).color(DIM));
+            ui.separator();
+            egui::ScrollArea::vertical().id_salt("enf_list").stick_to_bottom(true).show(ui, |ui| {
+                for g in &s.enf_segments {
+                    let line = format!(
+                        "{:>2}  {}  {:4.0}s  {:.4}  {:+.0}..{:+.0}",
+                        g.id,
+                        stamp(&s, g.t_start),
+                        g.t_end - g.t_start,
+                        g.mean_hz,
+                        (g.min_hz - g.nominal) * 1000.0,
+                        (g.max_hz - g.nominal) * 1000.0
+                    );
+                    let r = ui
+                        .add(egui::Label::new(egui::RichText::new(line).font(mono(12.0)).color(enf_text())).sense(Sense::click()))
+                        .on_hover_text(format!("harmonic {} · mean SNR {:.1} dB · {} readings", g.harmonic, g.mean_snr_db, g.n_points));
+                    if r.clicked() {
+                        snap_enf = Some((g.id, 0.5 * (g.t_start + g.t_end)));
+                    }
+                }
+                if s.enf_segments.is_empty() {
+                    ui.label(egui::RichText::new("no runs of hum ≥ 30 s yet").font(mono(10.5)).color(DIM));
                 }
             });
         });
@@ -1360,39 +1540,100 @@ impl eframe::App for App {
         let mut new_view: Option<f64> = None;
         let mut seek_to: Option<f64> = None;
         let mut go_live = false;
+        let (mut fcenter, mut fspan) = (self.fcenter, self.fspan);
+        let plot_enf = self.plot_enf;
+        let show_minimap = self.settings.minimap && zoomed && !plot_enf;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(bg()).inner_margin(10.0)).show(ui, |ui| {
             let avail = ui.available_size();
-            let wave_h = (avail.y * 0.16).clamp(70.0, 140.0);
+            let wave_h = (avail.y * 0.14).clamp(60.0, 130.0);
 
             let (wrect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
             draw_wave(ui, wrect, &s, is_file && !self.audio);
-            ui.add_space(8.0);
+            ui.add_space(6.0);
+
+            // View toolbar: quick views, frequency zoom, what is drawn.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("view").font(mono(11.0)).color(DIM));
+                if ui.selectable_label(!plot_enf && !zoomed, "full").clicked() {
+                    view_act = Some(ViewAct::Full);
+                }
+                if ui.selectable_label(!plot_enf && (f_lo - 40.0).abs() < 1.0 && (f_hi - 450.0).abs() < 1.0, "planes").clicked() {
+                    view_act = Some(ViewAct::Planes);
+                }
+                if ui.selectable_label(plot_enf, "ENF").clicked() {
+                    view_act = Some(ViewAct::Enf);
+                }
+                ui.add_space(12.0);
+                let mut zoom_pct = fspan / FULL_MAX * 100.0;
+                let r = ui.add_enabled(
+                    !plot_enf,
+                    egui::Slider::new(&mut zoom_pct, MIN_FSPAN / FULL_MAX * 100.0..=100.0)
+                        .logarithmic(true)
+                        .text("zoom")
+                        .custom_formatter(|v, _| format!("{:.1} %", v)),
+                );
+                if r.changed() {
+                    fspan = zoom_pct / 100.0 * FULL_MAX;
+                }
+                ui.add_space(12.0);
+                let layer = if plot_enf {
+                    "ENF drift graph · readings every 1 s (16 s windows)".to_string()
+                } else if fine_visible(fspan, f_lo, f_hi, &s.freqs) {
+                    format!("{:.0}–{:.0} Hz · planes layer 0.49 Hz bins inside 40–450 Hz, full layer 15.6 Hz bins elsewhere", f_lo, f_hi)
+                } else {
+                    format!("{:.0}–{:.0} Hz · full layer 15.6 Hz bins", f_lo, f_hi)
+                };
+                ui.label(egui::RichText::new(layer).font(mono(10.5)).color(DIM));
+            });
+            ui.add_space(2.0);
 
             let rest = ui.available_size();
             let slice_w = 120.0;
-            let axis_l = 52.0;
+            let pos_w = 22.0;
+            let axis_l = 56.0;
             let axis_b = 20.0;
             let bar_h = 16.0;
             let (area, _) = ui.allocate_exact_size(rest, Sense::hover());
             let spec_rect = Rect::from_min_max(
-                pos2(area.left() + axis_l, area.top()),
+                pos2(area.left() + pos_w + axis_l, area.top()),
                 pos2(area.right() - slice_w - 10.0, area.bottom() - axis_b - bar_h - 8.0),
             );
+            let pos_rect = Rect::from_min_max(pos2(area.left(), spec_rect.top()), pos2(area.left() + pos_w, spec_rect.bottom()));
             let slice_rect = Rect::from_min_max(pos2(spec_rect.right() + 10.0, spec_rect.top()), pos2(area.right(), spec_rect.bottom()));
             let bar_rect = Rect::from_min_max(pos2(spec_rect.left(), area.bottom() - bar_h), pos2(spec_rect.right(), area.bottom()));
             let live_rect = Rect::from_min_max(pos2(slice_rect.left(), bar_rect.top()), pos2(slice_rect.right(), bar_rect.bottom()));
 
             let x_of = |t: f64| spec_rect.left() + ((t - t_left) / span) as f32 * spec_rect.width();
             let t_of = |x: f32| t_left + ((x - spec_rect.left()) / spec_rect.width()) as f64 * span;
-            let y_of = |f: f64| spec_rect.bottom() - ((f - fmin) / (fmax - fmin)) as f32 * spec_rect.height();
 
-            // Spectrogram: wheel pans in time; click (files) sets the playhead.
+            // Position slider (frequency centre), beside the axis.
+            if !plot_enf {
+                let lo = fspan / 2.0;
+                let hi = FULL_MAX - fspan / 2.0;
+                let mut c = fcenter;
+                let r = ui.put(
+                    pos_rect,
+                    egui::Slider::new(&mut c, lo..=hi.max(lo + 1e-6)).vertical().show_value(false),
+                );
+                if r.on_hover_text("frequency position").changed() {
+                    fcenter = c;
+                }
+            }
+
+            // Mouse over the plot: wheel = time, Ctrl+wheel = zoom, Shift+wheel = frequency position;
+            // click (files) sets the playhead.
             let spec_resp = ui.interact(spec_rect, Id::unique("spec"), Sense::click());
             if spec_resp.hovered() {
-                let d = ui.input(|i| i.smooth_scroll_delta);
+                let (d, mods) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
                 let dpx = if d.x.abs() > d.y.abs() { d.x } else { d.y };
                 if dpx != 0.0 {
-                    new_view = Some(t_right + dpx as f64 / spec_rect.width() as f64 * span);
+                    if mods.ctrl && !plot_enf {
+                        fspan = (fspan * (1.0 - dpx as f64 * 0.003)).clamp(MIN_FSPAN, FULL_MAX);
+                    } else if mods.shift && !plot_enf {
+                        fcenter += dpx as f64 / spec_rect.height() as f64 * fspan;
+                    } else {
+                        new_view = Some(t_right + dpx as f64 / spec_rect.width() as f64 * span);
+                    }
                 }
             }
             if is_file && spec_resp.clicked() {
@@ -1403,21 +1644,187 @@ impl eframe::App for App {
 
             let p = ui.painter();
             p.rect_filled(spec_rect, 0.0, FIELD);
-            if let Some(t) = &self.tex {
-                let img_rect = Rect::from_min_max(pos2(x_of(t_img - span + HOP_S), spec_rect.top()), pos2(x_of(t_img + HOP_S), spec_rect.bottom()));
-                p.with_clip_rect(spec_rect).image(t.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-            }
+            let clip = p.with_clip_rect(spec_rect);
+            let at_edge = (s.now - t_right).abs() < HOP_S * 1.5;
 
-            // Frequency grid and labels.
-            let mut f = (fmin / 50.0).ceil() * 50.0;
-            while f <= fmax {
-                let y = y_of(f);
-                p.line_segment([pos2(spec_rect.left(), y), pos2(spec_rect.right(), y)], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
-                p.line_segment([pos2(slice_rect.left(), y), pos2(slice_rect.right(), y)], Stroke::new(0.5, GRID));
-                p.text(pos2(spec_rect.left() - 6.0, y), Align2::RIGHT_CENTER, format!("{f:.0}"), mono(10.5), DIM);
-                f += 50.0;
+            if plot_enf {
+                draw_enf(&clip, p, spec_rect, &s, t_left, t_right, &x_of);
+            } else {
+                let y_of = |f: f64| spec_rect.bottom() - ((f - f_lo) / (f_hi - f_lo)) as f32 * spec_rect.height();
+                // Coarse full band first, then the fine planes layer where it is sharper.
+                if let Some(t) = &self.tex_full {
+                    let v = |f: f64| (1.0 - f / FULL_MAX) as f32;
+                    let rect = Rect::from_min_max(pos2(x_of(t_img_full - span + HOP_S), spec_rect.top()), pos2(x_of(t_img_full + HOP_S), spec_rect.bottom()));
+                    clip.image(t.id(), rect, Rect::from_min_max(pos2(0.0, v(f_hi)), pos2(1.0, v(f_lo))), Color32::WHITE);
+                }
+                let (ff_lo, ff_hi) = (s.freqs[0], s.freqs[nb - 1]);
+                if fine_visible(fspan, f_lo, f_hi, &s.freqs) {
+                    if let Some(t) = &self.tex {
+                        let (a, b) = (f_lo.max(ff_lo), f_hi.min(ff_hi));
+                        let v = |f: f64| ((ff_hi - f) / (ff_hi - ff_lo)) as f32;
+                        let rect = Rect::from_min_max(pos2(x_of(t_img - span + HOP_S), y_of(b)), pos2(x_of(t_img + HOP_S), y_of(a)));
+                        clip.image(t.id(), rect, Rect::from_min_max(pos2(0.0, v(b)), pos2(1.0, v(a))), Color32::WHITE);
+                    }
+                }
+
+                // Frequency grid and labels at a step that suits the zoom.
+                let step = nice_step(f_hi - f_lo, 8.0);
+                let mut f = (f_lo / step).ceil() * step;
+                while f <= f_hi {
+                    let y = y_of(f);
+                    p.line_segment([pos2(spec_rect.left(), y), pos2(spec_rect.right(), y)], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
+                    p.line_segment([pos2(slice_rect.left(), y), pos2(slice_rect.right(), y)], Stroke::new(0.5, GRID));
+                    let lbl = if f >= 1000.0 { format!("{:.1}k", f / 1000.0) } else { format!("{f:.0}") };
+                    p.text(pos2(spec_rect.left() - 6.0, y), Align2::RIGHT_CENTER, lbl, mono(10.5), DIM);
+                    f += step;
+                }
+                p.text(pos2(spec_rect.left() - 6.0, spec_rect.top() - 2.0), Align2::RIGHT_BOTTOM, "Hz", mono(10.5), DIM);
+
+                if at_edge && !s.done {
+                    // Raw ridges and held candidates belong to the latest search.
+                    for r in &s.ridges {
+                        let pts: Vec<Pos2> = r.iter().step_by(2).map(|&(t, f)| pos2(x_of(t), y_of(f))).collect();
+                        if pts.len() > 1 {
+                            clip.extend(Shape::dashed_line(&pts, Stroke::new(1.0, RIDGE.gamma_multiply(0.7)), 3.0, 3.0));
+                        }
+                    }
+                    for e in &s.pending {
+                        let pts = curve(e, s.c, t_left, t_right, &x_of, &y_of);
+                        clip.extend(Shape::dashed_line(&pts, Stroke::new(1.5, Color32::WHITE), 6.0, 4.0));
+                    }
+                }
+                for e in &s.events {
+                    if e.t_end + 40.0 < t_left || e.t_start - 40.0 > t_right {
+                        continue;
+                    }
+                    let col = grade_color(e.grade());
+                    let w = if self.selected == Some(e.id) { 3.0 } else { 2.0 };
+                    let pts = curve(e, s.c, t_left, t_right, &x_of, &y_of);
+                    if pts.len() > 1 {
+                        clip.add(Shape::line(pts, Stroke::new(w, col)));
+                    }
+                    let pf = [e.f0, e.speed, e.dist, e.t_cpa];
+                    let xc = x_of(e.t_cpa);
+                    let yc = y_of(model(e.t_cpa, &pf, s.c));
+                    clip.line_segment([pos2(xc, yc - 14.0), pos2(xc, yc + 14.0)], Stroke::new(1.0, col));
+                    clip.text(
+                        pos2(xc + 6.0, yc - 16.0),
+                        Align2::LEFT_BOTTOM,
+                        format!("#{} {:.0} m/s {:.1} km [{}]", e.id, e.speed, e.dist / 1000.0, e.grade()),
+                        mono(11.0),
+                        col,
+                    );
+                }
+
+                // Findings outside the visible band: arrows pinned to the top or bottom edge.
+                let mut marks: Vec<(f32, bool, Color32, ViewAct, f64)> = Vec::new();
+                for e in &s.events {
+                    if e.t_cpa < t_left || e.t_cpa > t_right {
+                        continue;
+                    }
+                    if e.f_post > f_hi {
+                        marks.push((x_of(e.t_cpa), true, grade_color(e.grade()), ViewAct::Planes, e.t_cpa));
+                    } else if e.f_pre < f_lo {
+                        marks.push((x_of(e.t_cpa), false, grade_color(e.grade()), ViewAct::Planes, e.t_cpa));
+                    }
+                }
+                for g in &s.enf_segments {
+                    if g.t_end < t_left || g.t_start > t_right {
+                        continue;
+                    }
+                    let fh = g.nominal * g.harmonic as f64;
+                    let x = x_of(0.5 * (g.t_start.max(t_left) + g.t_end.min(t_right)));
+                    if fh > f_hi {
+                        marks.push((x, true, ENF_C, ViewAct::Enf, 0.5 * (g.t_start + g.t_end)));
+                    } else if fh < f_lo {
+                        marks.push((x, false, ENF_C, ViewAct::Enf, 0.5 * (g.t_start + g.t_end)));
+                    }
+                }
+                for (i, (x, top, col, act, _t)) in marks.iter().enumerate() {
+                    let y = if *top { spec_rect.top() + 2.0 } else { spec_rect.bottom() - 2.0 };
+                    let (tip, base) = if *top { (y, y + 9.0) } else { (y, y - 9.0) };
+                    let tri = vec![pos2(*x, tip), pos2(*x - 6.0, base), pos2(*x + 6.0, base)];
+                    clip.add(Shape::convex_polygon(tri, *col, Stroke::new(1.0, Color32::BLACK)));
+                    let hit = Rect::from_center_size(pos2(*x, (tip + base) / 2.0), vec2(16.0, 14.0));
+                    let r = ui.interact(hit, Id::unique(("edge", i)), Sense::click());
+                    let what = if *act == ViewAct::Enf { "grid hum (ENF)" } else { "plane pass" };
+                    if r.on_hover_text(format!("{what} {} the view: click to show it", if *top { "above" } else { "below" })).clicked() {
+                        view_act = Some(*act);
+                    }
+                }
+                let (n_up, n_dn) = (marks.iter().filter(|m| m.1).count(), marks.iter().filter(|m| !m.1).count());
+                if n_up > 0 {
+                    p.text(pos2(spec_rect.right() - 4.0, spec_rect.top() + 2.0), Align2::RIGHT_TOP, format!("▲ {n_up} above"), mono(10.5), MED);
+                }
+                if n_dn > 0 {
+                    p.text(pos2(spec_rect.right() - 4.0, spec_rect.bottom() - 2.0), Align2::RIGHT_BOTTOM, format!("▼ {n_dn} below"), mono(10.5), MED);
+                }
+
+                // Spectrum slice: the visible layer at the playhead (files) or right edge.
+                p.rect_filled(slice_rect, 0.0, FIELD);
+                let slice_t = if is_file { head } else { t_right };
+                let x_of_z = |z: f32| slice_rect.left() + ((z - Z_LO) / (Z_HI - Z_LO + 1.0)).clamp(0.0, 1.0) * slice_rect.width();
+                let mut pts: Vec<Pos2> = Vec::new();
+                let fi = s.full_t.partition_point(|&t| t <= slice_t);
+                if fi > 0 {
+                    let row = &s.full_hist[(fi - 1) * fnb..fi * fnb];
+                    pts.extend(row.iter().enumerate().filter(|(i, _)| {
+                        let f = s.full_freqs[*i];
+                        f >= f_lo && f <= f_hi && !(fine_visible(fspan, f_lo, f_hi, &s.freqs) && f >= ff_lo && f <= ff_hi)
+                    }).map(|(i, &q)| pos2(x_of_z(dequantise(q)), y_of(s.full_freqs[i]))));
+                }
+                if fine_visible(fspan, f_lo, f_hi, &s.freqs) {
+                    let si = s.hist_t.partition_point(|&t| t <= slice_t);
+                    if si > 0 {
+                        let row = &s.hist[(si - 1) * nb..si * nb];
+                        let mut fine: Vec<Pos2> = row
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| s.freqs[*i] >= f_lo && s.freqs[*i] <= f_hi)
+                            .map(|(i, &q)| pos2(x_of_z(dequantise(q)), y_of(s.freqs[i])))
+                            .collect();
+                        pts.append(&mut fine);
+                    }
+                }
+                pts.sort_by(|a, b| b.y.total_cmp(&a.y));
+                if pts.len() > 1 {
+                    p.with_clip_rect(slice_rect).add(Shape::line(pts, Stroke::new(1.0, WAVE)));
+                }
+                let x0 = x_of_z(0.0);
+                p.line_segment([pos2(x0, slice_rect.top()), pos2(x0, slice_rect.bottom())], Stroke::new(0.5, DIM));
+
+                // Minimap: the whole band for the same time span; frame = visible band; click/drag to move.
+                if show_minimap {
+                    let mini = Rect::from_min_size(spec_rect.left_top() + vec2(6.0, 6.0), vec2(170.0, 120.0));
+                    p.rect_filled(mini, 2.0, FIELD);
+                    if let Some(t) = &self.tex_full {
+                        p.image(t.id(), mini, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    let my = |f: f64| mini.bottom() - (f / FULL_MAX) as f32 * mini.height();
+                    let mx = |t: f64| mini.left() + ((t - t_left) / span) as f32 * mini.width();
+                    for e in &s.events {
+                        if e.t_cpa >= t_left && e.t_cpa <= t_right {
+                            p.circle_filled(pos2(mx(e.t_cpa), my(e.f0)), 2.5, grade_color(e.grade()));
+                        }
+                    }
+                    for g in &s.enf_segments {
+                        if g.t_end >= t_left && g.t_start <= t_right {
+                            let y = my(g.nominal * g.harmonic as f64);
+                            p.line_segment([pos2(mx(g.t_start.max(t_left)), y), pos2(mx(g.t_end.min(t_right)), y)], Stroke::new(2.0, ENF_C));
+                        }
+                    }
+                    let frame = Rect::from_min_max(pos2(mini.left(), my(f_hi)), pos2(mini.right(), my(f_lo)));
+                    p.rect_stroke(frame, 0.0, Stroke::new(1.5, HEAD), egui::StrokeKind::Inside);
+                    p.rect_stroke(mini, 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                    p.text(mini.left_bottom() + vec2(3.0, -2.0), Align2::LEFT_BOTTOM, "0–8 kHz", mono(9.5), DIM);
+                    let r = ui.interact(mini, Id::unique("minimap"), Sense::click_and_drag());
+                    if let Some(pp) = r.interact_pointer_pos() {
+                        if r.clicked() || r.dragged() {
+                            fcenter = ((mini.bottom() - pp.y) / mini.height()) as f64 * FULL_MAX;
+                        }
+                    }
+                }
             }
-            p.text(pos2(area.left() + 2.0, spec_rect.top() - 2.0), Align2::LEFT_BOTTOM, "Hz", mono(10.5), DIM);
 
             // Time grid on absolute 20 s marks, so it moves with the data; labels are stream time.
             let mut tg = (t_left / 20.0).ceil() * 20.0;
@@ -1429,46 +1836,9 @@ impl eframe::App for App {
                 }
                 tg += 20.0;
             }
-            let at_edge = (s.now - t_right).abs() < HOP_S * 1.5;
             let edge = if at_edge { "now".to_string() } else { format!("{} ◂", stamp(&s, t_right)) };
             p.text(pos2(spec_rect.right(), spec_rect.bottom() + 4.0), Align2::RIGHT_TOP, edge, mono(10.5), if at_edge { HIGH } else { MED });
 
-            let clip = p.with_clip_rect(spec_rect);
-            if at_edge && !s.done {
-                // Raw ridges and held candidates belong to the latest search.
-                for r in &s.ridges {
-                    let pts: Vec<Pos2> = r.iter().step_by(2).map(|&(t, f)| pos2(x_of(t), y_of(f))).collect();
-                    if pts.len() > 1 {
-                        clip.extend(Shape::dashed_line(&pts, Stroke::new(1.0, RIDGE.gamma_multiply(0.7)), 3.0, 3.0));
-                    }
-                }
-                for e in &s.pending {
-                    let pts = curve(e, s.c, t_left, t_right, &x_of, &y_of);
-                    clip.extend(Shape::dashed_line(&pts, Stroke::new(1.5, Color32::WHITE), 6.0, 4.0));
-                }
-            }
-            for e in &s.events {
-                if e.t_end + 40.0 < t_left || e.t_start - 40.0 > t_right {
-                    continue;
-                }
-                let col = grade_color(e.grade());
-                let w = if self.selected == Some(e.id) { 3.0 } else { 2.0 };
-                let pts = curve(e, s.c, t_left, t_right, &x_of, &y_of);
-                if pts.len() > 1 {
-                    clip.add(Shape::line(pts, Stroke::new(w, col)));
-                }
-                let pf = [e.f0, e.speed, e.dist, e.t_cpa];
-                let xc = x_of(e.t_cpa);
-                let yc = y_of(model(e.t_cpa, &pf, s.c));
-                clip.line_segment([pos2(xc, yc - 14.0), pos2(xc, yc + 14.0)], Stroke::new(1.0, col));
-                clip.text(
-                    pos2(xc + 6.0, yc - 16.0),
-                    Align2::LEFT_BOTTOM,
-                    format!("#{} {:.0} m/s {:.1} km [{}]", e.id, e.speed, e.dist / 1000.0, e.grade()),
-                    mono(11.0),
-                    col,
-                );
-            }
             // Playhead (files).
             if is_file && head >= t_left && head <= t_right {
                 let x = x_of(head);
@@ -1476,24 +1846,14 @@ impl eframe::App for App {
                 clip.text(pos2(x + 4.0, spec_rect.top() + 2.0), Align2::LEFT_TOP, if self.audio { "▶" } else { "▮" }, mono(11.0), HEAD);
             }
             p.rect_stroke(spec_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
-
-            // Spectrum slice: the frame at the playhead (files) or right edge.
-            p.rect_filled(slice_rect, 0.0, FIELD);
-            let slice_t = if is_file { head } else { t_right };
-            let si = s.hist_t.partition_point(|&t| t <= slice_t);
-            if si > 0 {
-                let row = &s.hist[(si - 1) * nb..si * nb];
-                let x_of_z = |z: f32| slice_rect.left() + ((z - Z_LO) / (Z_HI - Z_LO + 1.0)).clamp(0.0, 1.0) * slice_rect.width();
-                let pts: Vec<Pos2> = row.iter().enumerate().step_by(2).map(|(i, &q)| pos2(x_of_z(dequantise(q)), y_of(s.freqs[i]))).collect();
-                p.with_clip_rect(slice_rect).add(Shape::line(pts, Stroke::new(1.0, WAVE)));
-                let x0 = x_of_z(0.0);
-                p.line_segment([pos2(x0, slice_rect.top()), pos2(x0, slice_rect.bottom())], Stroke::new(0.5, DIM));
+            if plot_enf {
+                draw_enf_slice(p, slice_rect, &s);
             }
             p.rect_stroke(slice_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
             p.text(
                 pos2(slice_rect.center().x, slice_rect.bottom() + 4.0),
                 Align2::CENTER_TOP,
-                if is_file { "z at ▮" } else if at_edge { "z now" } else { "z at edge" },
+                if plot_enf { "latest reading" } else if is_file { "z at ▮" } else if at_edge { "z now" } else { "z at edge" },
                 mono(10.5),
                 DIM,
             );
@@ -1503,10 +1863,16 @@ impl eframe::App for App {
             let bx = |t: f64| bar_rect.left() + ((t - t_first) / total) as f32 * bar_rect.width();
             let bar = ui.interact(bar_rect, Id::unique("timeline"), Sense::click_and_drag());
             p.rect_filled(bar_rect, 2.0, FIELD);
+            for g in &s.enf_segments {
+                if g.t_end >= t_first {
+                    let (a, b) = (bx(g.t_start.max(t_first)), bx(g.t_end));
+                    p.line_segment([pos2(a, bar_rect.bottom() - 2.0), pos2(b, bar_rect.bottom() - 2.0)], Stroke::new(2.0, ENF_C));
+                }
+            }
             for e in &s.events {
                 if e.t_cpa >= t_first {
                     let x = bx(e.t_cpa);
-                    p.line_segment([pos2(x, bar_rect.top() + 2.0), pos2(x, bar_rect.bottom() - 2.0)], Stroke::new(2.0, grade_color(e.grade())));
+                    p.line_segment([pos2(x, bar_rect.top() + 2.0), pos2(x, bar_rect.bottom() - 4.0)], Stroke::new(2.0, grade_color(e.grade())));
                 }
             }
             if is_file {
@@ -1539,6 +1905,24 @@ impl eframe::App for App {
                 go_live = true;
             }
         });
+        self.fcenter = fcenter;
+        self.fspan = fspan;
+        match view_act {
+            Some(ViewAct::Full) => {
+                self.plot_enf = false;
+                self.fspan = FULL_MAX;
+                self.fcenter = FULL_MAX / 2.0;
+            }
+            Some(ViewAct::Planes) => self.view_planes(),
+            Some(ViewAct::Enf) => self.plot_enf = true,
+            None => {}
+        }
+        if let Some((id, t)) = snap_enf {
+            self.selected_enf = Some(id);
+            self.plot_enf = true;
+            self.follow = false;
+            self.view_right = t + span * 0.5;
+        }
         let (now, offset) = (s.now, s.offset);
         let s_has_source = s.live || is_file;
         drop(s);
@@ -1548,6 +1932,7 @@ impl eframe::App for App {
             self.selected = Some(id);
             self.follow = false;
             self.view_right = tc + span * 0.6;
+            self.view_planes();
             if is_file {
                 // Start listening a little before the closest approach.
                 self.seek(tc - 20.0, offset);
@@ -1579,6 +1964,10 @@ impl eframe::App for App {
             self.autostart_audio = false;
         }
         self.apply_toggles(smooth, audio, record, offset);
+        if minimap != self.settings.minimap {
+            self.settings.minimap = minimap;
+            self.settings.save();
+        }
         match action {
             Some(Action::OpenFile) => self.open_file_dialog(),
             Some(Action::OpenStream) => {
@@ -1593,6 +1982,151 @@ impl eframe::App for App {
             }
             None => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------- view helpers
+
+/// Quick views the panel, toolbar and edge arrows can ask for.
+#[derive(Clone, Copy, PartialEq)]
+enum ViewAct {
+    Full,
+    Planes,
+    Enf,
+}
+
+/// Top of the full-band layer (Nyquist frequency of the 16 kHz stream).
+const FULL_MAX: f64 = 8000.0;
+/// Narrowest frequency view (Hz).
+const MIN_FSPAN: f64 = 20.0;
+const ENF_C: Color32 = Color32::from_rgb(120, 170, 255);
+
+/// ENF colour for text on the window chrome.
+fn enf_text() -> Color32 {
+    if light() { Color32::from_rgb(40, 80, 180) } else { ENF_C }
+}
+
+/// Which grids run at this nominal frequency.
+fn grid_region(nominal: f64) -> &'static str {
+    if nominal < 55.0 {
+        "50 Hz grid: Europe, Africa, most of Asia, Australia, much of South America"
+    } else {
+        "60 Hz grid: North America, parts of South America, Korea, Taiwan, Philippines, west Japan"
+    }
+}
+
+/// The fine planes layer is drawn when zoomed in enough for its detail to matter and when
+/// its band (40–450 Hz) is in view.
+fn fine_visible(fspan: f64, f_lo: f64, f_hi: f64, freqs: &[f64]) -> bool {
+    fspan <= 2000.0 && f_hi > freqs[0] && f_lo < freqs[freqs.len() - 1]
+}
+
+/// A 1–2–5 step giving about `n` grid lines over `span`.
+fn nice_step(span: f64, n: f64) -> f64 {
+    let raw = (span / n).max(1e-9);
+    let mag = 10f64.powf(raw.log10().floor());
+    let r = raw / mag;
+    let m = if r < 1.5 {
+        1.0
+    } else if r < 3.5 {
+        2.0
+    } else if r < 7.5 {
+        5.0
+    } else {
+        10.0
+    };
+    m * mag
+}
+
+/// Fill `img` (RGBA, `cols` × `nb`, high frequencies on top) from the last `cols` frames of
+/// `hist` ending before index `idx_r`; frames before the start are left dark.
+fn fill_image(img: &mut Vec<u8>, lut: &[[u8; 4]; 256], hist: &[u8], nb: usize, cols: usize, idx_r: usize) {
+    img.resize(cols * nb * 4, 0);
+    for col in 0..cols {
+        let fi = idx_r as isize - cols as isize + col as isize;
+        for row in 0..nb {
+            let bin = nb - 1 - row;
+            let px = if fi >= 0 { lut[hist[fi as usize * nb + bin] as usize] } else { [4, 5, 8, 255] };
+            let i = (row * cols + col) * 4;
+            img[i..i + 4].copy_from_slice(&px);
+        }
+    }
+}
+
+/// ENF drift graph: readings around the grid's nominal frequency over the visible time.
+/// Clear, continuous readings form the line; flagged ones are grey dots; runs are shaded.
+fn draw_enf(
+    clip: &egui::Painter,
+    p: &egui::Painter,
+    rect: Rect,
+    s: &Shared,
+    t_left: f64,
+    t_right: f64,
+    x_of: &dyn Fn(f64) -> f32,
+) {
+    let vis: Vec<&EnfPoint> = s.enf_points.iter().filter(|q| q.t >= t_left - 2.0 && q.t <= t_right + 2.0).collect();
+    let nominal = s.enf_nominal.or_else(|| vis.iter().find(|q| q.ok).map(|q| q.nominal));
+    let Some(nom) = nominal else {
+        p.text(rect.center(), Align2::CENTER_CENTER, "no grid hum detected in this span", mono(12.0), DIM);
+        return;
+    };
+    let dev_max = vis.iter().filter(|q| q.ok).map(|q| (q.hz - nom).abs()).fold(0.0, f64::max);
+    let half = (dev_max * 1.2).clamp(0.05, 0.5);
+    let y_of = |f: f64| rect.center().y - ((f - nom) / half) as f32 * rect.height() / 2.0;
+
+    for g in &s.enf_segments {
+        if g.t_end >= t_left && g.t_start <= t_right {
+            let r = Rect::from_min_max(pos2(x_of(g.t_start), rect.top()), pos2(x_of(g.t_end), rect.bottom()));
+            clip.rect_filled(r, 0.0, ENF_C.gamma_multiply(0.08));
+        }
+    }
+    let step = nice_step(2.0 * half * 1000.0, 8.0) / 1000.0;
+    let mut f = ((nom - half) / step).ceil() * step;
+    while f <= nom + half + 1e-9 {
+        let y = y_of(f);
+        p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
+        p.text(pos2(rect.left() - 6.0, y), Align2::RIGHT_CENTER, format!("{:+.0}", (f - nom) * 1000.0), mono(10.5), DIM);
+        f += step;
+    }
+    clip.extend(Shape::dashed_line(&[pos2(rect.left(), y_of(nom)), pos2(rect.right(), y_of(nom))], Stroke::new(1.0, DIM), 4.0, 4.0));
+    p.text(pos2(rect.left() - 6.0, rect.top() - 2.0), Align2::RIGHT_BOTTOM, format!("mHz vs {nom:.0} Hz"), mono(10.5), DIM);
+
+    let mut line: Vec<Pos2> = Vec::new();
+    let mut last_t: Option<f64> = None;
+    for q in vis {
+        if q.ok {
+            if last_t.is_some_and(|lt| q.t - lt > 2.5) && line.len() > 1 {
+                clip.add(Shape::line(std::mem::take(&mut line), Stroke::new(1.5, ENF_C)));
+            }
+            line.push(pos2(x_of(q.t), y_of(q.hz)));
+            last_t = Some(q.t);
+        } else {
+            let y = y_of(q.hz).clamp(rect.top() + 2.0, rect.bottom() - 2.0);
+            clip.circle_filled(pos2(x_of(q.t), y), 1.5, DIM);
+        }
+    }
+    if line.len() > 1 {
+        clip.add(Shape::line(line, Stroke::new(1.5, ENF_C)));
+    }
+}
+
+/// Latest ENF reading, as text, in the slice panel.
+fn draw_enf_slice(p: &egui::Painter, rect: Rect, s: &Shared) {
+    p.rect_filled(rect, 0.0, FIELD);
+    let mut y = rect.top() + 8.0;
+    let mut line = |t: String, c: Color32| {
+        p.text(pos2(rect.left() + 6.0, y), Align2::LEFT_TOP, t, mono(10.5), c);
+        y += 16.0;
+    };
+    match s.enf_points.last() {
+        Some(q) => {
+            line(format!("{:.4} Hz", q.hz), if q.ok { ENF_C } else { DIM });
+            line(format!("{:+.1} mHz", (q.hz - q.nominal) * 1000.0), if q.ok { ENF_C } else { DIM });
+            line(format!("snr {:.0} dB", q.snr_db), DIM);
+            line(format!("harmonic {}", q.harmonic), DIM);
+            line(if q.ok { "used".into() } else { "flagged".into() }, DIM);
+        }
+        None => line("no readings".into(), DIM),
     }
 }
 
@@ -1745,6 +2279,13 @@ impl Session {
             ridges: Vec::new(),
             pending: Vec::new(),
             events: Vec::new(),
+            full_freqs: (0..=FULL_NFFT / 2).map(|i| i as f64 * PLAY_SR / FULL_NFFT as f64).collect(),
+            full_hist: Vec::new(),
+            full_t: Vec::new(),
+            enf_points: Vec::new(),
+            enf_segments: Vec::new(),
+            enf_nominal: None,
+            module_desc: Vec::new(),
             dsp_s: 0.0,
             audio_s: 0.0,
             wall_s: 0.0,

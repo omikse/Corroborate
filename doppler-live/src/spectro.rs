@@ -97,7 +97,9 @@ impl Frontend {
     /// Compute the next whitened frame into `out` (length `nb`) if enough samples are
     /// buffered. Returns the frame's centre time in seconds since the stream start.
     pub fn next_frame(&mut self, out: &mut [f32]) -> Option<f64> {
-        if self.pending.len() < self.nfft {
+        // A frame needs its window, and the step to the next frame must be buffered too
+        // (the step can be longer than the window, as in the coarse display layer).
+        if self.pending.len() < self.nfft.max(self.hop) {
             return None;
         }
         for (i, v) in self.input.iter_mut().enumerate() {
@@ -147,5 +149,26 @@ impl Frontend {
         let t = (self.frames as f64 * self.hop as f64 + self.nfft as f64 / 2.0) / self.sr;
         self.frames += 1;
         Some(t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hop_longer_than_window() {
+        // 1024-point window, 4000-sample step (the viewer's full-band display layer).
+        let mut fe = Frontend::new(16_000.0, 1024, 4000, 0.0, 8000.0);
+        let mut out = vec![0.0; fe.nb];
+        let mut frames = 0;
+        for _ in 0..40 {
+            fe.feed(&[0.1; 800]);
+            while fe.next_frame(&mut out).is_some() {
+                frames += 1;
+            }
+        }
+        // 32 000 samples, a frame every 4000 once 4000 are buffered: 8 frames.
+        assert_eq!(frames, 8);
     }
 }

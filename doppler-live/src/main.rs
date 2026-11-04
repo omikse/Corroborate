@@ -1,28 +1,31 @@
+use doppler_live::modules::{enf::Enf, planes::Planes};
 use doppler_live::synth::{render, Pass};
-use doppler_live::{ingest, timebase, Config, Detector, Event};
+use doppler_live::{ingest, timebase, Config, Finding, Module, INPUT_SR};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Instant;
 
 const USAGE: &str = "\
-doppler-live: detect aircraft Doppler curves in audio
+doppler-live: detection modules for audio (aircraft Doppler curves, mains-hum ENF)
 
 USAGE:
   doppler-live file <input> [--csv points.csv] [options]
-      Any WAV, or anything ffmpeg can decode (mp3, m4a, mp4, ...).
+      Any WAV, or anything ffmpeg can decode (mp3, m4a, mp4, mka, ...).
   doppler-live listen (--url <stream-or-file> | --stdin) [--events events.jsonl] [options]
-      Live: --url is decoded by ffmpeg; --stdin reads raw f32le mono at 4000 Hz, e.g.
-      ffmpeg -i <src> -ac 1 -ar 4000 -f f32le - | doppler-live listen --stdin
+      Live: --url is decoded by ffmpeg; --stdin reads raw f32le mono at 16000 Hz, e.g.
+      ffmpeg -i <src> -ac 1 -ar 16000 -f f32le - | doppler-live listen --stdin
   doppler-live synth <out.wav>
       Write a 10-minute test recording with two passes, a 60 Hz hum and noise.
 
 OPTIONS:
-  --snr <z>      minimum mean ridge z (default 2.0)
-  --rms <hz>     maximum fit misfit in Hz (default 1.0)
-  --fmin <hz> --fmax <hz>   analysis band (default 40-450)
-  --quiet        no progress on stderr
+  --modules <list>   comma-separated: planes, enf (default: planes,enf)
+  --snr <z>          planes: minimum mean ridge z (default 2.0)
+  --rms <hz>         planes: maximum fit misfit in Hz (default 1.0)
+  --fmin <hz> --fmax <hz>   planes: analysis band (default 40-450)
+  --quiet            no progress on stderr
 
-Events are printed as JSON lines on stdout.";
+Findings are printed as JSON lines on stdout, each with a \"module\" field.
+ENF = Electrical Network Frequency (the mains hum and its drift).";
 
 struct Args {
     cmd: String,
@@ -32,6 +35,7 @@ struct Args {
     stdin: bool,
     events: String,
     quiet: bool,
+    modules: String,
     cfg: Config,
 }
 
@@ -46,6 +50,7 @@ fn parse() -> Result<Args, String> {
         stdin: false,
         events: "events.jsonl".into(),
         quiet: false,
+        modules: "planes,enf".into(),
         cfg: Config::default(),
     };
     let num = |v: Option<String>, name: &str| -> Result<f64, String> {
@@ -58,6 +63,7 @@ fn parse() -> Result<Args, String> {
             "--csv" => a.csv = Some(it.next().ok_or("--csv needs a path")?),
             "--url" => a.url = Some(it.next().ok_or("--url needs a value")?),
             "--events" => a.events = it.next().ok_or("--events needs a path")?,
+            "--modules" => a.modules = it.next().ok_or("--modules needs a list")?,
             "--stdin" => a.stdin = true,
             "--quiet" => a.quiet = true,
             "--snr" => a.cfg.snr_min = num(it.next(), "--snr")?,
@@ -70,6 +76,21 @@ fn parse() -> Result<Args, String> {
         }
     }
     Ok(a)
+}
+
+/// The selected modules; planes uses the command-line detector settings.
+fn modules(a: &Args) -> Result<Vec<Box<dyn Module>>, String> {
+    a.modules
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|n| -> Result<Box<dyn Module>, String> {
+            match n.trim() {
+                "planes" => Ok(Box::new(Planes::new(a.cfg.clone()))),
+                "enf" => Ok(Box::new(Enf::new())),
+                other => Err(format!("unknown module '{other}' (available: planes, enf)")),
+            }
+        })
+        .collect()
 }
 
 fn main() {
@@ -94,43 +115,52 @@ fn main() {
 
 fn run_file(a: &Args) -> Result<(), String> {
     let input = a.pos.as_deref().ok_or("file: missing <input>")?;
-    let mut det = Detector::new(a.cfg.clone());
-    let mut events: Vec<Event> = Vec::new();
+    let mut mods = modules(a)?;
+    let mut found: Vec<Finding> = Vec::new();
     let mut n = 0usize;
     let t0 = Instant::now();
     let anchor = timebase::file_anchor(input);
     if !a.quiet {
+        for m in &mods {
+            eprintln!("{}", m.describe());
+        }
         match &anchor {
             Some(an) => eprintln!("UTC anchor: {} ({})", timebase::fmt_utc(an.utc0), an.source),
             None => eprintln!("no UTC anchor: times are relative to the start of the file"),
         }
     }
-    let mut on_chunk = |x: &[f32], det: &mut Detector, events: &mut Vec<Event>| {
+    let mut on_chunk = |x: &[f32], mods: &mut Vec<Box<dyn Module>>, found: &mut Vec<Finding>| {
         n += x.len();
-        for e in det.push(x) {
-            println!("{}", e.to_json(anchor.as_ref()));
-            events.push(e);
+        for m in mods.iter_mut() {
+            for f in m.push(x) {
+                println!("{}", f.to_json(anchor.as_ref()));
+                found.push(f);
+            }
         }
     };
     if input.to_ascii_lowercase().ends_with(".wav") {
-        ingest::read_wav(input, a.cfg.sr, |x| on_chunk(x, &mut det, &mut events))?;
+        ingest::read_wav(input, INPUT_SR, |x| on_chunk(x, &mut mods, &mut found))?;
     } else {
-        let (mut child, rx) = ingest::spawn_ffmpeg(input, a.cfg.sr as u32)?;
+        let (mut child, rx) = ingest::spawn_ffmpeg(input, INPUT_SR as u32)?;
         for x in rx {
-            on_chunk(&x, &mut det, &mut events);
+            on_chunk(&x, &mut mods, &mut found);
         }
         let _ = child.wait();
     }
-    for e in det.flush() {
-        println!("{}", e.to_json(anchor.as_ref()));
-        events.push(e);
+    for m in mods.iter_mut() {
+        for f in m.flush() {
+            println!("{}", f.to_json(anchor.as_ref()));
+            found.push(f);
+        }
     }
-    let audio_s = n as f64 / a.cfg.sr;
+    let audio_s = n as f64 / INPUT_SR;
     let wall = t0.elapsed().as_secs_f64();
     if !a.quiet {
+        let count = |m: &str| found.iter().filter(|f| f.module() == m).count();
         eprintln!(
-            "{} event(s) in {:.1} min of audio; processed in {:.1} s ({:.0}x real time)",
-            events.len(),
+            "{} plane pass(es), {} ENF segment(s) in {:.1} min of audio; processed in {:.1} s ({:.0}x real time)",
+            count("planes"),
+            count("enf"),
             audio_s / 60.0,
             wall,
             audio_s / wall.max(1e-9)
@@ -139,9 +169,11 @@ fn run_file(a: &Args) -> Result<(), String> {
     if let Some(p) = &a.csv {
         let mut f = std::fs::File::create(p).map_err(|e| format!("{p}: {e}"))?;
         writeln!(f, "event_id,time_s,freq_hz").map_err(|e| e.to_string())?;
-        for e in &events {
-            for (t, fr) in &e.points {
-                writeln!(f, "{},{:.3},{:.3}", e.id, t, fr).map_err(|e| e.to_string())?;
+        for fd in &found {
+            if let Finding::Plane(e) = fd {
+                for (t, fr) in &e.points {
+                    writeln!(f, "{},{:.3},{:.3}", e.id, t, fr).map_err(|e| e.to_string())?;
+                }
             }
         }
     }
@@ -149,13 +181,14 @@ fn run_file(a: &Args) -> Result<(), String> {
 }
 
 fn run_listen(a: &Args) -> Result<(), String> {
+    let mut mods = modules(a)?;
     let anchor: timebase::SharedAnchor = Default::default();
     let (child, rx) = if let Some(u) = &a.url {
-        let (c, rx, first) = ingest::spawn_ffmpeg_logged(u, a.cfg.sr as u32, None)?;
+        let (c, rx, first) = ingest::spawn_ffmpeg_logged(u, INPUT_SR as u32, None)?;
         timebase::upgrade_from_hls(u.clone(), first, anchor.clone(), 0.0);
         (Some(c), rx)
     } else if a.stdin {
-        (None, ingest::spawn_stdin((a.cfg.sr / 4.0) as usize))
+        (None, ingest::spawn_stdin((INPUT_SR / 20.0) as usize))
     } else {
         return Err("listen: give --url <source> or --stdin".into());
     };
@@ -164,12 +197,14 @@ fn run_listen(a: &Args) -> Result<(), String> {
         .append(true)
         .open(&a.events)
         .map_err(|e| format!("{}: {e}", a.events))?;
-    let mut det = Detector::new(a.cfg.clone());
     let mut n = 0usize;
     let mut last = Instant::now();
     let mut last_src: Option<String> = None;
     if !a.quiet {
-        eprintln!("listening; warm-up {:.0} s, events also appended to {}", a.cfg.warmup_s, a.events);
+        for m in &mods {
+            eprintln!("{}", m.describe());
+        }
+        eprintln!("listening; planes warm-up {:.0} s; findings also appended to {}", a.cfg.warmup_s, a.events);
     }
     for x in rx {
         if n == 0 {
@@ -187,29 +222,38 @@ fn run_listen(a: &Args) -> Result<(), String> {
                         "UTC anchor: start = {} ({}); lag behind this PC's clock ≈ {:.1} s",
                         timebase::fmt_utc(cur.utc0),
                         cur.source,
-                        timebase::now_unix() - cur.utc(n as f64 / a.cfg.sr)
+                        timebase::now_unix() - cur.utc(n as f64 / INPUT_SR)
                     );
                     last_src = Some(cur.source.clone());
                 }
             }
         }
         n += x.len();
-        for e in det.push(&x) {
-            let j = e.to_json(anchor.lock().unwrap().as_ref());
-            println!("{j}");
-            let _ = writeln!(log, "{j}");
-            let _ = log.flush();
+        for m in mods.iter_mut() {
+            for f in m.push(&x) {
+                let j = f.to_json(anchor.lock().unwrap().as_ref());
+                println!("{j}");
+                let _ = writeln!(log, "{j}");
+                let _ = log.flush();
+            }
         }
         if !a.quiet && last.elapsed().as_secs() >= 60 {
             last = Instant::now();
-            eprintln!("… {:.1} min of audio processed", n as f64 / a.cfg.sr / 60.0);
+            eprintln!("… {:.1} min of audio processed", n as f64 / INPUT_SR / 60.0);
+        }
+    }
+    for m in mods.iter_mut() {
+        for f in m.flush() {
+            let j = f.to_json(anchor.lock().unwrap().as_ref());
+            println!("{j}");
+            let _ = writeln!(log, "{j}");
         }
     }
     if let Some(mut c) = child {
         let _ = c.wait();
     }
     if !a.quiet {
-        eprintln!("stream ended after {:.1} min", n as f64 / a.cfg.sr / 60.0);
+        eprintln!("stream ended after {:.1} min", n as f64 / INPUT_SR / 60.0);
     }
     Ok(())
 }
@@ -228,6 +272,6 @@ fn run_synth(a: &Args) -> Result<(), String> {
         w.write_sample(s).map_err(|e| e.to_string())?;
     }
     w.finalize().map_err(|e| e.to_string())?;
-    eprintln!("wrote {out}: passes at t=200 s (f0 105 Hz) and t=430 s (f0 88 Hz)");
+    eprintln!("wrote {out}: passes at t=200 s (f0 105 Hz) and t=430 s (f0 88 Hz), 60 Hz hum");
     Ok(())
 }
