@@ -804,13 +804,29 @@ struct App {
     autostart_audio: bool,
 }
 
-/// Fonts and chrome colours for the current light/dark setting.
+/// Use the fonts Windows apps use: Segoe UI for interface text, Consolas for fixed-width
+/// data. Read from the system font folder at startup (nothing bundled); egui's built-in
+/// fonts remain as fallback, e.g. on other systems.
+fn install_system_fonts(ctx: &egui::Context) {
+    let dir = std::env::var_os("WINDIR")
+        .map(|w| std::path::PathBuf::from(w).join("Fonts"))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\Fonts"));
+    let mut fonts = egui::FontDefinitions::default();
+    let mut add = |name: &str, file: &str, family: FontFamily| {
+        if let Ok(bytes) = std::fs::read(dir.join(file)) {
+            fonts.font_data.insert(name.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+            fonts.families.entry(family).or_default().insert(0, name.to_owned());
+        }
+    };
+    add("Segoe UI", "segoeui.ttf", FontFamily::Proportional);
+    add("Consolas", "consola.ttf", FontFamily::Monospace);
+    ctx.set_fonts(fonts);
+}
+
+/// Chrome colours for the current light/dark setting.
 fn apply_theme(ctx: &egui::Context) {
     ctx.set_theme(if light() { egui::Theme::Light } else { egui::Theme::Dark });
     ctx.all_styles_mut(|style| {
-        for (_, f) in style.text_styles.iter_mut() {
-            f.family = FontFamily::Monospace;
-        }
         style.visuals.panel_fill = panel();
         style.visuals.window_fill = panel();
         style.visuals.extreme_bg_color = bg();
@@ -820,6 +836,7 @@ fn apply_theme(ctx: &egui::Context) {
 
 impl App {
     fn new(cc: &eframe::CreationContext, sess: Session) -> Self {
+        install_system_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
         let smooth = sess.ctl.smooth.load(Ordering::Relaxed);
         Self {
@@ -998,6 +1015,12 @@ impl App {
     }
 }
 
+/// Interface text (Segoe UI on Windows).
+fn ui_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Proportional)
+}
+
+/// Fixed-width data: times, numbers, the pass table (Consolas on Windows).
 fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
 }
@@ -1071,7 +1094,7 @@ impl eframe::App for App {
                                 .changed();
                             ui.label(
                                 egui::RichText::new("Sources that cannot be copied raw are always saved as WAV.")
-                                    .font(mono(10.5))
+                                    .font(ui_font(11.5))
                                     .color(DIM),
                             );
                         });
@@ -1090,7 +1113,7 @@ impl eframe::App for App {
                     });
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("Changes apply to the next recording.").font(mono(10.5)).color(DIM),
+                        egui::RichText::new("Changes apply to the next recording.").font(ui_font(11.5)).color(DIM),
                     );
                 });
             if browse {
@@ -1211,13 +1234,13 @@ impl eframe::App for App {
         let audio_err = self.audio_err.clone();
         egui::Panel::top("top").frame(egui::Frame::new().fill(bg()).inner_margin(8.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("DOPPLER-LIVE").font(mono(15.0)).color(accent()).strong());
+                ui.label(egui::RichText::new("DOPPLER-LIVE").font(ui_font(15.0)).color(accent()).strong());
                 ui.add_space(12.0);
-                ui.checkbox(&mut smooth, egui::RichText::new("smooth").font(mono(12.0))).on_hover_text(
+                ui.checkbox(&mut smooth, egui::RichText::new("smooth").font(ui_font(13.0))).on_hover_text(
                     "On: live streams play out through a 4 s buffer and the view scrolls between 0.25 s frames.\n\
                      Off (raw): data is shown exactly as it arrives, bursts and steps included.",
                 );
-                ui.checkbox(&mut audio, egui::RichText::new("audio").font(mono(12.0))).on_hover_text(if is_file {
+                ui.checkbox(&mut audio, egui::RichText::new("audio").font(ui_font(13.0))).on_hover_text(if is_file {
                     "Play from the playhead (click the spectrogram to set it)."
                 } else {
                     "Play the stream as received."
@@ -1297,7 +1320,7 @@ impl eframe::App for App {
                     span,
                     if is_file { "follow" } else { "live" }
                 ))
-                .font(mono(11.0))
+                .font(ui_font(12.0))
                 .color(DIM),
             );
         });
@@ -1305,8 +1328,8 @@ impl eframe::App for App {
         // ------------------------------------------------ event list
         let mut snap: Option<(u64, f64)> = None;
         egui::Panel::right("events").exact_size(330.0).frame(egui::Frame::new().fill(panel()).inner_margin(10.0)).show(ui, |ui| {
-            ui.label(egui::RichText::new("DETECTED PASSES").font(mono(13.0)).color(text()).strong());
-            ui.label(egui::RichText::new("click a pass to jump to it").font(mono(10.5)).color(DIM));
+            ui.label(egui::RichText::new("DETECTED PASSES").font(ui_font(14.0)).color(text()).strong());
+            ui.label(egui::RichText::new("click a pass to jump to it").font(ui_font(11.5)).color(DIM));
             ui.add_space(4.0);
             ui.label(egui::RichText::new(" #  T_CPA     f0     v     d    grade").font(mono(11.0)).color(DIM));
             ui.separator();
