@@ -1,0 +1,8 @@
+[package]
+name = "doppler-live"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hound = "3.5.1"
+realfft = "3.5.1"
