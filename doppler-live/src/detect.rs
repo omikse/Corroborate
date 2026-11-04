@@ -170,6 +170,8 @@ pub struct Detector {
     /// Recently reported passes, to suppress repeats, harmonics and tails.
     recent: Vec<Event>,
     next_id: u64,
+    /// Bright ridge runs (≥ 5 s) from the latest search, as (t, Hz), for display.
+    ridges: Vec<Vec<(f64, f64)>>,
 }
 
 impl Detector {
@@ -197,15 +199,37 @@ impl Detector {
             pending: Vec::new(),
             recent: Vec::new(),
             next_id: 1,
+            ridges: Vec::new(),
             cfg,
         }
     }
 
+    /// Ridge runs found by the most recent search (for display).
+    pub fn ridges(&self) -> &[Vec<(f64, f64)>] {
+        &self.ridges
+    }
+
+    /// Frequency of each bin in a frame handed to `push_with`.
+    pub fn bin_freqs(&self) -> Vec<f64> {
+        (0..self.nb).map(|i| self.fe.bin_hz(i as f64)).collect()
+    }
+
+    /// Candidates being held before they are reported (for display).
+    pub fn pending(&self) -> impl Iterator<Item = &Event> {
+        self.pending.iter().map(|(e, _)| e)
+    }
+
     /// Feed samples (mono, `cfg.sr`). Returns any newly confirmed passes.
     pub fn push(&mut self, x: &[f32]) -> Vec<Event> {
+        self.push_with(x, |_, _| {})
+    }
+
+    /// As `push`, also handing each whitened frame (time, z per bin) to `on_frame`.
+    pub fn push_with(&mut self, x: &[f32], mut on_frame: impl FnMut(f64, &[f32])) -> Vec<Event> {
         self.fe.feed(x);
         let mut out = Vec::new();
         while let Some(t) = self.fe.next_frame(&mut self.frame) {
+            on_frame(t, &self.frame);
             let h = self.head;
             self.ring[h * self.nb..(h + 1) * self.nb].copy_from_slice(&self.frame);
             self.times[h] = t;
@@ -245,6 +269,7 @@ impl Detector {
         let gap = (self.cfg.gap_s * fps) as usize;
         let min_len = (self.cfg.min_dur_s * fps) as usize;
         let mut found = Vec::new();
+        self.ridges.clear();
 
         for _ in 0..self.cfg.max_paths {
             self.vit.run(&self.work[..t * nb], t, nb, self.cfg.max_jump, self.cfg.lambda, &mut self.path);
@@ -252,6 +277,12 @@ impl Detector {
             let sm = moving_avg(&pz, smooth_n);
 
             for (a, b) in runs(&sm, self.cfg.run_z, gap) {
+                if (b - a) as f64 >= 5.0 * fps {
+                    let r = (a..b)
+                        .map(|k| (self.wtimes[k], self.fe.bin_hz(self.path[k] as f64)))
+                        .collect();
+                    self.ridges.push(r);
+                }
                 if debug() {
                     eprintln!(
                         "[dbg] win end {:.0}s run {:.0}-{:.0}s len {:.0}s",

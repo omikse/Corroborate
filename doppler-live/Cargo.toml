@@ -2,7 +2,21 @@
 name = "doppler-live"
 version = "0.1.0"
 edition = "2024"
+default-run = "doppler-live"
 
 [dependencies]
 hound = "3.5.1"
 realfft = "3.5.1"
+# Viewer only (`--features gui`); the detector binary does not link it.
+eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[features]
+gui = ["dep:eframe"]
+
+[[bin]]
+name = "doppler-view"
+path = "src/bin/doppler-view.rs"
+required-features = ["gui"]
+
+[profile.release]
+lto = "thin"

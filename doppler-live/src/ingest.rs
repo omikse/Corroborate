@@ -134,8 +134,18 @@ pub fn read_wav(path: &str, sr_out: f64, mut f: impl FnMut(&[f32])) -> Result<()
 /// Decode `input` (file path or URL) with ffmpeg to f32 mono at `sr` and deliver chunks of
 /// about 0.25 s over a bounded channel from a reader thread.
 pub fn spawn_ffmpeg(input: &str, sr: u32) -> Result<(Child, Receiver<Vec<f32>>), String> {
-    let mut child = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i", input])
+    spawn_ffmpeg_from(input, sr, None)
+}
+
+/// As `spawn_ffmpeg`, optionally seeking to `start_s` seconds first.
+pub fn spawn_ffmpeg_from(input: &str, sr: u32, start_s: Option<f64>) -> Result<(Child, Receiver<Vec<f32>>), String> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    if let Some(s) = start_s {
+        cmd.args(["-ss", &format!("{s:.3}")]);
+    }
+    let mut child = cmd
+        .args(["-i", input])
         .args(["-vn", "-ac", "1", "-ar", &sr.to_string(), "-f", "f32le", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
