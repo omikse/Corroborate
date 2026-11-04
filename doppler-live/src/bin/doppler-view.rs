@@ -866,7 +866,7 @@ struct App {
     lut: [[u8; 4]; 256],
     tex: Option<TextureHandle>,
     /// (frames_total, right-edge frame index) the texture was built for.
-    tex_key: (u64, usize),
+    tex_key: (u64, usize, usize),
     img: Vec<u8>,
     /// Open-stream dialog: shown, link typed, link being resolved, last error.
     stream_dialog: bool,
@@ -880,13 +880,28 @@ struct App {
     autostart_audio: bool,
     /// Full-band layer texture.
     tex_full: Option<TextureHandle>,
-    tex_full_key: (u64, usize),
+    tex_full_key: (u64, usize, usize),
     img_full: Vec<u8>,
     /// Frequency view: span (zoom) and centre (position), Hz; or the ENF drift graph.
     fspan: f64,
     fcenter: f64,
     plot_enf: bool,
     selected_enf: Option<u64>,
+    /// Visible time span (s): Ctrl+wheel zooms it.
+    tspan: f64,
+    /// Frequency bar drag in progress: what is being dragged.
+    fbar_drag: Option<FbarDrag>,
+}
+
+/// What a drag on the frequency bar moves.
+#[derive(Clone, Copy)]
+enum FbarDrag {
+    /// The whole view; the bar position (0–1) grabbed, relative to the view's centre.
+    Move(f32),
+    /// The top edge (upper frequency).
+    Top,
+    /// The bottom edge (lower frequency).
+    Bottom,
 }
 
 /// Fonts and chrome colours for the current light/dark setting.
@@ -922,7 +937,7 @@ impl App {
             selected: None,
             lut: colormap_lut(),
             tex: None,
-            tex_key: (u64::MAX, usize::MAX),
+            tex_key: (u64::MAX, usize::MAX, 0),
             img: Vec::new(),
             stream_dialog: false,
             stream_url: String::new(),
@@ -932,12 +947,14 @@ impl App {
             rec_dialog: false,
             autostart_audio: true,
             tex_full: None,
-            tex_full_key: (u64::MAX, usize::MAX),
+            tex_full_key: (u64::MAX, usize::MAX, 0),
             img_full: Vec::new(),
             fspan: 410.0,
             fcenter: 245.0,
             plot_enf: false,
             selected_enf: None,
+            tspan: 160.0,
+            fbar_drag: None,
         }
     }
 
@@ -972,8 +989,8 @@ impl App {
         self.selected = None;
         self.audio_err = None;
         self.open_error = None;
-        self.tex_key = (u64::MAX, usize::MAX);
-        self.tex_full_key = (u64::MAX, usize::MAX);
+        self.tex_key = (u64::MAX, usize::MAX, 0);
+        self.tex_full_key = (u64::MAX, usize::MAX, 0);
         self.selected_enf = None;
     }
 
@@ -1255,16 +1272,44 @@ impl eframe::App for App {
         let s = sh.lock().unwrap();
         let nb = s.freqs.len();
         let (fmin, fmax) = (s.freqs[0], s.freqs[nb - 1]);
-        let span = s.cols as f64 * HOP_S;
+        let window = s.cols as f64 * HOP_S;
         let t_first = s.hist_t.first().copied().unwrap_or(0.0);
         let is_file = self.sess.file.is_some();
+        // Time zoom: 10 s up to everything kept (files, REC), or the live window (live keeps only that).
+        let t_max = if is_file || self.record { (s.now - t_first).max(window) } else { window };
+        self.tspan = self.tspan.clamp(10.0, t_max);
+        let span = self.tspan;
         // Record only keeps the timeline for live sources; recording state comes back from the worker.
         if s.live && self.record && s.rec_path.is_none() && !s.status.is_empty() && s.status.starts_with("record:") {
             self.record = false;
         }
 
-        if ctx.input(|i| i.key_pressed(Key::End)) {
-            self.follow = true;
+        // Keys (not while typing in a text field): Home/0 start, End live or end,
+        // Page Up/Down move the frequency view by most of its height.
+        if !ctx.egui_wants_keyboard_input() {
+            let (home, end, pg_up, pg_dn) = ctx.input(|i| {
+                (
+                    i.key_pressed(Key::Home) || i.key_pressed(Key::Num0),
+                    i.key_pressed(Key::End),
+                    i.key_pressed(Key::PageUp),
+                    i.key_pressed(Key::PageDown),
+                )
+            });
+            if home {
+                self.follow = false;
+                self.view_right = t_first + span;
+            }
+            if end {
+                self.follow = true;
+            }
+            if !self.plot_enf {
+                if pg_up {
+                    self.fcenter += self.fspan * 0.9;
+                }
+                if pg_dn {
+                    self.fcenter -= self.fspan * 0.9;
+                }
+            }
         }
 
         // View: right-edge time.
@@ -1292,14 +1337,22 @@ impl eframe::App for App {
         let (f_lo, f_hi) = (self.fcenter - self.fspan / 2.0, self.fcenter + self.fspan / 2.0);
         let zoomed = self.fspan < FULL_MAX * 0.95;
 
-        // Two layers, each the last `cols` frames up to t_right: the planes module's fine
+        // Two layers, each the frames of the visible span up to t_right: the planes module's fine
         // spectrogram (40–450 Hz, 0.49 Hz bins) and the coarse full band (0–8 kHz, 15.6 Hz bins).
-        let follow_key = if self.follow { s.frames_total } else { 0 };
+        // Zoomed out past MAX_TEX_W frames, each column is the maximum of `stride` frames, so short
+        // bright tones still show. Groups are aligned to fixed frame indices so columns do not shimmer.
+        let frames_view = ((span / HOP_S).ceil() as usize).max(1);
+        let stride = frames_view.div_ceil(MAX_TEX_W).max(1);
+        let ncol = frames_view.div_ceil(stride);
+        let tex_frames = (ncol * stride) as f64;
+        // Live without REC trims old frames, so indices shift: key on the frame count too.
+        let follow_key = if self.follow && stride == 1 { s.frames_total } else { 0 };
         let idx_r = s.hist_t.partition_point(|&t| t <= t_right);
-        if (follow_key, idx_r) != self.tex_key || self.tex.is_none() {
-            self.tex_key = (follow_key, idx_r);
-            fill_image(&mut self.img, &self.lut, &s.hist, nb, s.cols, idx_r);
-            let image = ColorImage::from_rgba_unmultiplied([s.cols, nb], &self.img);
+        let idx_r = idx_r - idx_r % stride;
+        if (follow_key, idx_r, ncol * stride) != self.tex_key || self.tex.is_none() {
+            self.tex_key = (follow_key, idx_r, ncol * stride);
+            fill_image(&mut self.img, &self.lut, &s.hist, nb, ncol, stride, idx_r);
+            let image = ColorImage::from_rgba_unmultiplied([ncol, nb], &self.img);
             match &mut self.tex {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
                 None => self.tex = Some(ctx.load_texture("spec", image, TextureOptions::LINEAR)),
@@ -1308,10 +1361,11 @@ impl eframe::App for App {
         let t_img = if idx_r > 0 { s.hist_t[idx_r - 1] } else { t_right };
         let fnb = s.full_freqs.len();
         let idx_full = s.full_t.partition_point(|&t| t <= t_right);
-        if (follow_key, idx_full) != self.tex_full_key || self.tex_full.is_none() {
-            self.tex_full_key = (follow_key, idx_full);
-            fill_image(&mut self.img_full, &self.lut, &s.full_hist, fnb, s.cols, idx_full);
-            let image = ColorImage::from_rgba_unmultiplied([s.cols, fnb], &self.img_full);
+        let idx_full = idx_full - idx_full % stride;
+        if (follow_key, idx_full, ncol * stride) != self.tex_full_key || self.tex_full.is_none() {
+            self.tex_full_key = (follow_key, idx_full, ncol * stride);
+            fill_image(&mut self.img_full, &self.lut, &s.full_hist, fnb, ncol, stride, idx_full);
+            let image = ColorImage::from_rgba_unmultiplied([ncol, fnb], &self.img_full);
             match &mut self.tex_full {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
                 None => self.tex_full = Some(ctx.load_texture("spec_full", image, TextureOptions::LINEAR)),
@@ -1405,7 +1459,7 @@ impl eframe::App for App {
             ui.label(
                 egui::RichText::new(format!(
                     "time: {basis}  │  detector {:.0} Hz  │  band {:.0}–{:.0} Hz  │  Δf {:.2} Hz  │  view {:.0} s  │  timeline {hist}  │  \
-                     ridge ┄ cyan  │  candidate ┄ white  │  wheel/bar: scroll  End: {}",
+                     ridge ┄ cyan  │  candidate ┄ white  │  wheel: zoom Hz  Alt: move Hz  Ctrl: zoom time  Shift: scroll time  PgUp/PgDn  Home/0  End: {}",
                     s.sr,
                     fmin,
                     fmax,
@@ -1423,124 +1477,118 @@ impl eframe::App for App {
         let mut snap_enf: Option<(u64, f64)> = None;
         let mut view_act: Option<ViewAct> = None;
         egui::Panel::right("modules").exact_size(340.0).frame(egui::Frame::new().fill(panel()).inner_margin(10.0)).show(ui, |ui| {
-            let avail_h = ui.available_height();
+            // One framed box per module, sharing the height equally.
+            let gap = 10.0;
+            let box_h = ((ui.available_height() - gap) / 2.0).max(140.0);
+            let w = ui.available_width();
+            let planes_what = "aircraft Doppler curves · 40–450 Hz";
+            if module_box(ui, vec2(w, box_h), "PLANES", planes_what, HIGH, |ui| {
+                ui.label(egui::RichText::new("click a pass to jump to it").font(mono(10.5)).color(DIM));
+                ui.label(egui::RichText::new(" #  T_CPA     f0     v     d    grade").font(mono(11.0)).color(DIM));
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("planes_list")
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for e in &s.events {
+                            let sel = self.selected == Some(e.id);
+                            let line = format!(
+                                "{}{:>2}  {}  {:5.1}  {:3.0}  {:4.1}k  {}",
+                                if sel { "▸" } else { " " },
+                                e.id,
+                                stamp(&s, e.t_cpa),
+                                e.f0,
+                                e.speed,
+                                e.dist / 1000.0,
+                                e.grade()
+                            );
+                            let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
+                            let r = ui
+                                .vertical(|ui| {
+                                    ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_text(e.grade())));
+                                    ui.label(egui::RichText::new(detail).font(mono(10.5)).color(DIM));
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if r.hovered() {
+                                ui.painter().rect_stroke(r.rect.expand(2.0), 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                            }
+                            if r.clicked() {
+                                snap = Some((e.id, e.t_cpa));
+                            }
+                        }
+                        if s.events.is_empty() {
+                            ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listening…" }).color(DIM));
+                        }
+                    });
 
-            // PLANES
-            let head = ui.add(
-                egui::Label::new(egui::RichText::new("PLANES  ▸ view").font(mono(13.0)).color(text()).strong())
-                    .sense(Sense::click()),
-            );
-            if head.on_hover_text("Aircraft Doppler curves. Click to show the plane band (40–450 Hz).").clicked() {
+            }) {
                 view_act = Some(ViewAct::Planes);
             }
-            ui.label(egui::RichText::new("click a pass to jump to it").font(mono(10.5)).color(DIM));
-            ui.label(egui::RichText::new(" #  T_CPA     f0     v     d    grade").font(mono(11.0)).color(DIM));
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("planes_list")
-                .max_height(avail_h * 0.45)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for e in &s.events {
-                        let sel = self.selected == Some(e.id);
-                        let line = format!(
-                            "{}{:>2}  {}  {:5.1}  {:3.0}  {:4.1}k  {}",
-                            if sel { "▸" } else { " " },
-                            e.id,
-                            stamp(&s, e.t_cpa),
-                            e.f0,
-                            e.speed,
-                            e.dist / 1000.0,
-                            e.grade()
-                        );
-                        let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
-                        let r = ui
-                            .vertical(|ui| {
-                                ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_text(e.grade())));
-                                ui.label(egui::RichText::new(detail).font(mono(10.5)).color(DIM));
-                            })
-                            .response
-                            .interact(Sense::click());
-                        if r.hovered() {
-                            ui.painter().rect_stroke(r.rect.expand(2.0), 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
-                        }
-                        if r.clicked() {
-                            snap = Some((e.id, e.t_cpa));
+            ui.add_space(gap);
+            let enf_what = "mains hum (Electrical Network Frequency)";
+            if module_box(ui, vec2(w, box_h), "ENF", enf_what, ENF_C, |ui| {
+                match s.enf_nominal {
+                    Some(n) => {
+                        ui.label(egui::RichText::new(grid_region(n)).font(mono(10.5)).color(DIM));
+                        if let Some(p) = s.enf_points.iter().rev().find(|p| p.ok) {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "now {:.4} Hz ({:+.1} mHz)  snr {:.0} dB  h{}",
+                                    p.hz,
+                                    (p.hz - n) * 1000.0,
+                                    p.snr_db,
+                                    p.harmonic
+                                ))
+                                .font(mono(11.5))
+                                .color(enf_text()),
+                            );
                         }
                     }
-                    if s.events.is_empty() {
-                        ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listening…" }).color(DIM));
+                    None => {
+                        ui.label(
+                            egui::RichText::new(if s.enf_points.is_empty() { "waiting for 16 s of audio…" } else { "no clear grid hum (yet)" })
+                                .font(mono(10.5))
+                                .color(DIM),
+                        );
+                    }
+                }
+                ui.label(egui::RichText::new(" #  start      dur    mean Hz   range mHz").font(mono(11.0)).color(DIM));
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt("enf_list").stick_to_bottom(true).show(ui, |ui| {
+                    for g in &s.enf_segments {
+                        let line = format!(
+                            "{:>2}  {}  {:4.0}s  {:.4}  {:+.0}..{:+.0}",
+                            g.id,
+                            stamp(&s, g.t_start),
+                            g.t_end - g.t_start,
+                            g.mean_hz,
+                            (g.min_hz - g.nominal) * 1000.0,
+                            (g.max_hz - g.nominal) * 1000.0
+                        );
+                        let r = ui
+                            .add(egui::Label::new(egui::RichText::new(line).font(mono(12.0)).color(enf_text())).sense(Sense::click()))
+                            .on_hover_text(format!("harmonic {} · mean SNR {:.1} dB · {} readings", g.harmonic, g.mean_snr_db, g.n_points));
+                        if r.clicked() {
+                            snap_enf = Some((g.id, 0.5 * (g.t_start + g.t_end)));
+                        }
+                    }
+                    if s.enf_segments.is_empty() {
+                        ui.label(egui::RichText::new("no runs of hum ≥ 30 s yet").font(mono(10.5)).color(DIM));
                     }
                 });
-
-            ui.add_space(10.0);
-            // ENF
-            let head = ui.add(
-                egui::Label::new(egui::RichText::new("ENF  ▸ view").font(mono(13.0)).color(text()).strong())
-                    .sense(Sense::click()),
-            );
-            if head
-                .on_hover_text("ENF (Electrical Network Frequency): mains hum and its drift. Click to show the drift graph.")
-                .clicked()
-            {
+            }) {
                 view_act = Some(ViewAct::Enf);
             }
-            match s.enf_nominal {
-                Some(n) => {
-                    ui.label(egui::RichText::new(grid_region(n)).font(mono(10.5)).color(DIM));
-                    if let Some(p) = s.enf_points.iter().rev().find(|p| p.ok) {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "now {:.4} Hz ({:+.1} mHz)  snr {:.0} dB  h{}",
-                                p.hz,
-                                (p.hz - n) * 1000.0,
-                                p.snr_db,
-                                p.harmonic
-                            ))
-                            .font(mono(11.5))
-                            .color(enf_text()),
-                        );
-                    }
-                }
-                None => {
-                    ui.label(
-                        egui::RichText::new(if s.enf_points.is_empty() { "waiting for 16 s of audio…" } else { "no clear grid hum (yet)" })
-                            .font(mono(10.5))
-                            .color(DIM),
-                    );
-                }
-            }
-            ui.label(egui::RichText::new(" #  start      dur    mean Hz   range mHz").font(mono(11.0)).color(DIM));
-            ui.separator();
-            egui::ScrollArea::vertical().id_salt("enf_list").stick_to_bottom(true).show(ui, |ui| {
-                for g in &s.enf_segments {
-                    let line = format!(
-                        "{:>2}  {}  {:4.0}s  {:.4}  {:+.0}..{:+.0}",
-                        g.id,
-                        stamp(&s, g.t_start),
-                        g.t_end - g.t_start,
-                        g.mean_hz,
-                        (g.min_hz - g.nominal) * 1000.0,
-                        (g.max_hz - g.nominal) * 1000.0
-                    );
-                    let r = ui
-                        .add(egui::Label::new(egui::RichText::new(line).font(mono(12.0)).color(enf_text())).sense(Sense::click()))
-                        .on_hover_text(format!("harmonic {} · mean SNR {:.1} dB · {} readings", g.harmonic, g.mean_snr_db, g.n_points));
-                    if r.clicked() {
-                        snap_enf = Some((g.id, 0.5 * (g.t_start + g.t_end)));
-                    }
-                }
-                if s.enf_segments.is_empty() {
-                    ui.label(egui::RichText::new("no runs of hum ≥ 30 s yet").font(mono(10.5)).color(DIM));
-                }
-            });
         });
 
         // ------------------------------------------------ main area
         let mut new_view: Option<f64> = None;
         let mut seek_to: Option<f64> = None;
         let mut go_live = false;
+        let mut new_tspan: Option<f64> = None;
         let (mut fcenter, mut fspan) = (self.fcenter, self.fspan);
+        let mut fbar_drag = self.fbar_drag;
         let plot_enf = self.plot_enf;
         let show_minimap = self.settings.minimap && zoomed && !plot_enf;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(bg()).inner_margin(10.0)).show(ui, |ui| {
@@ -1564,17 +1612,8 @@ impl eframe::App for App {
                     view_act = Some(ViewAct::Enf);
                 }
                 ui.add_space(12.0);
-                let mut zoom_pct = fspan / FULL_MAX * 100.0;
-                let r = ui.add_enabled(
-                    !plot_enf,
-                    egui::Slider::new(&mut zoom_pct, MIN_FSPAN / FULL_MAX * 100.0..=100.0)
-                        .logarithmic(true)
-                        .text("zoom")
-                        .custom_formatter(|v, _| format!("{:.1} %", v)),
-                );
-                if r.changed() {
-                    fspan = zoom_pct / 100.0 * FULL_MAX;
-                }
+                ui.label(egui::RichText::new(format!("time {}", fmt_span(span))).font(mono(11.0)))
+                    .on_hover_text("Visible time span. Ctrl+wheel zooms it; the box on the timeline bar shows it.");
                 ui.add_space(12.0);
                 let layer = if plot_enf {
                     "ENF drift graph · readings every 1 s (16 s windows)".to_string()
@@ -1589,7 +1628,9 @@ impl eframe::App for App {
 
             let rest = ui.available_size();
             let slice_w = 120.0;
-            let pos_w = 22.0;
+            let fbar_lbl = 30.0;
+            let fbar_w = 18.0;
+            let pos_w = fbar_lbl + fbar_w + 6.0;
             let axis_l = 56.0;
             let axis_b = 20.0;
             let bar_h = 16.0;
@@ -1598,7 +1639,10 @@ impl eframe::App for App {
                 pos2(area.left() + pos_w + axis_l, area.top()),
                 pos2(area.right() - slice_w - 10.0, area.bottom() - axis_b - bar_h - 8.0),
             );
-            let pos_rect = Rect::from_min_max(pos2(area.left(), spec_rect.top()), pos2(area.left() + pos_w, spec_rect.bottom()));
+            let fbar_rect = Rect::from_min_max(
+                pos2(area.left() + fbar_lbl, spec_rect.top()),
+                pos2(area.left() + fbar_lbl + fbar_w, spec_rect.bottom()),
+            );
             let slice_rect = Rect::from_min_max(pos2(spec_rect.right() + 10.0, spec_rect.top()), pos2(area.right(), spec_rect.bottom()));
             let bar_rect = Rect::from_min_max(pos2(spec_rect.left(), area.bottom() - bar_h), pos2(spec_rect.right(), area.bottom()));
             let live_rect = Rect::from_min_max(pos2(slice_rect.left(), bar_rect.top()), pos2(slice_rect.right(), bar_rect.bottom()));
@@ -1606,33 +1650,120 @@ impl eframe::App for App {
             let x_of = |t: f64| spec_rect.left() + ((t - t_left) / span) as f32 * spec_rect.width();
             let t_of = |x: f32| t_left + ((x - spec_rect.left()) / spec_rect.width()) as f64 * span;
 
-            // Position slider (frequency centre), beside the axis.
-            if !plot_enf {
-                let lo = fspan / 2.0;
-                let hi = FULL_MAX - fspan / 2.0;
-                let mut c = fcenter;
-                let r = ui.put(
-                    pos_rect,
-                    egui::Slider::new(&mut c, lo..=hi.max(lo + 1e-6)).vertical().show_value(false),
-                );
-                if r.on_hover_text("frequency position").changed() {
-                    fcenter = c;
+            // Frequency bar (left): the whole 0–8 kHz band on a log scale, findings marked, the box is
+            // the visible band. Drag the box to move, its top or bottom edge to zoom, click to centre.
+            let fb_y = |f: f64| fbar_rect.bottom() - fbar_u(f) as f32 * fbar_rect.height();
+            let fb_f = |y: f32| fbar_f(((fbar_rect.bottom() - y) / fbar_rect.height()) as f64);
+            let fb = ui.interact(fbar_rect, Id::unique("fbar"), if plot_enf { Sense::hover() } else { Sense::click_and_drag() });
+            let (box_top, box_bot) = (fb_y(f_hi), fb_y(f_lo));
+            if let Some(pp) = fb.interact_pointer_pos().or(fb.hover_pos()) {
+                let near_edge = (pp.y - box_top).abs() < 5.0 || (pp.y - box_bot).abs() < 5.0;
+                if !plot_enf && fb.hovered() {
+                    ui.ctx().set_cursor_icon(if near_edge { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::Grab });
+                }
+                if fb.drag_started() {
+                    fbar_drag = Some(if (pp.y - box_top).abs() < 5.0 {
+                        FbarDrag::Top
+                    } else if (pp.y - box_bot).abs() < 5.0 {
+                        FbarDrag::Bottom
+                    } else if pp.y > box_top && pp.y < box_bot {
+                        FbarDrag::Move(((fb_f(pp.y) - f_lo) / fspan) as f32)
+                    } else {
+                        fcenter = fb_f(pp.y);
+                        FbarDrag::Move(0.5)
+                    });
+                }
+                if fb.dragged() {
+                    let f = fb_f(pp.y);
+                    match fbar_drag {
+                        Some(FbarDrag::Top) => {
+                            let hi = f.max(f_lo + MIN_FSPAN);
+                            fspan = hi - f_lo;
+                            fcenter = f_lo + fspan / 2.0;
+                        }
+                        Some(FbarDrag::Bottom) => {
+                            let lo = f.min(f_hi - MIN_FSPAN);
+                            fspan = f_hi - lo;
+                            fcenter = lo + fspan / 2.0;
+                        }
+                        Some(FbarDrag::Move(frac)) => fcenter = f - frac as f64 * fspan + fspan / 2.0,
+                        None => {}
+                    }
+                }
+                if fb.clicked() && !(pp.y > box_top && pp.y < box_bot) {
+                    fcenter = fb_f(pp.y);
                 }
             }
+            if fb.drag_stopped() {
+                fbar_drag = None;
+            }
+            {
+                let p = ui.painter();
+                let dim = if plot_enf { 0.35 } else { 1.0 };
+                p.rect_filled(fbar_rect, 2.0, FIELD);
+                // The planes module's band, faint.
+                let pb = Rect::from_min_max(pos2(fbar_rect.left(), fb_y(s.freqs[nb - 1])), pos2(fbar_rect.right(), fb_y(s.freqs[0])));
+                p.rect_filled(pb, 0.0, GRID.gamma_multiply(0.6 * dim));
+                for g in &s.enf_segments {
+                    let y = fb_y(g.nominal * g.harmonic as f64);
+                    p.line_segment([pos2(fbar_rect.left() + 2.0, y), pos2(fbar_rect.right() - 2.0, y)], Stroke::new(2.0, ENF_C.gamma_multiply(dim)));
+                }
+                for e in &s.events {
+                    let (y0, y1) = (fb_y(e.f_pre), fb_y(e.f_post));
+                    let r = Rect::from_min_max(pos2(fbar_rect.left() + 3.0, y0.min(y1 - 2.0)), pos2(fbar_rect.right() - 3.0, y1));
+                    p.rect_filled(r, 0.0, grade_color(e.grade()).gamma_multiply(dim));
+                }
+                for f in [20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0] {
+                    let y = fb_y(f);
+                    p.line_segment([pos2(fbar_rect.left() - 3.0, y), pos2(fbar_rect.left(), y)], Stroke::new(1.0, DIM));
+                    let lbl = if f >= 1000.0 { format!("{:.0}k", f / 1000.0) } else { format!("{f:.0}") };
+                    p.text(pos2(fbar_rect.left() - 5.0, y), Align2::RIGHT_CENTER, lbl, mono(9.5), DIM);
+                }
+                if !plot_enf {
+                    let bx = Rect::from_min_max(pos2(fbar_rect.left(), box_top), pos2(fbar_rect.right(), box_bot.max(box_top + 3.0)));
+                    p.rect_stroke(bx, 1.0, Stroke::new(1.5, HEAD), egui::StrokeKind::Inside);
+                }
+                p.rect_stroke(fbar_rect, 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
+                p.text(pos2(fbar_rect.center().x, fbar_rect.top() - 2.0), Align2::CENTER_BOTTOM, "Hz", mono(9.5), DIM);
+            }
+            let fb_hover = fb.hovered();
 
-            // Mouse over the plot: wheel = time, Ctrl+wheel = zoom, Shift+wheel = frequency position;
-            // click (files) sets the playhead.
+            // Wheel over the plot or the bar: wheel = frequency zoom (at the pointer), Alt+wheel =
+            // frequency up/down, Ctrl+wheel = time span, Shift+wheel or sideways = time scroll.
+            // Click (files) sets the playhead.
             let spec_resp = ui.interact(spec_rect, Id::unique("spec"), Sense::click());
-            if spec_resp.hovered() {
-                let (d, mods) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
-                let dpx = if d.x.abs() > d.y.abs() { d.x } else { d.y };
-                if dpx != 0.0 {
-                    if mods.ctrl && !plot_enf {
-                        fspan = (fspan * (1.0 - dpx as f64 * 0.003)).clamp(MIN_FSPAN, FULL_MAX);
-                    } else if mods.shift && !plot_enf {
-                        fcenter += dpx as f64 / spec_rect.height() as f64 * fspan;
+            if spec_resp.hovered() || fb_hover {
+                let (d, zoom, alt, ptr) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt, i.pointer.hover_pos()));
+                let over_spec = spec_resp.hovered();
+                if zoom != 1.0 {
+                    let new = (span / zoom as f64).clamp(10.0, t_max);
+                    new_tspan = Some(new);
+                    if !self.follow {
+                        // Keep the time under the pointer where it is.
+                        let tc = match ptr {
+                            Some(pp) if over_spec => t_of(pp.x),
+                            _ => t_right - span / 2.0,
+                        };
+                        new_view = Some(tc + (t_right - tc) * new / span);
+                    }
+                }
+                if d.x != 0.0 {
+                    new_view = Some(t_right - d.x as f64 / spec_rect.width() as f64 * span);
+                }
+                if d.y != 0.0 {
+                    if plot_enf {
+                        new_view = Some(t_right - d.y as f64 / spec_rect.width() as f64 * span);
+                    } else if alt {
+                        fcenter += d.y as f64 / spec_rect.height() as f64 * fspan;
                     } else {
-                        new_view = Some(t_right + dpx as f64 / spec_rect.width() as f64 * span);
+                        let new = (fspan * (-(d.y as f64) * 0.004).exp()).clamp(MIN_FSPAN, FULL_MAX);
+                        // Keep the frequency under the pointer where it is.
+                        let fc = match ptr {
+                            Some(pp) if over_spec => f_lo + ((spec_rect.bottom() - pp.y) / spec_rect.height()) as f64 * fspan,
+                            _ => fcenter,
+                        };
+                        fcenter = fc + (fcenter - fc) * new / fspan;
+                        fspan = new;
                     }
                 }
             }
@@ -1654,7 +1785,7 @@ impl eframe::App for App {
                 // Coarse full band first, then the fine planes layer where it is sharper.
                 if let Some(t) = &self.tex_full {
                     let v = |f: f64| (1.0 - f / FULL_MAX) as f32;
-                    let rect = Rect::from_min_max(pos2(x_of(t_img_full - span + HOP_S), spec_rect.top()), pos2(x_of(t_img_full + HOP_S), spec_rect.bottom()));
+                    let rect = Rect::from_min_max(pos2(x_of(t_img_full - tex_frames * HOP_S + HOP_S), spec_rect.top()), pos2(x_of(t_img_full + HOP_S), spec_rect.bottom()));
                     clip.image(t.id(), rect, Rect::from_min_max(pos2(0.0, v(f_hi)), pos2(1.0, v(f_lo))), Color32::WHITE);
                 }
                 let (ff_lo, ff_hi) = (s.freqs[0], s.freqs[nb - 1]);
@@ -1662,7 +1793,7 @@ impl eframe::App for App {
                     if let Some(t) = &self.tex {
                         let (a, b) = (f_lo.max(ff_lo), f_hi.min(ff_hi));
                         let v = |f: f64| ((ff_hi - f) / (ff_hi - ff_lo)) as f32;
-                        let rect = Rect::from_min_max(pos2(x_of(t_img - span + HOP_S), y_of(b)), pos2(x_of(t_img + HOP_S), y_of(a)));
+                        let rect = Rect::from_min_max(pos2(x_of(t_img - tex_frames * HOP_S + HOP_S), y_of(b)), pos2(x_of(t_img + HOP_S), y_of(a)));
                         clip.image(t.id(), rect, Rect::from_min_max(pos2(0.0, v(b)), pos2(1.0, v(a))), Color32::WHITE);
                     }
                 }
@@ -1826,15 +1957,16 @@ impl eframe::App for App {
                 }
             }
 
-            // Time grid on absolute 20 s marks, so it moves with the data; labels are stream time.
-            let mut tg = (t_left / 20.0).ceil() * 20.0;
+            // Time grid on absolute marks, so it moves with the data; labels are stream time.
+            let tstep = time_step(span);
+            let mut tg = (t_left / tstep).ceil() * tstep;
             while tg <= t_right {
                 let x = x_of(tg);
                 p.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
                 if x > spec_rect.left() + 24.0 && x < spec_rect.right() - 40.0 {
                     p.text(pos2(x, spec_rect.bottom() + 4.0), Align2::CENTER_TOP, stamp(&s, tg), mono(10.5), DIM);
                 }
-                tg += 20.0;
+                tg += tstep;
             }
             let edge = if at_edge { "now".to_string() } else { format!("{} ◂", stamp(&s, t_right)) };
             p.text(pos2(spec_rect.right(), spec_rect.bottom() + 4.0), Align2::RIGHT_TOP, edge, mono(10.5), if at_edge { HIGH } else { MED });
@@ -1907,6 +2039,10 @@ impl eframe::App for App {
         });
         self.fcenter = fcenter;
         self.fspan = fspan;
+        self.fbar_drag = fbar_drag;
+        if let Some(v) = new_tspan {
+            self.tspan = v;
+        }
         match view_act {
             Some(ViewAct::Full) => {
                 self.plot_enf = false;
@@ -1999,6 +2135,8 @@ enum ViewAct {
 const FULL_MAX: f64 = 8000.0;
 /// Narrowest frequency view (Hz).
 const MIN_FSPAN: f64 = 20.0;
+/// Widest spectrogram texture (columns); wider time views pool frames.
+const MAX_TEX_W: usize = 2048;
 const ENF_C: Color32 = Color32::from_rgb(120, 170, 255);
 
 /// ENF colour for text on the window chrome.
@@ -2021,6 +2159,59 @@ fn fine_visible(fspan: f64, f_lo: f64, f_hi: f64, freqs: &[f64]) -> bool {
     fspan <= 2000.0 && f_hi > freqs[0] && f_lo < freqs[freqs.len() - 1]
 }
 
+/// A module's box in the right panel: a header strip (colour stripe, name, what it finds and
+/// a view button) above its own contents. Returns true when the view button was clicked.
+fn module_box(ui: &mut egui::Ui, size: egui::Vec2, title: &str, what: &str, col: Color32, body: impl FnOnce(&mut egui::Ui)) -> bool {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter().clone();
+    p.rect_filled(rect, 3.0, bg());
+    let head = Rect::from_min_size(rect.min, vec2(rect.width(), 34.0));
+    p.rect_filled(head, 3.0, col.gamma_multiply(0.14));
+    p.rect_filled(Rect::from_min_size(head.min, vec2(4.0, head.height())), 0.0, col);
+    p.line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, GRID));
+    p.text(head.min + vec2(12.0, 4.0), Align2::LEFT_TOP, title, mono(13.0), text());
+    p.text(head.min + vec2(12.0, 20.0), Align2::LEFT_TOP, what, mono(10.0), DIM);
+    let btn = Rect::from_min_size(pos2(head.right() - 64.0, head.top() + 7.0), vec2(56.0, 20.0));
+    let r = ui.interact(btn, Id::unique(("module_view", title)), Sense::click());
+    let bc = if r.hovered() { text() } else { DIM };
+    p.rect_stroke(btn, 2.0, Stroke::new(1.0, bc), egui::StrokeKind::Inside);
+    p.text(btn.center(), Align2::CENTER_CENTER, "view ▸", mono(10.5), bc);
+    let clicked = r.on_hover_text(format!("Show the {title} view")).clicked();
+    let inner = Rect::from_min_max(pos2(rect.left() + 8.0, head.bottom() + 6.0), pos2(rect.right() - 8.0, rect.bottom() - 6.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+    child.set_clip_rect(inner);
+    body(&mut child);
+    p.rect_stroke(rect, 3.0, Stroke::new(1.0, GRID), egui::StrokeKind::Inside);
+    clicked
+}
+
+/// Frequency bar scale: log from 10 Hz to 8 kHz, as a 0–1 position.
+fn fbar_u(f: f64) -> f64 {
+    ((f.max(10.0) / 10.0).ln() / (FULL_MAX / 10.0).ln()).clamp(0.0, 1.0)
+}
+
+/// Inverse of `fbar_u`.
+fn fbar_f(u: f64) -> f64 {
+    10.0 * ((FULL_MAX / 10.0).ln() * u.clamp(0.0, 1.0)).exp()
+}
+
+/// Time grid step (s) giving at most about 10 lines over `span`.
+fn time_step(span: f64) -> f64 {
+    const STEPS: [f64; 13] = [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0];
+    STEPS.iter().copied().find(|st| span / st <= 10.0).unwrap_or(7200.0)
+}
+
+/// A time span as "45 s", "8.0 min" or "1.50 h".
+fn fmt_span(t: f64) -> String {
+    if t < 120.0 {
+        format!("{t:.0} s")
+    } else if t < 7200.0 {
+        format!("{:.1} min", t / 60.0)
+    } else {
+        format!("{:.2} h", t / 3600.0)
+    }
+}
+
 /// A 1–2–5 step giving about `n` grid lines over `span`.
 fn nice_step(span: f64, n: f64) -> f64 {
     let raw = (span / n).max(1e-9);
@@ -2038,15 +2229,29 @@ fn nice_step(span: f64, n: f64) -> f64 {
     m * mag
 }
 
-/// Fill `img` (RGBA, `cols` × `nb`, high frequencies on top) from the last `cols` frames of
-/// `hist` ending before index `idx_r`; frames before the start are left dark.
-fn fill_image(img: &mut Vec<u8>, lut: &[[u8; 4]; 256], hist: &[u8], nb: usize, cols: usize, idx_r: usize) {
+/// Fill `img` (RGBA, `cols` × `nb`, high frequencies on top) from the `cols × stride` frames of
+/// `hist` ending before index `idx_r`. Each column is the maximum of its `stride` frames;
+/// frames before the start are left dark.
+fn fill_image(img: &mut Vec<u8>, lut: &[[u8; 4]; 256], hist: &[u8], nb: usize, cols: usize, stride: usize, idx_r: usize) {
     img.resize(cols * nb * 4, 0);
+    let mut col_max = vec![0u8; nb];
     for col in 0..cols {
-        let fi = idx_r as isize - cols as isize + col as isize;
+        let f0 = idx_r as isize - ((cols - col) * stride) as isize;
+        let mut any = false;
+        col_max.fill(0);
+        for k in 0..stride as isize {
+            let fi = f0 + k;
+            if fi < 0 {
+                continue;
+            }
+            any = true;
+            let row = &hist[fi as usize * nb..(fi as usize + 1) * nb];
+            for (m, &v) in col_max.iter_mut().zip(row) {
+                *m = (*m).max(v);
+            }
+        }
         for row in 0..nb {
-            let bin = nb - 1 - row;
-            let px = if fi >= 0 { lut[hist[fi as usize * nb + bin] as usize] } else { [4, 5, 8, 255] };
+            let px = if any { lut[col_max[nb - 1 - row] as usize] } else { [4, 5, 8, 255] };
             let i = (row * cols + col) * 4;
             img[i..i + 4].copy_from_slice(&px);
         }

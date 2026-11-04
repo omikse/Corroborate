@@ -60,8 +60,16 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
 - **smooth**: on, live streams play out through a 4 s buffer and the view scrolls between frames.
   Off is the raw view: data appears exactly as it arrives, network bursts and 0.25 s steps included.
 - **audio**: plays the sound as received. A choppy stream sounds choppy.
-- Scroll with the timeline bar or the mouse wheel. **End** or the LIVE / FOLLOW button returns to the
-  live edge.
+- Shortcuts (over the spectrogram or the frequency bar):
+  - **wheel**: zoom the frequency view, keeping the frequency under the pointer in place
+  - **Alt+wheel**: move the frequency view up or down
+  - **Ctrl+wheel**: zoom time, from 10 s up to the whole timeline (the box on the timeline bar scales with it)
+  - **Shift+wheel** or sideways scroll: scroll time
+  - **Page Up / Page Down**: move the frequency view by most of its height
+  - **Home** or **0**: go to the start of the timeline
+  - **End**: go to the live edge (or the end of a file); the LIVE / FOLLOW button does the same
+- Zoomed out past 2048 frames, each column of the spectrogram shows the maximum of the frames it
+  covers, so short bright tones stay visible.
 
 ### How it works
 
@@ -91,9 +99,11 @@ output how it processed it. Each module lives in its own file under `src/modules
   recording it identifies a 60 Hz grid (US) and tracks the drift within about ±40 mHz.
 
 The CLI picks modules with `--modules planes,enf` (the default). The viewer shows both:
-- The **PLANES** and **ENF** sections in the right panel jump to a finding, or switch to that module's view.
-- **view: full / planes / ENF**, a **zoom** slider and a vertical **position** slider choose the frequency band.
-  Ctrl+wheel zooms and Shift+wheel moves.
+- Each module has its own box in the right panel. Click a finding to jump to it; **view ▸** switches to
+  that module's view.
+- **view: full / planes / ENF** picks a band quickly. The **frequency bar** on the left shows the whole
+  0–8 kHz band on a log scale, with passes and hum marked. Its box is the visible band: drag the box to
+  move it, drag its top or bottom edge to zoom, or click outside it to centre there.
 - Findings outside the visible band show as ▲/▼ arrows on the edge.
 - The **minimap** (toggle in the top bar) shows the whole 0–8 kHz band while zoomed in.
 - ENF has its own drift graph, in mHz (millihertz) against the nominal frequency.
