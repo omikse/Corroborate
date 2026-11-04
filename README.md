@@ -43,6 +43,11 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
 
 ### Viewer controls
 
+- **Menu bar**: **Source ▸ Open file…** (native file dialog) or **Open stream…** (paste a URL; YouTube
+  links are resolved with yt-dlp). Opening a new source closes the current one cleanly. **Settings ▸
+  Theme** switches between dark and light. The plot areas stay dark in both themes.
+  `doppler-view` can also start with no arguments.
+
 - **Recordings**: analysed as fast as the machine allows, so the whole timeline can be scrolled
   straight away. Click the spectrogram to set the playhead, and tick **audio** to listen from there.
   Clicking a pass in the list jumps to it and plays from 20 s before its closest approach.

@@ -50,13 +50,40 @@ const HOP_S: f64 = 0.25;
 const Z_LO: f32 = -1.0;
 const Z_HI: f32 = 6.0;
 
-// Palette: near-black field, phosphor accents.
-const BG: Color32 = Color32::from_rgb(8, 9, 11);
-const PANEL: Color32 = Color32::from_rgb(13, 15, 18);
+// Palette. Plot areas (spectrogram, waveform, slice, timeline) are always a dark "screen"
+// with phosphor accents; the window chrome around them follows the light/dark setting.
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+fn light() -> bool {
+    LIGHT.load(Ordering::Relaxed)
+}
+fn bg() -> Color32 {
+    if light() { Color32::from_rgb(236, 238, 241) } else { Color32::from_rgb(8, 9, 11) }
+}
+fn panel() -> Color32 {
+    if light() { Color32::from_rgb(246, 247, 249) } else { Color32::from_rgb(13, 15, 18) }
+}
+fn text() -> Color32 {
+    if light() { Color32::from_rgb(28, 32, 38) } else { Color32::from_rgb(198, 206, 214) }
+}
+/// Accent for chrome text (title, live state): bright on dark, deep on light.
+fn accent() -> Color32 {
+    if light() { Color32::from_rgb(30, 120, 40) } else { HIGH }
+}
+/// Grade colours for text on the chrome (pass list); plot overlays use `grade_color`.
+fn grade_text(g: &str) -> Color32 {
+    if !light() {
+        return grade_color(g);
+    }
+    match g {
+        "high" => Color32::from_rgb(30, 120, 40),
+        "medium" => Color32::from_rgb(170, 100, 0),
+        _ => Color32::from_rgb(110, 110, 110),
+    }
+}
 const FIELD: Color32 = Color32::from_rgb(4, 5, 8);
 const GRID: Color32 = Color32::from_rgb(34, 38, 44);
 const DIM: Color32 = Color32::from_rgb(110, 118, 128);
-const TEXT: Color32 = Color32::from_rgb(198, 206, 214);
 const WAVE: Color32 = Color32::from_rgb(120, 220, 160);
 const RIDGE: Color32 = Color32::from_rgb(80, 200, 230);
 const HIGH: Color32 = Color32::from_rgb(140, 255, 90);
@@ -170,8 +197,10 @@ struct Controls {
     smooth: AtomicBool,
     /// Live only: feed the speakers from the stream.
     audio: AtomicBool,
-    /// Live only: keep the timeline and write a WAV.
+    /// Live only: keep the timeline and record the stream.
     record: AtomicBool,
+    /// Ask the worker to finish (source switched or closed).
+    stop: AtomicBool,
 }
 
 /// Samples at PLAY_SR waiting for the audio output.
@@ -395,6 +424,9 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
             }
         }
         for piece in x.chunks((PLAY_SR / 20.0) as usize) {
+            if ctl.stop.load(Ordering::Relaxed) {
+                return;
+            }
             if live && ctl.smooth.load(Ordering::Relaxed) {
                 let pos = Duration::from_secs_f64(n as f64 / PLAY_SR);
                 let buffer = Duration::from_secs_f64(LIVE_BUFFER_S);
@@ -515,6 +547,10 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                     timebase::upgrade_from_hls(p.clone(), first, anchor.clone(), 0.0);
                 }
                 for x in rx {
+                    if ctl.stop.load(Ordering::Relaxed) {
+                        let _ = child.kill();
+                        break;
+                    }
                     handle(&x, &mut det);
                 }
                 let _ = child.wait();
@@ -524,6 +560,9 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
         },
         Source::Stdin => {
             for x in ingest::spawn_stdin((PLAY_SR / 20.0) as usize) {
+                if ctl.stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 handle(&x, &mut det);
             }
             Ok(())
@@ -645,13 +684,19 @@ fn spawn_file_audio(path: String, from_s: f64, ring: Ring, stop: Arc<AtomicBool>
 
 // ---------------------------------------------------------------- app
 
+/// Menu choices, applied after the frame is drawn.
+enum Action {
+    OpenFile,
+    OpenStream,
+    Theme(bool),
+}
+
+/// A stream link being resolved by yt-dlp in the background: (link, result when done).
+type Resolving = (String, Arc<Mutex<Option<Result<String, String>>>>);
+
 struct App {
-    sh: Arc<Mutex<Shared>>,
-    ctl: Arc<Controls>,
-    ring: Ring,
+    sess: Session,
     played: Arc<AtomicU64>,
-    /// File path (for playback), or None for live sources.
-    file: Option<String>,
     player: Option<Player>,
     /// Files: playback feeder's stop flag.
     feeder: Option<Arc<AtomicBool>>,
@@ -670,27 +715,34 @@ struct App {
     /// (frames_total, right-edge frame index) the texture was built for.
     tex_key: (u64, usize),
     img: Vec<u8>,
+    /// Open-stream dialog: shown, link typed, link being resolved, last error.
+    stream_dialog: bool,
+    stream_url: String,
+    resolving: Option<Resolving>,
+    open_error: Option<String>,
+}
+
+/// Fonts and chrome colours for the current light/dark setting.
+fn apply_theme(ctx: &egui::Context) {
+    ctx.set_theme(if light() { egui::Theme::Light } else { egui::Theme::Dark });
+    ctx.all_styles_mut(|style| {
+        for (_, f) in style.text_styles.iter_mut() {
+            f.family = FontFamily::Monospace;
+        }
+        style.visuals.panel_fill = panel();
+        style.visuals.window_fill = panel();
+        style.visuals.extreme_bg_color = bg();
+        style.visuals.override_text_color = Some(text());
+    });
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, sh: Arc<Mutex<Shared>>, ctl: Arc<Controls>, ring: Ring, file: Option<String>) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
-        cc.egui_ctx.all_styles_mut(|style| {
-            for (_, f) in style.text_styles.iter_mut() {
-                f.family = FontFamily::Monospace;
-            }
-            style.visuals.panel_fill = PANEL;
-            style.visuals.window_fill = PANEL;
-            style.visuals.extreme_bg_color = BG;
-            style.visuals.override_text_color = Some(TEXT);
-        });
-        let smooth = ctl.smooth.load(Ordering::Relaxed);
+    fn new(cc: &eframe::CreationContext, sess: Session) -> Self {
+        apply_theme(&cc.egui_ctx);
+        let smooth = sess.ctl.smooth.load(Ordering::Relaxed);
         Self {
-            sh,
-            ctl,
-            ring,
+            sess,
             played: Arc::new(AtomicU64::new(0)),
-            file,
             player: None,
             feeder: None,
             smooth,
@@ -705,6 +757,76 @@ impl App {
             tex: None,
             tex_key: (u64::MAX, usize::MAX),
             img: Vec::new(),
+            stream_dialog: false,
+            stream_url: String::new(),
+            resolving: None,
+            open_error: None,
+        }
+    }
+
+    /// Close the current source and start analysing `src`.
+    fn switch(&mut self, src: Source, label: String) {
+        if self.audio {
+            self.stop_audio();
+            self.audio = false;
+        }
+        self.record = false;
+        self.sess.close();
+        self.sess = Session::open(src, label);
+        self.sess.ctl.smooth.store(self.smooth, Ordering::Relaxed);
+        self.play_from = 0.0;
+        self.follow = true;
+        self.view_right = 0.0;
+        self.selected = None;
+        self.audio_err = None;
+        self.open_error = None;
+        self.tex_key = (u64::MAX, usize::MAX);
+    }
+
+    fn open_file_dialog(&mut self) {
+        let pick = rfd::FileDialog::new()
+            .set_title("Open recording")
+            .add_filter("audio / video", &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "mka", "mkv", "webm", "mp4", "mov"])
+            .add_filter("all files", &["*"])
+            .pick_file();
+        if let Some(p) = pick {
+            let p = p.to_string_lossy().into_owned();
+            self.switch(source_for(&p, None), short_label(&p));
+        }
+    }
+
+    /// Start a typed stream link: YouTube pages via yt-dlp in the background, others directly.
+    fn open_stream(&mut self) {
+        let link = self.stream_url.trim().to_string();
+        if link.is_empty() {
+            return;
+        }
+        if needs_resolving(&link) {
+            let slot: Arc<Mutex<Option<Result<String, String>>>> = Default::default();
+            let (l, s) = (link.clone(), slot.clone());
+            thread::spawn(move || *s.lock().unwrap() = Some(resolve_with_ytdlp(&l)));
+            self.resolving = Some((link, slot));
+        } else {
+            self.stream_dialog = false;
+            self.switch(Source::Ffmpeg(link.clone(), None), short_label(&link));
+        }
+    }
+
+    /// Check on a yt-dlp resolve; open the stream when it is ready.
+    fn poll_resolving(&mut self) {
+        let done = match &self.resolving {
+            Some((link, slot)) => slot.lock().unwrap().take().map(|r| (link.clone(), r)),
+            None => None,
+        };
+        if let Some((link, r)) = done {
+            self.resolving = None;
+            match r {
+                Ok(url) => {
+                    self.stream_dialog = false;
+                    self.switch(Source::Ffmpeg(url, None), short_label(&link));
+                }
+                Err(e) => self.open_error = Some(e),
+            }
         }
     }
 
@@ -718,23 +840,23 @@ impl App {
         if let Some(f) = self.feeder.take() {
             f.store(true, Ordering::Relaxed);
         }
-        self.ctl.audio.store(false, Ordering::Relaxed);
+        self.sess.ctl.audio.store(false, Ordering::Relaxed);
         self.player = None;
-        self.ring.lock().unwrap().clear();
+        self.sess.ring.lock().unwrap().clear();
     }
 
     fn start_audio(&mut self, offset: f64) -> Result<(), String> {
-        self.ring.lock().unwrap().clear();
+        self.sess.ring.lock().unwrap().clear();
         self.played.store(0, Ordering::Relaxed);
-        if let Some(path) = self.file.clone() {
+        if let Some(path) = self.sess.file.clone() {
             let stop = Arc::new(AtomicBool::new(false));
-            spawn_file_audio(path, offset + self.play_from, self.ring.clone(), stop.clone());
+            spawn_file_audio(path, offset + self.play_from, self.sess.ring.clone(), stop.clone());
             self.feeder = Some(stop);
         } else {
-            self.ctl.audio.store(true, Ordering::Relaxed);
+            self.sess.ctl.audio.store(true, Ordering::Relaxed);
         }
         if self.player.is_none() {
-            self.player = Some(start_player(self.ring.clone(), self.played.clone())?);
+            self.player = Some(start_player(self.sess.ring.clone(), self.played.clone())?);
         }
         Ok(())
     }
@@ -755,11 +877,11 @@ impl App {
     fn apply_toggles(&mut self, smooth: bool, audio: bool, record: bool, offset: f64) {
         if smooth != self.smooth {
             self.smooth = smooth;
-            self.ctl.smooth.store(smooth, Ordering::Relaxed);
+            self.sess.ctl.smooth.store(smooth, Ordering::Relaxed);
         }
         if record != self.record {
             self.record = record;
-            self.ctl.record.store(record, Ordering::Relaxed);
+            self.sess.ctl.record.store(record, Ordering::Relaxed);
         }
         if audio != self.audio {
             if audio {
@@ -791,13 +913,83 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         ctx.request_repaint_after(Duration::from_millis(33));
-        let sh = self.sh.clone();
+        self.poll_resolving();
+
+        // ------------------------------------------------ menu bar
+        let mut action: Option<Action> = None;
+        egui::Panel::top("menu").frame(egui::Frame::new().fill(panel()).inner_margin(egui::Margin::symmetric(6, 2))).show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Source", |ui| {
+                    if ui.button("Open file…").clicked() {
+                        action = Some(Action::OpenFile);
+                        ui.close();
+                    }
+                    if ui.button("Open stream…").clicked() {
+                        action = Some(Action::OpenStream);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Settings", |ui| {
+                    ui.menu_button("Theme", |ui| {
+                        if ui.radio(!light(), "Dark").clicked() {
+                            action = Some(Action::Theme(false));
+                            ui.close();
+                        }
+                        if ui.radio(light(), "Light").clicked() {
+                            action = Some(Action::Theme(true));
+                            ui.close();
+                        }
+                    });
+                });
+            });
+        });
+
+        // ------------------------------------------------ open-stream dialog
+        if self.stream_dialog {
+            let mut open = true;
+            let mut go = false;
+            egui::Window::new("Open stream")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label("Stream URL: YouTube live link, HLS (.m3u8), Icecast, RTSP…");
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.stream_url).desired_width(520.0).hint_text("https://"));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        go = true;
+                    }
+                    ui.horizontal(|ui| {
+                        let busy = self.resolving.is_some();
+                        if ui.add_enabled(!busy, egui::Button::new("Open")).clicked() {
+                            go = true;
+                        }
+                        if busy {
+                            ui.spinner();
+                            ui.label("resolving with yt-dlp…");
+                        }
+                    });
+                    if let Some(e) = &self.open_error {
+                        ui.colored_label(MED, e);
+                    }
+                });
+            if go && self.resolving.is_none() {
+                self.open_error = None;
+                self.open_stream();
+            }
+            if !open {
+                self.stream_dialog = false;
+                self.resolving = None;
+            }
+        }
+
+        let sh = self.sess.sh.clone();
         let s = sh.lock().unwrap();
         let nb = s.freqs.len();
         let (fmin, fmax) = (s.freqs[0], s.freqs[nb - 1]);
         let span = s.cols as f64 * HOP_S;
         let t_first = s.hist_t.first().copied().unwrap_or(0.0);
-        let is_file = self.file.is_some();
+        let is_file = self.sess.file.is_some();
         // Record only keeps the timeline for live sources; recording state comes back from the worker.
         if s.live && self.record && s.rec_path.is_none() && !s.status.is_empty() && s.status.starts_with("record:") {
             self.record = false;
@@ -853,9 +1045,9 @@ impl eframe::App for App {
         // ------------------------------------------------ top bar
         let (mut smooth, mut audio, mut record) = (self.smooth, self.audio, self.record);
         let audio_err = self.audio_err.clone();
-        egui::Panel::top("top").frame(egui::Frame::new().fill(BG).inner_margin(8.0)).show(ui, |ui| {
+        egui::Panel::top("top").frame(egui::Frame::new().fill(bg()).inner_margin(8.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("DOPPLER-LIVE").font(mono(15.0)).color(HIGH).strong());
+                ui.label(egui::RichText::new("DOPPLER-LIVE").font(mono(15.0)).color(accent()).strong());
                 ui.add_space(12.0);
                 ui.checkbox(&mut smooth, egui::RichText::new("smooth").font(mono(12.0))).on_hover_text(
                     "On: live streams play out through a 4 s buffer and the view scrolls between 0.25 s frames.\n\
@@ -919,7 +1111,7 @@ impl eframe::App for App {
         });
 
         // ------------------------------------------------ bottom status
-        egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(BG).inner_margin(6.0)).show(ui, |ui| {
+        egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(bg()).inner_margin(6.0)).show(ui, |ui| {
             let df = s.freqs[1] - s.freqs[0];
             let hist = if is_file || self.record { fmt_clock(s.now - t_first) } else { "window only (REC to keep)".into() };
             let basis = match &s.anchor {
@@ -944,8 +1136,8 @@ impl eframe::App for App {
 
         // ------------------------------------------------ event list
         let mut snap: Option<(u64, f64)> = None;
-        egui::Panel::right("events").exact_size(330.0).frame(egui::Frame::new().fill(PANEL).inner_margin(10.0)).show(ui, |ui| {
-            ui.label(egui::RichText::new("DETECTED PASSES").font(mono(13.0)).color(TEXT).strong());
+        egui::Panel::right("events").exact_size(330.0).frame(egui::Frame::new().fill(panel()).inner_margin(10.0)).show(ui, |ui| {
+            ui.label(egui::RichText::new("DETECTED PASSES").font(mono(13.0)).color(text()).strong());
             ui.label(egui::RichText::new("click a pass to jump to it").font(mono(10.5)).color(DIM));
             ui.add_space(4.0);
             ui.label(egui::RichText::new(" #  T_CPA     f0     v     d    grade").font(mono(11.0)).color(DIM));
@@ -966,7 +1158,7 @@ impl eframe::App for App {
                     let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
                     let r = ui
                         .vertical(|ui| {
-                            ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_color(e.grade())));
+                            ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_text(e.grade())));
                             ui.label(egui::RichText::new(detail).font(mono(10.5)).color(DIM));
                         })
                         .response
@@ -988,7 +1180,7 @@ impl eframe::App for App {
         let mut new_view: Option<f64> = None;
         let mut seek_to: Option<f64> = None;
         let mut go_live = false;
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(10.0)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(bg()).inner_margin(10.0)).show(ui, |ui| {
             let avail = ui.available_size();
             let wave_h = (avail.y * 0.16).clamp(70.0, 140.0);
 
@@ -1154,7 +1346,7 @@ impl eframe::App for App {
 
             // LIVE / FOLLOW button.
             let live_btn = ui.interact(live_rect, Id::unique("live"), Sense::click());
-            let lc = if self.follow { HIGH } else if live_btn.hovered() { TEXT } else { MED };
+            let lc = if self.follow { HIGH } else if live_btn.hovered() { text() } else { MED };
             p.rect_stroke(live_rect, 2.0, Stroke::new(1.0, lc), egui::StrokeKind::Inside);
             let lbl = match (is_file, self.follow) {
                 (false, true) => "● LIVE",
@@ -1194,6 +1386,18 @@ impl eframe::App for App {
             }
         }
         self.apply_toggles(smooth, audio, record, offset);
+        match action {
+            Some(Action::OpenFile) => self.open_file_dialog(),
+            Some(Action::OpenStream) => {
+                self.stream_dialog = true;
+                self.open_error = None;
+            }
+            Some(Action::Theme(l)) => {
+                LIGHT.store(l, Ordering::Relaxed);
+                apply_theme(ctx);
+            }
+            None => {}
+        }
     }
 }
 
@@ -1285,73 +1489,135 @@ fn main() -> Result<(), String> {
             s => input = Some(s.to_string()),
         }
     }
-    let src = if stdin {
-        Source::Stdin
+    let session = if stdin {
+        Session::open(Source::Stdin, "stdin".into())
+    } else if let Some(i) = input {
+        Session::open(source_for(&i, start), short_label(&i))
     } else {
-        let i = input.ok_or(USAGE)?;
-        if i.to_ascii_lowercase().ends_with(".wav") && start.is_none() {
-            Source::Wav(i)
-        } else {
-            Source::Ffmpeg(i, start)
-        }
+        Session::idle()
     };
-    let label = match &src {
-        Source::Wav(p) | Source::Ffmpeg(p, _) => {
-            let name = p.rsplit(['/', '\\']).next().unwrap_or(p);
-            if name.chars().count() > 60 { format!("{}…", name.chars().take(60).collect::<String>()) } else { name.to_string() }
-        }
-        Source::Stdin => "stdin".into(),
-    };
-    let live = src.is_live();
-    let file = match &src {
-        Source::Wav(p) | Source::Ffmpeg(p, _) if !live => Some(p.clone()),
-        _ => None,
-    };
-
-    let cfg = Config::default();
-    let freqs = Detector::new(cfg.clone()).bin_freqs();
-    let cols = (cfg.window_s * cfg.sr / cfg.hop as f64) as usize;
-    let sh = Arc::new(Mutex::new(Shared {
-        sr: cfg.sr,
-        offset: start.unwrap_or(0.0),
-        source: label,
-        freqs,
-        wave: vec![0.0; (WAVE_S * PLAY_SR) as usize],
-        wave_head: 0,
-        wave_n: 0,
-        cols,
-        hist: Vec::new(),
-        hist_t: Vec::new(),
-        frames_total: 0,
-        now: 0.0,
-        frame_wall: Instant::now(),
-        ridges: Vec::new(),
-        pending: Vec::new(),
-        events: Vec::new(),
-        dsp_s: 0.0,
-        audio_s: 0.0,
-        wall_s: 0.0,
-        done: false,
-        live,
-        rec_path: None,
-        rec_s: 0.0,
-        rec_format: String::new(),
-        anchor: None,
-        status: String::new(),
-        c: cfg.c,
-    }));
-    let ctl = Arc::new(Controls { smooth: AtomicBool::new(true), audio: AtomicBool::new(false), record: AtomicBool::new(false) });
-    let ring: Ring = Arc::new(Mutex::new(VecDeque::new()));
-
-    {
-        let (sh, ctl, ring) = (sh.clone(), ctl.clone(), ring.clone());
-        thread::spawn(move || worker(sh, src, ctl, ring));
-    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1480.0, 920.0]).with_title("doppler-view"),
         ..Default::default()
     };
-    eframe::run_native("doppler-view", options, Box::new(move |cc| Ok(Box::new(App::new(cc, sh, ctl, ring, file)))))
+    eframe::run_native("doppler-view", options, Box::new(move |cc| Ok(Box::new(App::new(cc, session)))))
         .map_err(|e| e.to_string())
+}
+
+/// A path or URL as a source: WAV read directly, anything else through ffmpeg.
+fn source_for(input: &str, start: Option<f64>) -> Source {
+    if input.to_ascii_lowercase().ends_with(".wav") && start.is_none() && !input.contains("://") {
+        Source::Wav(input.to_string())
+    } else {
+        Source::Ffmpeg(input.to_string(), start)
+    }
+}
+
+/// File name, or the URL shortened, for the top bar.
+fn short_label(input: &str) -> String {
+    let name = if input.contains("://") { input } else { input.rsplit(['/', '\\']).next().unwrap_or(input) };
+    if name.chars().count() > 60 { format!("{}…", name.chars().take(60).collect::<String>()) } else { name.to_string() }
+}
+
+/// One source being analysed: shared state, controls, audio ring, and the worker thread.
+struct Session {
+    sh: Arc<Mutex<Shared>>,
+    ctl: Arc<Controls>,
+    ring: Ring,
+    /// File path (for playback), or None for live sources and the idle screen.
+    file: Option<String>,
+}
+
+impl Session {
+    fn shared(label: String, live: bool, offset: f64) -> Shared {
+        let cfg = Config::default();
+        Shared {
+            sr: cfg.sr,
+            offset,
+            source: label,
+            freqs: Detector::new(cfg.clone()).bin_freqs(),
+            wave: vec![0.0; (WAVE_S * PLAY_SR) as usize],
+            wave_head: 0,
+            wave_n: 0,
+            cols: (cfg.window_s * cfg.sr / cfg.hop as f64) as usize,
+            hist: Vec::new(),
+            hist_t: Vec::new(),
+            frames_total: 0,
+            now: 0.0,
+            frame_wall: Instant::now(),
+            ridges: Vec::new(),
+            pending: Vec::new(),
+            events: Vec::new(),
+            dsp_s: 0.0,
+            audio_s: 0.0,
+            wall_s: 0.0,
+            done: false,
+            live,
+            rec_path: None,
+            rec_s: 0.0,
+            rec_format: String::new(),
+            anchor: None,
+            status: String::new(),
+            c: cfg.c,
+        }
+    }
+
+    fn controls() -> Arc<Controls> {
+        Arc::new(Controls {
+            smooth: AtomicBool::new(true),
+            audio: AtomicBool::new(false),
+            record: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+        })
+    }
+
+    /// Nothing open yet.
+    fn idle() -> Self {
+        let mut s = Self::shared("no source".into(), false, 0.0);
+        s.done = true;
+        s.status = "open a source: Source ▸ Open file… / Open stream…".into();
+        Self { sh: Arc::new(Mutex::new(s)), ctl: Self::controls(), ring: Default::default(), file: None }
+    }
+
+    fn open(src: Source, label: String) -> Self {
+        let live = src.is_live();
+        let offset = if let Source::Ffmpeg(_, Some(s)) = &src { *s } else { 0.0 };
+        let file = match &src {
+            Source::Wav(p) | Source::Ffmpeg(p, _) if !live => Some(p.clone()),
+            _ => None,
+        };
+        let sh = Arc::new(Mutex::new(Self::shared(label, live, offset)));
+        let ctl = Self::controls();
+        let ring: Ring = Default::default();
+        {
+            let (sh, ctl, ring) = (sh.clone(), ctl.clone(), ring.clone());
+            thread::spawn(move || worker(sh, src, ctl, ring));
+        }
+        Self { sh, ctl, ring, file }
+    }
+
+    /// Tell the worker to finish; it closes ffmpeg and any recording.
+    fn close(&self) {
+        self.ctl.record.store(false, Ordering::Relaxed);
+        self.ctl.audio.store(false, Ordering::Relaxed);
+        self.ctl.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// YouTube page links need resolving to a direct stream URL (yt-dlp); others are used as-is.
+fn needs_resolving(url: &str) -> bool {
+    url.contains("youtube.com/") || url.contains("youtu.be/")
+}
+
+fn resolve_with_ytdlp(url: &str) -> Result<String, String> {
+    let out = std::process::Command::new("yt-dlp")
+        .args(["--no-warnings", "-g", "-f", "ba/b", url])
+        .output()
+        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match text.lines().next() {
+        Some(u) if out.status.success() && u.contains("://") => Ok(u.trim().to_string()),
+        _ => Err(format!("yt-dlp: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no URL returned"))),
+    }
 }
