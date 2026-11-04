@@ -3,7 +3,10 @@ target/
 *.mp3
 *.m4a
 *.mp4
+*.mka
 *.csv
 *.png
 events.jsonl
 recordings/
+# per-recording folders: doppler-YYYYMMDD-HHMMSS/
+doppler-2*/

@@ -124,7 +124,7 @@ fn segment_key(url: &str) -> String {
 }
 
 fn fetch(url: &str) -> Option<String> {
-    let out = Command::new("curl").args(["-s", "-L", "--max-time", "10", url]).output().ok()?;
+    let out = crate::no_window(&mut Command::new("curl")).args(["-s", "-L", "--max-time", "10", url]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -212,7 +212,7 @@ pub fn received_anchor(rel: f64) -> Anchor {
 
 /// `creation_time` from container metadata (ffprobe), if any.
 pub fn file_creation_time(path: &str) -> Option<f64> {
-    let out = Command::new("ffprobe")
+    let out = crate::no_window(&mut Command::new("ffprobe"))
         .args(["-v", "error", "-show_entries", "format_tags=creation_time", "-of", "default=nw=1:nk=1", path])
         .output()
         .ok()?;

@@ -13,3 +13,15 @@ pub mod synth;
 pub mod timebase;
 
 pub use detect::{Config, Detector, Event};
+
+/// Run helper tools (ffmpeg, ffprobe, curl, yt-dlp) without opening a console window of
+/// their own on Windows; elsewhere this does nothing.
+pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}

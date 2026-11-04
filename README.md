@@ -55,7 +55,7 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
   straight away. Click the spectrogram to set the playhead, and tick **audio** to listen from there.
   Clicking a pass in the list jumps to it and plays from 20 s before its closest approach.
 - **Live streams**: only the visible 160 s is kept. **● REC** keeps the timeline from that moment, with
-  no limit, and writes the stream audio to `recordings/rec-<UTC>.wav` (16 kHz, 16-bit). You can open
+  no limit, and saves `doppler-<UTC>/` in the folder the app runs from (change it in Settings ▸ Recording…), holding the raw stream copy (`.mka`) and a `.json` description. You can open
   that file later as a recording.
 - **smooth**: on, live streams play out through a 4 s buffer and the view scrolls between frames.
   Off is the raw view: data appears exactly as it arrives, network bursts and 0.25 s steps included.

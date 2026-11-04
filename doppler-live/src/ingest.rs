@@ -140,6 +140,7 @@ pub fn spawn_ffmpeg(input: &str, sr: u32) -> Result<(Child, Receiver<Vec<f32>>),
 /// As `spawn_ffmpeg`, optionally seeking to `start_s` seconds first.
 pub fn spawn_ffmpeg_from(input: &str, sr: u32, start_s: Option<f64>) -> Result<(Child, Receiver<Vec<f32>>), String> {
     let mut cmd = Command::new("ffmpeg");
+    crate::no_window(&mut cmd);
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     if let Some(s) = start_s {
         cmd.args(["-ss", &format!("{s:.3}")]);
@@ -187,6 +188,7 @@ pub fn spawn_ffmpeg_logged(
     start_s: Option<f64>,
 ) -> Result<(Child, Receiver<Vec<f32>>, FirstSegment), String> {
     let mut cmd = Command::new("ffmpeg");
+    crate::no_window(&mut cmd);
     cmd.args(["-hide_banner", "-loglevel", "verbose", "-nostdin"]);
     if let Some(s) = start_s {
         cmd.args(["-ss", &format!("{s:.3}")]);
@@ -213,7 +215,7 @@ pub struct RawCopy {
 
 impl RawCopy {
     pub fn start(input: &str, path: &str) -> Result<Self, String> {
-        let mut child = Command::new("ffmpeg")
+        let mut child = crate::no_window(&mut Command::new("ffmpeg"))
             .args(["-hide_banner", "-loglevel", "verbose", "-y", "-i", input])
             .args(["-vn", "-map", "0:a:0", "-c", "copy", "-f", "matroska", path])
             .stdin(Stdio::piped())

@@ -1,3 +1,6 @@
+// Release builds are a Windows GUI program: no console window. Debug builds keep the
+// console for diagnostics.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! doppler-view: live display of the detector.
 //!
 //! Waveform, scrolling whitened spectrogram (exactly what the detector searches), a spectrum
@@ -114,16 +117,21 @@ impl Settings {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut s = Settings {
             light: true,
-            rec: RecSettings { folder: cwd.join("recordings").to_string_lossy().into_owned(), raw: true, prefix: "rec".into() },
+            // Default: straight into the folder the app runs from, ready to record at once.
+            rec: RecSettings { folder: cwd.to_string_lossy().into_owned(), raw: true, prefix: "doppler".into() },
         };
+        let old_default_folder = cwd.join("recordings").to_string_lossy().into_owned();
         if let Some(text) = Self::file().and_then(|p| std::fs::read_to_string(p).ok()) {
             for line in text.lines() {
                 let Some((k, v)) = line.split_once('=') else { continue };
                 match k.trim() {
                     "theme" => s.light = v.trim() != "dark",
-                    "rec_folder" if !v.trim().is_empty() => s.rec.folder = v.trim().to_string(),
+                    // Earlier builds saved their defaults (recordings/, "rec"): treat those as unset.
+                    "rec_folder" if !v.trim().is_empty() && v.trim() != old_default_folder => {
+                        s.rec.folder = v.trim().to_string()
+                    }
                     "rec_format" => s.rec.raw = v.trim() != "wav",
-                    "rec_prefix" => s.rec.prefix = v.trim().to_string(),
+                    "rec_prefix" if !v.trim().is_empty() && v.trim() != "rec" => s.rec.prefix = v.trim().to_string(),
                     _ => {}
                 }
             }
@@ -150,7 +158,7 @@ impl Settings {
 /// Keep file-name prefixes to safe characters.
 fn clean_prefix(p: &str) -> String {
     let s: String = p.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect();
-    if s.is_empty() { "rec".into() } else { s }
+    if s.is_empty() { "doppler".into() } else { s }
 }
 const GRID: Color32 = Color32::from_rgb(34, 38, 44);
 const DIM: Color32 = Color32::from_rgb(110, 118, 128);
@@ -326,11 +334,12 @@ struct Recorder {
 
 impl Recorder {
     fn start(src: &Source, rel_start: f64, analysis: Option<&Anchor>, rs: &RecSettings) -> Result<Self, String> {
-        std::fs::create_dir_all(&rs.folder).map_err(|e| format!("{}: {e}", rs.folder))?;
-        let stem = std::path::Path::new(&rs.folder)
-            .join(format!("{}-{}", clean_prefix(&rs.prefix), timebase::utc_stamp(timebase::now_unix())))
-            .to_string_lossy()
-            .into_owned();
+        // One folder per recording, `<prefix>-<UTC>/`, holding `<prefix>-<UTC>.mka|wav` and `.json`
+        // (same name inside, so the files still describe themselves if moved out).
+        let name = format!("{}-{}", clean_prefix(&rs.prefix), timebase::utc_stamp(timebase::now_unix()));
+        let dir = std::path::Path::new(&rs.folder).join(&name);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let stem = dir.join(&name).to_string_lossy().into_owned();
         let anchor: SharedAnchor = Default::default();
         let mut r = Self {
             stem: stem.clone(),
@@ -1081,7 +1090,10 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             changed |= ui.add(egui::TextEdit::singleline(&mut rs.prefix).desired_width(120.0)).changed();
                             ui.label(
-                                egui::RichText::new(format!("{}-YYYYMMDD-HHMMSS (UTC) + .json", clean_prefix(&rs.prefix)))
+                                egui::RichText::new(format!(
+                                    "folder {0}-YYYYMMDD-HHMMSS (UTC) with {0}-….mka/.wav + .json",
+                                    clean_prefix(&rs.prefix)
+                                ))
                                     .font(mono(11.0))
                                     .color(DIM),
                             );
@@ -1797,7 +1809,7 @@ fn needs_resolving(url: &str) -> bool {
 }
 
 fn resolve_with_ytdlp(url: &str) -> Result<String, String> {
-    let out = std::process::Command::new("yt-dlp")
+    let out = doppler_live::no_window(&mut std::process::Command::new("yt-dlp"))
         .args(["--no-warnings", "-g", "-f", "ba/b", url])
         .output()
         .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
