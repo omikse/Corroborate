@@ -1,8 +1,8 @@
 use doppler_live::synth::{render, Pass};
-use doppler_live::{ingest, Config, Detector, Event};
+use doppler_live::{ingest, timebase, Config, Detector, Event};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const USAGE: &str = "\
 doppler-live: detect aircraft Doppler curves in audio
@@ -98,10 +98,17 @@ fn run_file(a: &Args) -> Result<(), String> {
     let mut events: Vec<Event> = Vec::new();
     let mut n = 0usize;
     let t0 = Instant::now();
+    let anchor = timebase::file_anchor(input);
+    if !a.quiet {
+        match &anchor {
+            Some(an) => eprintln!("UTC anchor: {} ({})", timebase::fmt_utc(an.utc0), an.source),
+            None => eprintln!("no UTC anchor: times are relative to the start of the file"),
+        }
+    }
     let mut on_chunk = |x: &[f32], det: &mut Detector, events: &mut Vec<Event>| {
         n += x.len();
         for e in det.push(x) {
-            println!("{}", e.to_json(None));
+            println!("{}", e.to_json(anchor.as_ref()));
             events.push(e);
         }
     };
@@ -115,7 +122,7 @@ fn run_file(a: &Args) -> Result<(), String> {
         let _ = child.wait();
     }
     for e in det.flush() {
-        println!("{}", e.to_json(None));
+        println!("{}", e.to_json(anchor.as_ref()));
         events.push(e);
     }
     let audio_s = n as f64 / a.cfg.sr;
@@ -142,9 +149,10 @@ fn run_file(a: &Args) -> Result<(), String> {
 }
 
 fn run_listen(a: &Args) -> Result<(), String> {
-    let unix0 = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let anchor: timebase::SharedAnchor = Default::default();
     let (child, rx) = if let Some(u) = &a.url {
-        let (c, rx) = ingest::spawn_ffmpeg(u, a.cfg.sr as u32)?;
+        let (c, rx, first) = ingest::spawn_ffmpeg_logged(u, a.cfg.sr as u32, None)?;
+        timebase::upgrade_from_hls(u.clone(), first, anchor.clone(), 0.0);
         (Some(c), rx)
     } else if a.stdin {
         (None, ingest::spawn_stdin((a.cfg.sr / 4.0) as usize))
@@ -159,13 +167,35 @@ fn run_listen(a: &Args) -> Result<(), String> {
     let mut det = Detector::new(a.cfg.clone());
     let mut n = 0usize;
     let mut last = Instant::now();
+    let mut last_src: Option<String> = None;
     if !a.quiet {
         eprintln!("listening; warm-up {:.0} s, events also appended to {}", a.cfg.warmup_s, a.events);
     }
     for x in rx {
+        if n == 0 {
+            // Until (unless) the stream supplies capture times, anchor on our own clock.
+            let mut an = anchor.lock().unwrap();
+            if an.is_none() {
+                *an = Some(timebase::received_anchor(0.0));
+            }
+        }
+        if !a.quiet {
+            let an = anchor.lock().unwrap();
+            if let Some(cur) = an.as_ref() {
+                if last_src.as_deref() != Some(cur.source.as_str()) {
+                    eprintln!(
+                        "UTC anchor: start = {} ({}); lag behind this PC's clock ≈ {:.1} s",
+                        timebase::fmt_utc(cur.utc0),
+                        cur.source,
+                        timebase::now_unix() - cur.utc(n as f64 / a.cfg.sr)
+                    );
+                    last_src = Some(cur.source.clone());
+                }
+            }
+        }
         n += x.len();
         for e in det.push(&x) {
-            let j = e.to_json(Some(unix0));
+            let j = e.to_json(anchor.lock().unwrap().as_ref());
             println!("{j}");
             let _ = writeln!(log, "{j}");
             let _ = log.flush();

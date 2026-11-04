@@ -1,4 +1,4 @@
-﻿//! doppler-view: live display of the detector.
+//! doppler-view: live display of the detector.
 //!
 //! Waveform, scrolling whitened spectrogram (exactly what the detector searches), a spectrum
 //! slice on the same frequency axis, raw ridges, held candidates and reported passes drawn as
@@ -14,6 +14,7 @@
 //! state written by the worker thread.
 
 use doppler_live::fit::model;
+use doppler_live::timebase::{self, Anchor, SharedAnchor};
 use doppler_live::{ingest, Config, Detector, Event};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Id, Key, Pos2, Rect, Sense, Shape, Stroke,
@@ -23,7 +24,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
 doppler-view: live view of the Doppler-curve detector
@@ -95,6 +96,9 @@ struct Shared {
     /// Current recording, if any: file and seconds written.
     rec_path: Option<String>,
     rec_s: f64,
+    rec_format: String,
+    /// UTC (Coordinated Universal Time) of relative time 0, and its source, if known.
+    anchor: Option<Anchor>,
     status: String,
     c: f64,
 }
@@ -115,7 +119,7 @@ fn grade_color(g: &str) -> Color32 {
     }
 }
 
-/// Byte â†’ colour: black, deep blue, violet, red, orange, pale yellow.
+/// Byte → colour: black, deep blue, violet, red, orange, pale yellow.
 fn colormap_lut() -> [[u8; 4]; 256] {
     const STOPS: [(f32, [f32; 3]); 6] = [
         (0.00, [4.0, 5.0, 8.0]),
@@ -145,25 +149,18 @@ fn colormap_lut() -> [[u8; 4]; 256] {
     lut
 }
 
+/// Clock text for relative time `rel`: UTC time of day when an anchor is known, else time
+/// from the start of the source.
+fn stamp(s: &Shared, rel: f64) -> String {
+    match &s.anchor {
+        Some(a) => timebase::fmt_utc_clock(a.utc(rel)),
+        None => fmt_clock(s.offset + rel),
+    }
+}
+
 fn fmt_clock(t: f64) -> String {
     let t = t.max(0.0) as u64;
     format!("{:02}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60)
-}
-
-/// UTC timestamp `YYYYMMDD-HHMMSS` for file names (civil-from-days, no date crate).
-fn utc_stamp() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, (rem / 60) % 60, rem % 60)
 }
 
 // ---------------------------------------------------------------- worker
@@ -199,12 +196,169 @@ impl Source {
 
 type WavOut = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
 
-fn open_recording() -> Result<(WavOut, String), String> {
-    std::fs::create_dir_all("recordings").map_err(|e| e.to_string())?;
-    let path = format!("recordings/rec-{}.wav", utc_stamp());
+fn open_wav(path: &str) -> Result<WavOut, String> {
     let spec = hound::WavSpec { channels: 1, sample_rate: PLAY_SR as u32, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let w = hound::WavWriter::create(&path, spec).map_err(|e| format!("{path}: {e}"))?;
-    Ok((w, path))
+    hound::WavWriter::create(path, spec).map_err(|e| format!("{path}: {e}"))
+}
+
+fn host_of(url: &str) -> String {
+    url.split_once("://").map_or(url, |x| x.1).split('/').next().unwrap_or("").to_string()
+}
+
+/// One REC session: a raw copy of the stream when it can be copied (original codec,
+/// untouched), else a WAV of the decoded audio; plus `<name>.json` saying what the file is
+/// and how its times map to UTC (Coordinated Universal Time).
+struct Recorder {
+    stem: String,
+    file: String,
+    format: String,
+    raw: Option<ingest::RawCopy>,
+    wav: Option<WavOut>,
+    /// Analysis (relative) time when REC was pressed.
+    rel_start: f64,
+    /// UTC of the recorded file's first sample, and its source.
+    anchor: SharedAnchor,
+    source_host: String,
+    last_sidecar: Instant,
+    secs: f64,
+}
+
+impl Recorder {
+    fn start(src: &Source, rel_start: f64, analysis: Option<&Anchor>) -> Result<Self, String> {
+        std::fs::create_dir_all("recordings").map_err(|e| e.to_string())?;
+        let stem = format!("recordings/rec-{}", timebase::utc_stamp(timebase::now_unix()));
+        let anchor: SharedAnchor = Default::default();
+        let mut r = Self {
+            stem: stem.clone(),
+            file: String::new(),
+            format: String::new(),
+            raw: None,
+            wav: None,
+            rel_start,
+            anchor: anchor.clone(),
+            source_host: String::new(),
+            last_sidecar: Instant::now(),
+            secs: 0.0,
+        };
+        if let Source::Ffmpeg(url, _) = src {
+            if url.contains("://") {
+                let file = format!("{stem}.mka");
+                let raw = ingest::RawCopy::start(url, &file)?;
+                // Separate connection: approximate until the stream's own capture times resolve.
+                *anchor.lock().unwrap() = Some(Anchor {
+                    utc0: timebase::now_unix(),
+                    source: "PC clock when REC was pressed (approximate: the copy uses its own connection)".into(),
+                });
+                timebase::upgrade_from_hls(url.clone(), raw.first_segment.clone(), anchor, 0.0);
+                r.file = file;
+                r.format = "raw stream copy: original codec and sample rate, untouched (Matroska audio container)".into();
+                r.raw = Some(raw);
+                r.source_host = host_of(url);
+                return Ok(r);
+            }
+        }
+        r.start_wav(analysis, "WAV 16 kHz 16-bit mono of the decoded audio (this source cannot be copied raw)")?;
+        r.source_host = match src {
+            Source::Stdin => "stdin".into(),
+            Source::Ffmpeg(p, _) | Source::Wav(p) => host_of(p),
+        };
+        Ok(r)
+    }
+
+    fn start_wav(&mut self, analysis: Option<&Anchor>, format: &str) -> Result<(), String> {
+        let file = format!("{}.wav", self.stem);
+        self.wav = Some(open_wav(&file)?);
+        self.file = file;
+        self.format = format.into();
+        // The WAV is written from the analysed audio, so it shares the analysis timeline.
+        *self.anchor.lock().unwrap() = analysis.map(|a| Anchor {
+            utc0: a.utc(self.rel_start + self.secs),
+            source: format!("{} (WAV written from the analysed audio)", a.source),
+        });
+        // A fallback WAV starts now; earlier seconds went to the (failed) raw copy.
+        self.rel_start += self.secs;
+        self.secs = 0.0;
+        Ok(())
+    }
+
+    fn write(&mut self, piece: &[f32], analysis: Option<&Anchor>) {
+        if let Some(raw) = self.raw.as_mut() {
+            if !raw.alive() {
+                // ffmpeg could not (or no longer) copy the stream: fall back to the decoded audio.
+                self.raw = None;
+                let _ = self.start_wav(analysis, "WAV 16 kHz 16-bit mono of the decoded audio (raw copy failed)");
+            }
+        }
+        if let Some(w) = self.wav.as_mut() {
+            for &v in piece {
+                let _ = w.write_sample((v.clamp(-1.0, 1.0) * 32767.0) as i16);
+            }
+        }
+        self.secs += piece.len() as f64 / PLAY_SR;
+    }
+
+    /// Write `<name>.json`: what the file is, its UTC start and source, and the passes
+    /// detected while recording with their time inside the file.
+    fn sidecar(&mut self, analysis: Option<&Anchor>, events: &[Event]) {
+        self.last_sidecar = Instant::now();
+        let rec = self.anchor.lock().unwrap().clone();
+        let stream_exact = |a: &Anchor| a.source.starts_with("stream PROGRAM-DATE-TIME");
+        let from_analysis = self.wav.is_some();
+        let rs = self.rel_start;
+        let (accuracy, map): (&str, Box<dyn Fn(f64) -> f64>) = match (&rec, analysis) {
+            _ if from_analysis => ("exact (same audio as the analysis)", Box::new(move |t| t - rs)),
+            (Some(r), Some(a)) if stream_exact(r) && stream_exact(a) => {
+                let (ru, a) = (r.utc0, a.clone());
+                ("exact (both anchored to the stream's capture times)", Box::new(move |t| a.utc(t) - ru))
+            }
+            (Some(r), Some(a)) => {
+                let (ru, a) = (r.utc0, a.clone());
+                ("approximate, about ±5 s (no stream capture times; two connections)", Box::new(move |t| a.utc(t) - ru))
+            }
+            _ => ("approximate, about ±5 s", Box::new(move |t| t - rs)),
+        };
+        let mut j = String::from("{\n");
+        j.push_str(&format!("  \"file\": \"{}\",\n", timebase::json_escape(self.file.rsplit('/').next().unwrap_or(&self.file))));
+        j.push_str(&format!("  \"format\": \"{}\",\n", timebase::json_escape(&self.format)));
+        j.push_str(&format!("  \"source_host\": \"{}\",\n", timebase::json_escape(&self.source_host)));
+        j.push_str("  \"recorded_by\": \"doppler-view\",\n");
+        match &rec {
+            Some(r) => {
+                j.push_str(&format!("  \"utc_start\": \"{}\",\n", timebase::fmt_utc(r.utc0)));
+                j.push_str(&format!("  \"utc_source\": \"{}\",\n", timebase::json_escape(&r.source)));
+            }
+            None => j.push_str("  \"utc_start\": null,\n  \"utc_source\": \"none\",\n"),
+        }
+        j.push_str(&format!("  \"duration_s\": {:.2},\n", self.secs));
+        j.push_str(&format!(
+            "  \"detector\": {{ \"band_hz\": [40, 450], \"nfft\": 8192, \"hop_s\": 0.25, \"window_s\": 160, \"analysis_rel_at_rec_start_s\": {:.3} }},\n",
+            self.rel_start
+        ));
+        j.push_str(&format!("  \"event_time_in_file_accuracy\": \"{accuracy}\",\n"));
+        j.push_str("  \"events\": [");
+        let mut first = true;
+        for e in events.iter().filter(|e| e.t_cpa >= self.rel_start) {
+            let mut ej = e.to_json(analysis);
+            ej.pop();
+            ej.push_str(&format!(",\"t_in_file\":{:.2}}}", map(e.t_cpa)));
+            j.push_str(if first { "\n    " } else { ",\n    " });
+            j.push_str(&ej);
+            first = false;
+        }
+        j.push_str(if first { "]\n}\n" } else { "\n  ]\n}\n" });
+        let _ = std::fs::write(format!("{}.json", self.stem), j);
+    }
+
+    fn stop(mut self, analysis: Option<&Anchor>, events: &[Event]) {
+        if let Some(w) = self.wav.take() {
+            let _ = w.finalize();
+        }
+        self.sidecar(analysis, events);
+        if let Some(raw) = self.raw.take() {
+            // ffmpeg needs a moment to close the file cleanly; do not hold up the analysis.
+            thread::spawn(move || raw.stop());
+        }
+    }
 }
 
 fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
@@ -220,9 +374,26 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
     // Live + smooth: paced behind a jitter buffer. Live raw: processed as it arrives.
     // Files: as fast as possible, so the whole timeline is available.
     let mut base: Option<Instant> = None;
-    let mut rec: Option<WavOut> = None;
+    let mut rec: Option<Recorder> = None;
+    // UTC of relative time 0 for the analysis, and where it came from. Files: our sidecar or
+    // creation_time (shifted by --start). Live: PC clock at first audio, upgraded to the
+    // stream's capture times when the playlist has them.
+    let anchor: SharedAnchor = Default::default();
+    if let Source::Wav(p) | Source::Ffmpeg(p, _) = &src {
+        if !live {
+            let start = if let Source::Ffmpeg(_, Some(s)) = &src { *s } else { 0.0 };
+            *anchor.lock().unwrap() =
+                timebase::file_anchor(p).map(|a| Anchor { utc0: a.utc0 + start, source: a.source });
+        }
+    }
 
     let mut handle = |x: &[f32], det: &mut Detector| {
+        if live && n == 0 {
+            let mut a = anchor.lock().unwrap();
+            if a.is_none() {
+                *a = Some(timebase::received_anchor(0.0));
+            }
+        }
         for piece in x.chunks((PLAY_SR / 20.0) as usize) {
             if live && ctl.smooth.load(Ordering::Relaxed) {
                 let pos = Duration::from_secs_f64(n as f64 / PLAY_SR);
@@ -253,32 +424,25 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                 }
             }
 
-            // Recording (live): open on REC, write every sample, close when REC is released.
+            // Recording (live): start on REC, stop when REC is released.
             let recording = live && ctl.record.load(Ordering::Relaxed);
-            let mut rec_event: Option<Result<String, String>> = None;
+            let an = anchor.lock().unwrap().clone();
+            let mut rec_error: Option<String> = None;
             if recording && rec.is_none() {
-                match open_recording() {
-                    Ok((w, p)) => {
-                        rec = Some(w);
-                        rec_event = Some(Ok(p));
-                    }
+                match Recorder::start(&src, n as f64 / PLAY_SR, an.as_ref()) {
+                    Ok(r) => rec = Some(r),
                     Err(e) => {
                         ctl.record.store(false, Ordering::Relaxed);
-                        rec_event = Some(Err(e));
+                        rec_error = Some(e);
                     }
                 }
             }
-            if let Some(w) = rec.as_mut() {
-                if recording {
-                    for &v in piece {
-                        let _ = w.write_sample((v.clamp(-1.0, 1.0) * 32767.0) as i16);
-                    }
+            if recording {
+                if let Some(r) = rec.as_mut() {
+                    r.write(piece, an.as_ref());
                 }
-            }
-            if !recording {
-                if let Some(w) = rec.take() {
-                    let _ = w.finalize();
-                }
+            } else if let Some(r) = rec.take() {
+                r.stop(an.as_ref(), &sh.lock().unwrap().events);
             }
 
             let tick = Instant::now();
@@ -290,18 +454,17 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
             n += piece.len() as u64;
 
             let mut s = sh.lock().unwrap();
-            match rec_event {
-                Some(Ok(p)) => {
-                    s.rec_path = Some(p);
-                    s.rec_s = 0.0;
-                }
-                Some(Err(e)) => s.status = format!("record: {e}"),
-                None => {}
+            if let Some(e) = rec_error {
+                s.status = format!("record: {e}");
             }
-            if recording {
-                s.rec_s += piece.len() as f64 / PLAY_SR;
-            } else {
-                s.rec_path = None;
+            s.anchor = an.clone();
+            match &rec {
+                Some(r) => {
+                    s.rec_path = Some(r.file.clone());
+                    s.rec_s = r.secs;
+                    s.rec_format = r.format.clone();
+                }
+                None => s.rec_path = None,
             }
             let wl = s.wave.len();
             for &v in piece {
@@ -326,9 +489,16 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
                 s.hist.drain(..k * nb);
                 s.hist_t.drain(..k);
             }
+            let new_events = !evs.is_empty();
             for e in evs {
-                println!("{}", e.to_json(None));
+                println!("{}", e.to_json(an.as_ref()));
                 s.events.push(e);
+            }
+            // Keep the sidecar current: on new passes, and every few seconds (anchor upgrades).
+            if let Some(r) = rec.as_mut() {
+                if new_events || r.last_sidecar.elapsed() > Duration::from_secs(3) {
+                    r.sidecar(an.as_ref(), &s.events);
+                }
             }
             s.dsp_s += cost;
             s.audio_s = n as f64 / PLAY_SR;
@@ -339,8 +509,11 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
 
     let r = match &src {
         Source::Wav(p) => ingest::read_wav(p, PLAY_SR, |x| handle(x, &mut det)),
-        Source::Ffmpeg(p, start) => match ingest::spawn_ffmpeg_from(p, PLAY_SR as u32, *start) {
-            Ok((mut child, rx)) => {
+        Source::Ffmpeg(p, start) => match ingest::spawn_ffmpeg_logged(p, PLAY_SR as u32, *start) {
+            Ok((mut child, rx, first)) => {
+                if live {
+                    timebase::upgrade_from_hls(p.clone(), first, anchor.clone(), 0.0);
+                }
                 for x in rx {
                     handle(&x, &mut det);
                 }
@@ -356,14 +529,15 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring) {
             Ok(())
         }
     };
-    if let Some(w) = rec.take() {
-        let _ = w.finalize();
-    }
     let evs = det.flush();
+    let an = anchor.lock().unwrap().clone();
     let mut s = sh.lock().unwrap();
     for e in evs {
-        println!("{}", e.to_json(None));
+        println!("{}", e.to_json(an.as_ref()));
         s.events.push(e);
+    }
+    if let Some(r) = rec.take() {
+        r.stop(an.as_ref(), &s.events);
     }
     s.pending.clear();
     s.done = true;
@@ -652,7 +826,7 @@ impl eframe::App for App {
         };
         let t_left = t_right - span;
 
-        // Frames covering the view: those with time â‰¤ t_right, the last `cols` of them.
+        // Frames covering the view: those with time ≤ t_right, the last `cols` of them.
         let idx_r = s.hist_t.partition_point(|&t| t <= t_right);
         let key = (if self.follow { s.frames_total } else { 0 }, idx_r);
         if key != self.tex_key || self.tex.is_none() {
@@ -694,31 +868,32 @@ impl eframe::App for App {
                 });
                 if s.live {
                     let label = if record {
-                        egui::RichText::new(format!("â— REC {}", fmt_clock(s.rec_s))).font(mono(12.0)).color(REC).strong()
+                        egui::RichText::new(format!("● REC {}", fmt_clock(s.rec_s))).font(mono(12.0)).color(REC).strong()
                     } else {
-                        egui::RichText::new("â—‹ REC").font(mono(12.0)).color(DIM)
+                        egui::RichText::new("○ REC").font(mono(12.0)).color(DIM)
                     };
                     ui.toggle_value(&mut record, label).on_hover_text(
                         "Keep the timeline from now (scroll back, no limit) and save the stream audio to recordings/",
                     );
                     if let Some(p) = &s.rec_path {
-                        ui.label(egui::RichText::new(format!("â†’ {p}")).font(mono(11.0)).color(DIM));
+                        ui.label(egui::RichText::new(format!("→ {p}")).font(mono(11.0)).color(DIM))
+                            .on_hover_text(format!("{}\nplus {} describing it", s.rec_format, p.rsplit_once('.').map_or(p.as_str(), |x| x.0).to_string() + ".json"));
                     }
                 }
                 if let Some(e) = &audio_err {
                     ui.label(egui::RichText::new(format!("audio: {e}")).font(mono(11.0)).color(MED));
                 }
                 ui.add_space(12.0);
-                ui.label(egui::RichText::new("â–¸").color(DIM));
+                ui.label(egui::RichText::new("▸").color(DIM));
                 ui.label(egui::RichText::new(&s.source).color(DIM));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let high = s.events.iter().filter(|e| e.grade() == "high").count();
                     let state = if s.done {
                         s.status.clone()
                     } else if s.live {
-                        "â— LIVE".into()
+                        "● LIVE".into()
                     } else {
-                        format!("â–¶ ANALYSING {:.0}Ã— real time", s.audio_s / s.wall_s.max(1e-9))
+                        format!("▶ ANALYSING {:.0}× real time", s.audio_s / s.wall_s.max(1e-9))
                     };
                     ui.label(egui::RichText::new(state).color(if s.done { DIM } else { MED }));
                     let load = if s.live {
@@ -726,12 +901,19 @@ impl eframe::App for App {
                     } else {
                         format!("AUDIO {}", fmt_clock(s.audio_s))
                     };
-                    ui.label(egui::RichText::new(format!(
-                        "T {}   {load}   PASSES {} ({} high)",
-                        fmt_clock(s.offset + if is_file { head } else { s.now }),
-                        s.events.len(),
-                        high
-                    )));
+                    ui.label(egui::RichText::new(format!("{load}   PASSES {} ({} high)", s.events.len(), high)));
+                    // Clock: UTC when anchored (source on hover), else time from the start.
+                    let (tag, col, why) = match &s.anchor {
+                        Some(a) if a.source.starts_with("stream") => ("UTC", HIGH, a.source.clone()),
+                        Some(a) => ("UTC≈", MED, a.source.clone()),
+                        None => ("T+", DIM, "no UTC source: time from the start of the file".to_string()),
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{tag} {}", stamp(&s, if is_file { head } else { s.now })))
+                            .font(mono(13.0))
+                            .color(col),
+                    )
+                    .on_hover_text(why);
                 });
             });
         });
@@ -740,10 +922,14 @@ impl eframe::App for App {
         egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(BG).inner_margin(6.0)).show(ui, |ui| {
             let df = s.freqs[1] - s.freqs[0];
             let hist = if is_file || self.record { fmt_clock(s.now - t_first) } else { "window only (REC to keep)".into() };
+            let basis = match &s.anchor {
+                Some(a) => format!("UTC from {}", a.source),
+                None => "relative time (no UTC source)".into(),
+            };
             ui.label(
                 egui::RichText::new(format!(
-                    "detector {:.0} Hz  â”‚  band {:.0}â€“{:.0} Hz  â”‚  Î”f {:.2} Hz  â”‚  hop 0.25 s  â”‚  view {:.0} s  â”‚  timeline {hist}  â”‚  \
-                     ridge â”„ cyan  â”‚  candidate â”„ white  â”‚  pass: high / medium / low  â”‚  wheel/bar: scroll  End: {}",
+                    "time: {basis}  │  detector {:.0} Hz  │  band {:.0}–{:.0} Hz  │  Δf {:.2} Hz  │  view {:.0} s  │  timeline {hist}  │  \
+                     ridge ┄ cyan  │  candidate ┄ white  │  wheel/bar: scroll  End: {}",
                     s.sr,
                     fmin,
                     fmax,
@@ -769,15 +955,15 @@ impl eframe::App for App {
                     let sel = self.selected == Some(e.id);
                     let line = format!(
                         "{}{:>2}  {}  {:5.1}  {:3.0}  {:4.1}k  {}",
-                        if sel { "â–¸" } else { " " },
+                        if sel { "▸" } else { " " },
                         e.id,
-                        fmt_clock(s.offset + e.t_cpa),
+                        stamp(&s, e.t_cpa),
                         e.f0,
                         e.speed,
                         e.dist / 1000.0,
                         e.grade()
                     );
-                    let detail = format!("    {:.0}â†’{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
+                    let detail = format!("    {:.0}→{:.0} Hz  snr {:.2}  rms {:.2}  h{}", e.f_pre, e.f_post, e.snr, e.rms, e.harmonics);
                     let r = ui
                         .vertical(|ui| {
                             ui.label(egui::RichText::new(line).font(mono(12.0)).color(grade_color(e.grade())));
@@ -793,7 +979,7 @@ impl eframe::App for App {
                     }
                 }
                 if s.events.is_empty() {
-                    ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listeningâ€¦" }).color(DIM));
+                    ui.label(egui::RichText::new(if s.done { "no passes found" } else { "listening…" }).color(DIM));
                 }
             });
         });
@@ -867,12 +1053,12 @@ impl eframe::App for App {
                 let x = x_of(tg);
                 p.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(0.5, GRID.gamma_multiply(0.6)));
                 if x > spec_rect.left() + 24.0 && x < spec_rect.right() - 40.0 {
-                    p.text(pos2(x, spec_rect.bottom() + 4.0), Align2::CENTER_TOP, fmt_clock(s.offset + tg), mono(10.5), DIM);
+                    p.text(pos2(x, spec_rect.bottom() + 4.0), Align2::CENTER_TOP, stamp(&s, tg), mono(10.5), DIM);
                 }
                 tg += 20.0;
             }
             let at_edge = (s.now - t_right).abs() < HOP_S * 1.5;
-            let edge = if at_edge { "now".to_string() } else { format!("{} â—‚", fmt_clock(s.offset + t_right)) };
+            let edge = if at_edge { "now".to_string() } else { format!("{} ◂", stamp(&s, t_right)) };
             p.text(pos2(spec_rect.right(), spec_rect.bottom() + 4.0), Align2::RIGHT_TOP, edge, mono(10.5), if at_edge { HIGH } else { MED });
 
             let clip = p.with_clip_rect(spec_rect);
@@ -915,7 +1101,7 @@ impl eframe::App for App {
             if is_file && head >= t_left && head <= t_right {
                 let x = x_of(head);
                 clip.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(1.0, HEAD));
-                clip.text(pos2(x + 4.0, spec_rect.top() + 2.0), Align2::LEFT_TOP, if self.audio { "â–¶" } else { "â–®" }, mono(11.0), HEAD);
+                clip.text(pos2(x + 4.0, spec_rect.top() + 2.0), Align2::LEFT_TOP, if self.audio { "▶" } else { "▮" }, mono(11.0), HEAD);
             }
             p.rect_stroke(spec_rect, 0.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
 
@@ -935,7 +1121,7 @@ impl eframe::App for App {
             p.text(
                 pos2(slice_rect.center().x, slice_rect.bottom() + 4.0),
                 Align2::CENTER_TOP,
-                if is_file { "z at â–®" } else if at_edge { "z now" } else { "z at edge" },
+                if is_file { "z at ▮" } else if at_edge { "z now" } else { "z at edge" },
                 mono(10.5),
                 DIM,
             );
@@ -971,10 +1157,10 @@ impl eframe::App for App {
             let lc = if self.follow { HIGH } else if live_btn.hovered() { TEXT } else { MED };
             p.rect_stroke(live_rect, 2.0, Stroke::new(1.0, lc), egui::StrokeKind::Inside);
             let lbl = match (is_file, self.follow) {
-                (false, true) => "â— LIVE",
-                (false, false) => "âµ GO LIVE",
-                (true, true) => "â— FOLLOW",
-                (true, false) => "âµ FOLLOW",
+                (false, true) => "● LIVE",
+                (false, false) => "⏵ GO LIVE",
+                (true, true) => "● FOLLOW",
+                (true, false) => "⏵ FOLLOW",
             };
             p.text(live_rect.center(), Align2::CENTER_CENTER, lbl, mono(11.0), lc);
             if live_btn.clicked() {
@@ -1069,7 +1255,7 @@ fn draw_wave(ui: &egui::Ui, rect: Rect, s: &Shared, analysis: bool) {
             Align2::LEFT_TOP,
             format!(
                 "WAVEFORM  {}last {WAVE_S:.0} s @ {:.0} Hz   peak {:.3}   rms {:.1} dBFS   (auto-scaled)",
-                if analysis { "analysis head Â· " } else { "" },
+                if analysis { "analysis head · " } else { "" },
                 PLAY_SR,
                 peak,
                 10.0 * rms.max(1e-12).log10()
@@ -1112,7 +1298,7 @@ fn main() -> Result<(), String> {
     let label = match &src {
         Source::Wav(p) | Source::Ffmpeg(p, _) => {
             let name = p.rsplit(['/', '\\']).next().unwrap_or(p);
-            if name.chars().count() > 60 { format!("{}â€¦", name.chars().take(60).collect::<String>()) } else { name.to_string() }
+            if name.chars().count() > 60 { format!("{}…", name.chars().take(60).collect::<String>()) } else { name.to_string() }
         }
         Source::Stdin => "stdin".into(),
     };
@@ -1149,6 +1335,8 @@ fn main() -> Result<(), String> {
         live,
         rec_path: None,
         rec_s: 0.0,
+        rec_format: String::new(),
+        anchor: None,
         status: String::new(),
         c: cfg.c,
     }));

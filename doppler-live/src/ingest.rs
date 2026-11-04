@@ -156,6 +156,98 @@ pub fn spawn_ffmpeg_from(input: &str, sr: u32, start_s: Option<f64>) -> Result<(
     Ok((child, rx))
 }
 
+/// First HLS segment URL ffmpeg opened (from its verbose log), shared with the caller.
+pub type FirstSegment = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// Read ffmpeg's verbose stderr: note the first HLS segment requested, pass real errors on.
+fn watch_ffmpeg_log(stderr: std::process::ChildStderr, first: FirstSegment) {
+    thread::spawn(move || {
+        use std::io::BufRead;
+        for line in io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(i) = line.find("HLS request for url '") {
+                let rest = &line[i + "HLS request for url '".len()..];
+                if let Some(j) = rest.find('\'') {
+                    let mut f = first.lock().unwrap();
+                    if f.is_none() {
+                        *f = Some(rest[..j].to_string());
+                    }
+                }
+            } else if line.contains("rror") && !line.contains("Skip") {
+                eprintln!("ffmpeg: {line}");
+            }
+        }
+    });
+}
+
+/// As `spawn_ffmpeg_from`, also reporting the first HLS segment opened, so the decoded
+/// audio can be tied to the playlist's PROGRAM-DATE-TIME.
+pub fn spawn_ffmpeg_logged(
+    input: &str,
+    sr: u32,
+    start_s: Option<f64>,
+) -> Result<(Child, Receiver<Vec<f32>>, FirstSegment), String> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "verbose", "-nostdin"]);
+    if let Some(s) = start_s {
+        cmd.args(["-ss", &format!("{s:.3}")]);
+    }
+    let mut child = cmd
+        .args(["-i", input])
+        .args(["-vn", "-ac", "1", "-ar", &sr.to_string(), "-f", "f32le", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start ffmpeg (is it on PATH?): {e}"))?;
+    let first: FirstSegment = Default::default();
+    watch_ffmpeg_log(child.stderr.take().ok_or("no ffmpeg stderr")?, first.clone());
+    let stdout = child.stdout.take().ok_or("no ffmpeg stdout")?;
+    Ok((child, spawn_reader(stdout, (sr / 4) as usize), first))
+}
+
+/// A bit-exact copy of a stream's audio packets (no decoding, no re-encoding) written to a
+/// Matroska audio file, which holds any codec unchanged.
+pub struct RawCopy {
+    child: Child,
+    pub first_segment: FirstSegment,
+}
+
+impl RawCopy {
+    pub fn start(input: &str, path: &str) -> Result<Self, String> {
+        let mut child = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "verbose", "-y", "-i", input])
+            .args(["-vn", "-map", "0:a:0", "-c", "copy", "-f", "matroska", path])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start ffmpeg: {e}"))?;
+        let first: FirstSegment = Default::default();
+        watch_ffmpeg_log(child.stderr.take().ok_or("no ffmpeg stderr")?, first.clone());
+        Ok(Self { child, first_segment: first })
+    }
+
+    /// Still running (false if ffmpeg exited, e.g. the stream cannot be copied).
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Ask ffmpeg to finish the file cleanly ('q'), kill it if it does not within 5 s.
+    pub fn stop(mut self) {
+        use std::io::Write;
+        if let Some(mut si) = self.child.stdin.take() {
+            let _ = si.write_all(b"q");
+        }
+        for _ in 0..50 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Raw f32 little-endian mono samples from stdin.
 pub fn spawn_stdin(chunk: usize) -> Receiver<Vec<f32>> {
     spawn_reader(io::stdin(), chunk)

@@ -117,9 +117,10 @@ impl Event {
         }
     }
 
-    /// One JSON object, no trailing newline. `unix0` (stream start, Unix seconds) adds an
-    /// absolute closest-approach time.
-    pub fn to_json(&self, unix0: Option<f64>) -> String {
+    /// One JSON object, no trailing newline. Times are relative (seconds from the first
+    /// sample); with an anchor, the closest approach is also given in UTC (Coordinated
+    /// Universal Time) with the anchor's source.
+    pub fn to_json(&self, anchor: Option<&crate::timebase::Anchor>) -> String {
         let mut s = format!(
             "{{\"id\":{},\"grade\":\"{}\",\"t_cpa\":{:.2},\"t_start\":{:.2},\"t_end\":{:.2},\"f0_hz\":{:.2},\
              \"f_pre_hz\":{:.2},\"f_post_hz\":{:.2},\"speed_mps\":{:.1},\"cpa_dist_m\":{:.0},\
@@ -139,8 +140,13 @@ impl Event {
             self.harmonics,
             self.n_points
         );
-        if let Some(u) = unix0 {
-            s.push_str(&format!(",\"unix_cpa\":{:.2}", u + self.t_cpa));
+        match anchor {
+            Some(a) => s.push_str(&format!(
+                ",\"utc_cpa\":\"{}\",\"utc_source\":\"{}\"",
+                crate::timebase::fmt_utc(a.utc(self.t_cpa)),
+                crate::timebase::json_escape(&a.source)
+            )),
+            None => s.push_str(",\"utc_cpa\":null,\"utc_source\":\"none (relative time only)\""),
         }
         s.push('}');
         s

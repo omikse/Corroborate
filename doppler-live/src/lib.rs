@@ -10,5 +10,6 @@ pub mod ingest;
 pub mod ridge;
 pub mod spectro;
 pub mod synth;
+pub mod timebase;
 
 pub use detect::{Config, Detector, Event};
