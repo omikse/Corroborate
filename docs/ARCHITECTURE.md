@@ -66,3 +66,14 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
 
 `doppler-live/src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
 `Port` (required or optional), `Role` and `NodeSpec` (connection and readiness checks). Covered by tests.
+
+## Graph and timeline (in the library)
+
+- `graph.rs`: nodes with typed ports and wires. Rules: kinds must match, an input takes one wire,
+  an output may feed many inputs, no cycles. Also `missing` (required inputs not yet wired), `order`
+  (upstream first) and `trail` (the evidence trail of a node).
+- `timeline.rs`: lanes of items with a `TimeRef` and a `Source`. Absolute items have a UTC window
+  (time ± error), relative items wait for the solver (`unplaced`). `overlapping` lists items whose
+  windows could be the same moment. `strength` is a display choice: narrow margin, strong colour.
+
+Not yet: the solver (offsets from shared events), the viewer using these types, and the timeline UI.

@@ -19,8 +19,10 @@ pub mod modules;
 pub mod plugin;
 pub mod ridge;
 pub mod spectro;
+pub mod graph;
 pub mod synth;
 pub mod timebase;
+pub mod timeline;
 
 pub use detect::{Config, Detector, Event};
 pub use module::{Finding, Module, INPUT_SR};
