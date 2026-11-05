@@ -12,7 +12,6 @@ pub mod grid_frequencies;
 pub mod invert;
 pub mod manual;
 pub mod map;
-pub mod mic;
 pub mod plugin;
 pub mod planes;
 pub mod record;

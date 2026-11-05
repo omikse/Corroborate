@@ -3,12 +3,11 @@
 //! stores and dispatches to those modules. Nothing about a node is written down twice.
 
 use corroborate::core::NodeSpec;
-use corroborate::modules::{combine, enf, grid_frequencies, invert, manual, map, mic, planes, plugin, record, source};
+use corroborate::modules::{combine, enf, grid_frequencies, invert, manual, map, planes, plugin, record, source};
 
 #[derive(Clone, Debug)]
 pub enum Kind {
     Source { input: String },
-    Mic { device: String },
     /// Facts typed in by a person: date, time, place, coordinates, notes, own fields.
     Manual { rows: Vec<(String, String)> },
     Planes,
@@ -32,13 +31,12 @@ pub use record::{EVENTS as RECORD_EVENTS, FACTS as RECORD_FACTS, LOCATIONS as RE
 
 impl Kind {
     pub fn is_source(&self) -> bool {
-        matches!(self, Kind::Source { .. } | Kind::Mic { .. })
+        matches!(self, Kind::Source { .. })
     }
 
     pub fn default_label(&self) -> String {
         match self {
             Kind::Source { .. } => source::LABEL.into(),
-            Kind::Mic { .. } => mic::LABEL.into(),
             Kind::Manual { .. } => manual::LABEL.into(),
             Kind::Planes => planes::LABEL.into(),
             Kind::Enf { .. } => enf::LABEL.into(),
@@ -54,7 +52,6 @@ impl Kind {
     pub fn spec(&self) -> NodeSpec {
         match self {
             Kind::Source { .. } => source::spec(),
-            Kind::Mic { .. } => mic::spec(),
             Kind::Manual { .. } => manual::spec(),
             Kind::Planes => planes::spec(),
             Kind::Enf { .. } => enf::spec(),
@@ -73,7 +70,6 @@ impl Kind {
         match self {
             Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } => path.clone(),
             Kind::Source { input } => input.clone(),
-            Kind::Mic { device } => device.clone(),
             Kind::Combine { any } => combine::mode(*any).into(),
             Kind::Manual { .. } | Kind::Planes | Kind::Record | Kind::Map | Kind::Invert => String::new(),
         }
@@ -83,7 +79,7 @@ impl Kind {
     pub fn from_saved(name: &str, param: String) -> Option<Kind> {
         Some(match name {
             source::NAME | "file" | "stream" => Kind::Source { input: param },
-            mic::NAME => Kind::Mic { device: param },
+            "mic" => Kind::Source { input: format!("mic:{param}") },
             manual::NAME => Kind::Manual { rows: Vec::new() },
             planes::NAME => Kind::Planes,
             enf::NAME => Kind::Enf { grid: param },
@@ -107,7 +103,6 @@ pub fn menu() -> Vec<(&'static str, Vec<Kind>)> {
             "SOURCES",
             vec![
                 Kind::Source { input: String::new() },
-                Kind::Mic { device: String::new() },
                 Kind::Manual { rows: manual::defaults() },
             ],
         ),

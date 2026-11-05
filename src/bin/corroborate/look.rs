@@ -34,7 +34,6 @@ pub trait NodeLook: Sync {
 pub fn of(kind: &Kind) -> &'static dyn NodeLook {
     match kind {
         Kind::Source { .. } => &source_node::Look,
-        Kind::Mic { .. } => &mic_node::Look,
         Kind::Manual { .. } => &manual_node::Look,
         Kind::Planes => &planes_node::Look,
         Kind::Enf { .. } => &enf_node::Look,

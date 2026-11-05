@@ -29,8 +29,6 @@ mod invert_node;
 mod manual_node;
 #[path = "../../modules/map/node.rs"]
 mod map_node;
-#[path = "../../modules/mic/node.rs"]
-mod mic_node;
 #[path = "../../modules/planes/node.rs"]
 mod planes_node;
 #[path = "../../modules/plugin/node.rs"]
@@ -482,7 +480,6 @@ impl App {
             }
             let input = match &n.kind {
                 Kind::Source { input } => source_node::input(input),
-                Kind::Mic { device } => mic_node::input(device),
                 _ => None,
             };
             let Some(input) = input else {
@@ -563,7 +560,7 @@ impl App {
                 Kind::GridFrequencies { path } => grid_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
                 Kind::Manual { rows } => manual_node::json(rows),
-                Kind::Source { .. } | Kind::Mic { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
+                Kind::Source { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
                 Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
                 Kind::Record => {
                     drop(s);

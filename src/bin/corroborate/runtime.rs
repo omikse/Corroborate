@@ -83,7 +83,7 @@ fn all_states(job: &Job) -> Vec<Shared> {
 }
 
 fn run(job: Job) {
-    let live = job.input.live();
+    let mut live = job.input.live();
     let key = job.input.key();
     for s in all_states(&job) {
         let mut s = s.lock().unwrap();
@@ -100,9 +100,16 @@ fn run(job: Job) {
         Input::File(p) => p.clone(),
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
-            set_status("resolving the stream URL…");
+            set_status("asking yt-dlp what this link is…");
             match source_node::resolve(u) {
-                Ok(r) => r,
+                Ok((r, is_live)) => {
+                    // A video that is not live is read as a recording: as fast as it decodes.
+                    live = is_live;
+                    for s in all_states(&job) {
+                        s.lock().unwrap().live = live;
+                    }
+                    r
+                }
                 Err(e) => return finish(&job, Err(e)),
             }
         }

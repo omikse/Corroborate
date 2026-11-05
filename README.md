@@ -42,8 +42,7 @@ To change one node, edit only its folder:
 
 | Node | Folder | What it gives |
 |---|---|---|
-| Source data | [source](src/modules/source/README.md) | audio and time from a file (mp3, wav, video), a YouTube video or live stream, or a stream URL |
-| Microphone | [mic](src/modules/mic/README.md) | audio and time from a capture device |
+| Source data | [source](src/modules/source/README.md) | audio and time from a file (mp3, wav, video), a YouTube video or live stream, a stream URL, or a microphone |
 | Manual data | [manual](src/modules/manual/README.md) | facts typed in: date, time, place, coordinates, notes |
 | Planes (Doppler) | [planes](src/modules/planes/README.md) | aircraft passes: speed, closest approach, distance |
 | Power hum (ENF) | [enf](src/modules/enf/README.md) | mains hum runs, and the area where that grid frequency is used |
