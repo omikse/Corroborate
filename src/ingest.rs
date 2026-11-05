@@ -160,6 +160,9 @@ pub fn spawn_ffmpeg_from(input: &str, sr: u32, start_s: Option<f64>) -> Result<(
 /// First HLS segment URL ffmpeg opened (from its verbose log), shared with the caller.
 pub type FirstSegment = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
+/// The last error line ffmpeg printed, to show when a source gives no audio.
+pub static LAST_ERROR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
 /// Read ffmpeg's verbose stderr: note the first HLS segment requested, pass real errors on.
 fn watch_ffmpeg_log(stderr: std::process::ChildStderr, first: FirstSegment) {
     thread::spawn(move || {
@@ -173,8 +176,9 @@ fn watch_ffmpeg_log(stderr: std::process::ChildStderr, first: FirstSegment) {
                         *f = Some(rest[..j].to_string());
                     }
                 }
-            } else if line.contains("rror") && !line.contains("Skip") {
+            } else if line.contains("rror") && !line.contains("Skip") && !line.contains(" 0 decode errors") {
                 eprintln!("ffmpeg: {line}");
+                *LAST_ERROR.lock().unwrap() = line.trim().to_string();
             }
         }
     });

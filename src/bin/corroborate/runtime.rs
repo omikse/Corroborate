@@ -131,6 +131,7 @@ fn run(job: Job) {
     let mut enfs: Vec<_> = job.enfs.iter().map(enf_node::start).collect();
 
     set_status(if live { "connecting…" } else { "decoding…" });
+    ingest::LAST_ERROR.lock().unwrap().clear();
     let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
         Ok(x) => x,
         Err(e) => return finish(&job, Err(e)),
@@ -182,6 +183,10 @@ fn run(job: Job) {
     }
     for r in enfs.iter_mut() {
         enf_node::flush(r);
+    }
+    if n == 0 && !job.stop.load(Ordering::Relaxed) {
+        let e = ingest::LAST_ERROR.lock().unwrap().clone();
+        return finish(&job, Err(format!("no audio came out of ffmpeg{}", if e.is_empty() { String::new() } else { format!(": {e}") })));
     }
     finish(&job, Ok(n as f64 / INPUT_SR));
 }
