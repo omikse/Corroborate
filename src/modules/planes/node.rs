@@ -107,7 +107,12 @@ impl Default for View {
     }
 }
 
-const LIST_W: f32 = 250.0;
+const LIST_W: f32 = 290.0;
+/// The old doppler-live viewer's colours.
+const BG: Color32 = Color32::from_rgb(10, 11, 13);
+const PANEL: Color32 = Color32::from_rgb(22, 24, 28);
+const ACCENT: Color32 = Color32::from_rgb(120, 224, 150);
+const BLUE: Color32 = Color32::from_rgb(90, 120, 220);
 
 /// The Planes node on the canvas: the spectrogram with detected curves and plugin tracks, view
 /// controls (zoom and move time and Hz, Follow) and the list of aircraft; clicking one centres it.
@@ -115,7 +120,11 @@ pub struct Look;
 
 impl crate::look::NodeLook for Look {
     fn size(&self, _app: &App, _i: NodeId, _standard: Vec2) -> Vec2 {
-        Vec2::new(1000.0, 460.0)
+        Vec2::new(1100.0, 500.0)
+    }
+
+    fn fill(&self, _app: &App, _i: NodeId) -> Color32 {
+        BG
     }
 
     fn status(&self) -> bool {
@@ -154,28 +163,24 @@ impl crate::look::NodeLook for Look {
         let have = nb > 0 && nf > 0;
         let (t_first, t_last) = if have { (pl.hist_t[0], *pl.hist_t.last().unwrap()) } else { (0.0, 0.0) };
         let mut jump = None;
-        // Controls: they move only the picture.
-        crate::look::area(ui, bar, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{} aircraft · {} candidates · {} analysed", pl.passes.len(), pl.pending.len(), fmt_rel(s.audio_s))).small().color(DIM));
-                ui.separator();
-                ui.add(egui::DragValue::new(&mut v.span).range(0.0..=36000.0).suffix(" s view").speed(2.0));
-                if ui.small_button("all").clicked() {
-                    v.span = 0.0;
-                }
-                if ui.small_button("Hz reset").clicked() {
-                    v.band = None;
-                }
-                let follow = v.end.is_none();
-                if ui.selectable_label(follow, "● FOLLOW").clicked() {
-                    v.end = if follow { Some(t_last) } else { None };
-                }
-            });
-        });
-        // Aircraft list on the right.
-        crate::look::area(ui, list, |ui| {
-            ui.label(egui::RichText::new("AIRCRAFT · click to jump").small().color(TEXT));
-            crate::look::line(ui, "  #  closest      f0     v    d  grade", DIM);
+        // The old viewer's theme: near-black panels, green accents, monospace text.
+        ui.painter().rect_filled(r, 0.0, BG);
+        ui.painter().text(
+            bar.left_center() + Vec2::new(4.0 * z, 0.0),
+            Align2::LEFT_CENTER,
+            format!("PASSES {}  candidates {}  AUDIO {}  view {:.0} s", pl.passes.len(), pl.pending.len(), fmt_rel(s.audio_s), if v.span > 0.0 { v.span } else { t_last - t_first }),
+            font.clone(),
+            ACCENT,
+        );
+        // PLANES box on the right: the detected aircraft.
+        let pbox = list.shrink(2.0 * z);
+        ui.painter().rect_filled(pbox, 2.0 * z, PANEL);
+        ui.painter().rect_filled(Rect::from_min_size(pbox.min, Vec2::new(3.0 * z, pbox.height())), 0.0, ACCENT);
+        crate::look::area(ui, pbox.shrink2(Vec2::new(10.0 * z, 6.0 * z)), |ui| {
+            ui.label(egui::RichText::new("PLANES").monospace().color(TEXT));
+            crate::look::line(ui, format!("aircraft Doppler curves · {:.0}-{:.0} Hz", pl.freqs.first().unwrap_or(&0.0), pl.freqs.last().unwrap_or(&0.0)), DIM);
+            crate::look::line(ui, "click a pass to jump to it", DIM);
+            crate::look::line(ui, "  #  T_CPA      f0     v    d  grade", DIM);
             egui::ScrollArea::vertical().id_salt(("planes-list", i)).auto_shrink([false; 2]).show(ui, |ui| {
                 if pl.passes.is_empty() {
                     crate::look::line(ui, "none yet", DIM);
@@ -190,7 +195,12 @@ impl crate::look::NodeLook for Look {
                 }
             });
         });
-        let plot_r = Rect::from_min_max(Pos2::new(left.left() + 36.0 * z, bar.bottom() + 4.0 * z), Pos2::new(left.right(), left.bottom() - 16.0 * z));
+        let plot_r = Rect::from_min_max(Pos2::new(left.left() + 56.0 * z, bar.bottom() + 4.0 * z), Pos2::new(left.right(), left.bottom() - 40.0 * z));
+        // Left: the whole band with the shown Hz range as a box. Bottom: the whole audio with the
+        // shown time as a green window, and FOLLOW.
+        let fbar = Rect::from_min_max(Pos2::new(left.left() + 4.0 * z, plot_r.top()), Pos2::new(left.left() + 18.0 * z, plot_r.bottom()));
+        let tbar = Rect::from_min_max(Pos2::new(plot_r.left(), left.bottom() - 18.0 * z), Pos2::new(plot_r.right() - 90.0 * z, left.bottom() - 2.0 * z));
+        let fbtn = Rect::from_min_max(Pos2::new(tbar.right() + 8.0 * z, tbar.top()), Pos2::new(plot_r.right(), tbar.bottom()));
         if !have {
             ui.painter().text(plot_r.center(), Align2::CENTER_CENTER, "no audio yet: press Run", font, DIM);
             drop(s);
@@ -250,6 +260,41 @@ impl crate::look::NodeLook for Look {
         if resp.double_clicked() {
             v = View::default();
         }
+        // Frequency bar: drag or click moves the Hz box; wheel resizes it.
+        let fr = ui.interact(fbar.expand(3.0 * z), id.with("fbar"), Sense::click_and_drag());
+        let hz_at = |y: f32| f_lo0 + ((fbar.bottom() - y) / fbar.height()).clamp(0.0, 1.0) as f64 * (f_hi0 - f_lo0);
+        if let Some(h) = fr.interact_pointer_pos().filter(|_| fr.dragged() || fr.clicked()) {
+            let (lo, hi) = v.band.unwrap_or((f_lo0, f_hi0));
+            let half = (hi - lo) / 2.0;
+            let c = hz_at(h.y).clamp(f_lo0 + half, f_hi0 - half);
+            v.band = Some((c - half, c + half));
+        }
+        if fr.hovered() {
+            let dy = ui.input_mut(|inp| std::mem::take(&mut inp.smooth_scroll_delta).y);
+            if dy != 0.0 {
+                let (lo, hi) = v.band.unwrap_or((f_lo0, f_hi0));
+                let (c, half) = ((lo + hi) / 2.0, ((hi - lo) / 2.0 * (-(dy as f64) / 200.0).exp()).clamp(2.0, (f_hi0 - f_lo0) / 2.0));
+                let c = c.clamp(f_lo0 + half, f_hi0 - half);
+                v.band = Some((c - half, c + half));
+            }
+        }
+        // Time bar: drag or click moves the window; wheel resizes it.
+        let tr = ui.interact(tbar, id.with("tbar"), Sense::click_and_drag());
+        let t_at = |x: f32| t_first + ((x - tbar.left()) / tbar.width()).clamp(0.0, 1.0) as f64 * (t_last - t_first);
+        if let Some(h) = tr.interact_pointer_pos().filter(|_| tr.dragged() || tr.clicked()) {
+            let sp = span_of(&v);
+            let e = (t_at(h.x) + sp / 2.0).min(t_last);
+            v.end = if e >= t_last && v.end.is_none() { None } else { Some(e) };
+        }
+        if tr.hovered() {
+            let dy = ui.input_mut(|inp| std::mem::take(&mut inp.smooth_scroll_delta).y);
+            if dy != 0.0 {
+                v.span = (span_of(&v) * (-(dy as f64) / 200.0).exp()).clamp(5.0, (t_last - t_first).max(5.0));
+            }
+        }
+        if ui.interact(fbtn, id.with("follow"), Sense::click()).clicked() {
+            v.end = if v.end.is_none() { Some(t_last) } else { None };
+        }
         // Draw with the view as it is after this frame's input.
         let t1 = v.end.unwrap_or(t_last);
         let t0 = t1 - span_of(&v);
@@ -292,6 +337,20 @@ impl crate::look::NodeLook for Look {
         let img_r = Rect::from_min_max(Pos2::new(x_of(pl.hist_t[f_first]), plot_r.top()), Pos2::new(x_of(pl.hist_t[f_last - 1]), plot_r.bottom()));
         let uv_y = |f: f64| (1.0 - (f - f_lo0) / (f_hi0 - f_lo0)) as f32;
         p.with_clip_rect(plot_r).image(tex, img_r, Rect::from_min_max(Pos2::new(0.0, uv_y(f_hi)), Pos2::new(1.0, uv_y(f_lo))), Color32::WHITE);
+        // The two bars and FOLLOW.
+        let fy = |f: f64| fbar.bottom() - ((f - f_lo0) / (f_hi0 - f_lo0)) as f32 * fbar.height();
+        p.rect_filled(fbar, 2.0 * z, PANEL);
+        p.rect_stroke(Rect::from_min_max(Pos2::new(fbar.left(), fy(f_hi)), Pos2::new(fbar.right(), fy(f_lo))), 1.0, Stroke::new(1.2 * z, TEXT), egui::StrokeKind::Inside);
+        let tx = |t: f64| tbar.left() + ((t - t_first) / (t_last - t_first).max(1e-6)) as f32 * tbar.width();
+        p.rect_filled(tbar, 2.0 * z, PANEL);
+        for e in &pl.passes {
+            p.line_segment([Pos2::new(tx(e.t_cpa), tbar.top() + 3.0 * z), Pos2::new(tx(e.t_cpa), tbar.bottom() - 3.0 * z)], Stroke::new(2.0 * z, BLUE));
+        }
+        p.rect_stroke(Rect::from_min_max(Pos2::new(tx(t0.max(t_first)), tbar.top()), Pos2::new(tx(t1).max(tx(t0.max(t_first)) + 3.0), tbar.bottom())), 1.0, Stroke::new(1.5 * z, ACCENT), egui::StrokeKind::Inside);
+        p.text(Pos2::new(tbar.left() - 6.0 * z, tbar.center().y), Align2::RIGHT_CENTER, "time", font.clone(), DIM);
+        let on = v.end.is_none();
+        p.rect_stroke(fbtn, 2.0 * z, Stroke::new(1.0 * z, if on { ACCENT } else { DIM }), egui::StrokeKind::Inside);
+        p.text(fbtn.center(), Align2::CENTER_CENTER, "● FOLLOW", font.clone(), if on { ACCENT } else { DIM });
         for k in 0..=5 {
             let f = f_lo + (f_hi - f_lo) * k as f64 / 5.0;
             p.text(Pos2::new(plot_r.left() - 3.0 * z, y_of(f)), Align2::RIGHT_CENTER, format!("{f:.0}"), font.clone(), DIM);
@@ -299,8 +358,8 @@ impl crate::look::NodeLook for Look {
         p.text(Pos2::new(left.left(), plot_r.top()), Align2::LEFT_TOP, "Hz", font.clone(), DIM);
         for k in 0..=6 {
             let t = t0 + (t1 - t0) * k as f64 / 6.0;
-            let al = if k == 0 { Align2::LEFT_BOTTOM } else if k == 6 { Align2::RIGHT_BOTTOM } else { Align2::CENTER_BOTTOM };
-            p.text(Pos2::new(x_of(t), left.bottom()), al, tlabel(t), font.clone(), DIM);
+            let al = if k == 0 { Align2::LEFT_TOP } else if k == 6 { Align2::RIGHT_TOP } else { Align2::CENTER_TOP };
+            p.text(Pos2::new(x_of(t), plot_r.bottom() + 3.0 * z), al, tlabel(t), font.clone(), DIM);
         }
         let clip = p.with_clip_rect(plot_r);
         for (c, tracks) in &overlays {
