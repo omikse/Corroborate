@@ -586,6 +586,10 @@ impl App {
             if let Kind::Source { input } = &n.kind {
                 s.push_str(&format!("{i}:{input}|"));
                 for (t, _) in self.graph.targets(i, "audio") {
+                    // Wiring audio into a record taps it while recording: no restart.
+                    if matches!(self.nodes[t].kind, Kind::Record { .. }) {
+                        continue;
+                    }
                     s.push_str(&format!("{t}:{}:{};", self.nodes[t].kind.spec().name, self.nodes[t].kind.saved_param()));
                 }
             }

@@ -28,6 +28,8 @@ pub struct NodeState {
     /// UTC of the source's relative time 0, and where it came from.
     pub anchor: Option<Anchor>,
     pub audio_s: f64,
+    /// The run that owns this state now: a stopped run that ends late leaves it alone.
+    pub run_id: u64,
     pub planes: PlanesState,
     pub enf: EnfState,
     pub plugin: PluginState,
@@ -73,6 +75,8 @@ pub struct Job {
     pub taps: crate::record_node::Taps,
 }
 
+static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub fn start(job: Job) {
     thread::spawn(move || run(job));
 }
@@ -86,11 +90,13 @@ fn all_states(job: &Job) -> Vec<Shared> {
 }
 
 fn run(job: Job) {
+    let run_id = RUNS.fetch_add(1, Ordering::Relaxed);
     let mut live = job.input.live();
     let key = job.input.key();
     for s in all_states(&job) {
         let mut s = s.lock().unwrap();
         s.reset();
+        s.run_id = run_id;
         s.running = true;
         s.live = live;
         s.source_label = job.label.clone();
@@ -113,7 +119,7 @@ fn run(job: Job) {
                     }
                     r
                 }
-                Err(e) => return finish(&job, Err(e)),
+                Err(e) => return finish(&job, run_id, Err(e)),
             }
         }
     };
@@ -142,7 +148,7 @@ fn run(job: Job) {
     ingest::LAST_ERROR.lock().unwrap().clear();
     let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
         Ok(x) => x,
-        Err(e) => return finish(&job, Err(e)),
+        Err(e) => return finish(&job, run_id, Err(e)),
     };
     if live {
         timebase::upgrade_from_hls(ff_input.clone(), first, anchor.clone(), 0.0);
@@ -188,6 +194,11 @@ fn run(job: Job) {
         s.status = if live { "live".into() } else { "decoding…".into() };
     }
     let _ = child.wait();
+    if job.stop.load(Ordering::Relaxed) {
+        // Stopped for a restart: the new run owns the shared state; only release what is ours.
+        drop(feeds);
+        return finish(&job, run_id, Ok(0.0));
+    }
     // End of input: plugins report what they hold and exit.
     drop(feeds);
     for (p, s) in planes.iter_mut() {
@@ -198,19 +209,24 @@ fn run(job: Job) {
     }
     if n == 0 && !job.stop.load(Ordering::Relaxed) {
         let e = ingest::LAST_ERROR.lock().unwrap().clone();
-        return finish(&job, Err(format!("no audio came out of ffmpeg{}", if e.is_empty() { String::new() } else { format!(": {e}") })));
+        return finish(&job, run_id, Err(format!("no audio came out of ffmpeg{}", if e.is_empty() { String::new() } else { format!(": {e}") })));
     }
-    finish(&job, Ok(n as f64 / INPUT_SR));
+    finish(&job, run_id, Ok(n as f64 / INPUT_SR));
 }
 
-fn finish(job: &Job, r: Result<f64, String>) {
+fn finish(job: &Job, run_id: u64, r: Result<f64, String>) {
     let stopped = job.stop.load(Ordering::Relaxed);
     for s in all_states(job) {
         let mut s = s.lock().unwrap();
-        s.running = false;
-        s.done = true;
+        if s.run_id == run_id {
+            s.running = false;
+            s.done = true;
+        }
     }
     let mut s = job.source.lock().unwrap();
+    if s.run_id != run_id {
+        return;
+    }
     s.status = match r {
         Ok(_) if stopped => "stopped".into(),
         Ok(secs) if s.live => format!("stream ended after {secs:.0} s"),
