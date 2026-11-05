@@ -22,8 +22,6 @@ pub type Shared = Arc<Mutex<NodeState>>;
 /// Spectrogram value range kept for display (whitened z-scores).
 const Z_LO: f32 = -1.0;
 const Z_HI: f32 = 6.0;
-/// Live sources keep this many spectrogram frames (0.25 s each): one hour.
-const LIVE_FRAMES: usize = 14_400;
 
 #[derive(Default, Clone)]
 pub struct PluginState {
@@ -293,11 +291,6 @@ fn run(job: Job) {
                 s.hist.extend_from_slice(&q);
                 s.hist_t.push(t);
                 s.frames += 1;
-            }
-            if live && s.hist_t.len() > LIVE_FRAMES + 400 {
-                let k = s.hist_t.len() - LIVE_FRAMES;
-                s.hist.drain(..k * nb);
-                s.hist_t.drain(..k);
             }
             s.ridges = p.detector().ridges().to_vec();
             s.pending = p.detector().pending().cloned().collect();

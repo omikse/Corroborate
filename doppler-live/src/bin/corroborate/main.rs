@@ -184,7 +184,7 @@ const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
 impl App {
-    fn new(start: Option<String>) -> Self {
+    fn new(start: Option<String>, autorun: bool) -> Self {
         let mut app = Self {
             mode: Mode::Work,
             demo: None,
@@ -203,7 +203,7 @@ impl App {
             lut: colormap(),
             tl: (0.0, 600.0),
             follow: true,
-            spec_minutes: 10.0,
+            spec_minutes: 0.0,
             mics: Vec::new(),
             last_project_save: Instant::now(),
         };
@@ -219,6 +219,9 @@ impl App {
                     app.add(kind, Pos2::new(30.0, 60.0));
                 }
             }
+        }
+        if autorun {
+            app.run();
         }
         app
     }
@@ -1419,7 +1422,10 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
-    let start = std::env::args().nth(1);
+    // corroborate [path or URL] [--run]: --run starts the saved project at once (unattended runs).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let autorun = args.iter().any(|a| a == "--run");
+    let start = args.into_iter().find(|a| !a.starts_with("--"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 780.0]).with_title("Corroborate"),
         ..Default::default()
@@ -1429,7 +1435,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App::new(start)))
+            Ok(Box::new(App::new(start, autorun)))
         }),
     )
 }
