@@ -153,14 +153,19 @@ pub fn bundled_plugins() -> Vec<String> {
     found
 }
 
-/// The grid-frequency file that ships with the program: next to it, or in the repo's data folder.
+/// The grid-frequency file that ships with the program: next to it, or in the source tree it was built from.
 pub fn bundled_grid_file() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    [dir.join("grid-frequencies.json"), dir.join("data").join("grid-frequencies.json"), dir.join("../../src/modules/enf/grid-frequencies.json")]
-        .into_iter()
-        .find(|p| p.exists())
-        .map_or(String::new(), |p| p.canonicalize().unwrap_or(p).to_string_lossy().trim_start_matches(r"\?\").to_string())
+    [
+        dir.join("grid-frequencies.json"),
+        dir.join("data").join("grid-frequencies.json"),
+        dir.join("../../src/modules/enf/grid-frequencies.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/modules/enf/grid-frequencies.json"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .map_or(String::new(), |p| p.canonicalize().unwrap_or(p).to_string_lossy().trim_start_matches(r"\\?\").to_string())
 }
 
 pub fn manual_defaults() -> Vec<(String, String)> {

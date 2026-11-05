@@ -246,6 +246,48 @@ impl App {
     }
 
     /// Stream → Planes and ENF with GridFrequencies; Manual data; all into Record with location constraints.
+    /// Demo: a live stream whose place is unknown; ENF hears the mains hum and the world is cut
+    /// to where that grid frequency is used. Maps show it adding (green), inverted (red) and
+    /// stacked in the Result record. The current project is kept as project-before-demo.txt.
+    fn enf_demo(&mut self) {
+        self.stop_all();
+        self.save_project();
+        let backup = project_file().map(|p| {
+            let b = p.with_file_name("project-before-demo.txt");
+            let _ = std::fs::copy(&p, &b);
+            b
+        });
+        self.graph = Graph::new();
+        self.nodes.clear();
+        self.open.clear();
+        self.textures.clear();
+        self.pan = Vec2::ZERO;
+        let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 200.0));
+        self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
+        let grid = self.add(Kind::GridFrequencies { path: nodes::bundled_grid_file() }, Pos2::new(20.0, 300.0));
+        let enf = self.add(Kind::Enf, Pos2::new(250.0, 200.0));
+        let inv = self.add(Kind::Invert, Pos2::new(250.0, 40.0));
+        let map_add = self.add(Kind::Map, Pos2::new(500.0, 330.0));
+        let map_inv = self.add(Kind::Map, Pos2::new(500.0, 20.0));
+        let rec = self.add(Kind::Record, Pos2::new(870.0, 20.0));
+        let map_rec = self.add(Kind::Map, Pos2::new(870.0, 330.0));
+        self.wire(src, "audio", enf, "audio");
+        self.wire(src, "time", enf, "time");
+        self.wire(grid, "data", enf, "grid");
+        self.wire(enf, "location", map_add, "location");
+        self.wire(enf, "location", inv, "location");
+        self.wire(inv, "location", map_inv, "location");
+        self.wire(enf, "hum", rec, nodes::RECORD_EVENTS[0]);
+        self.wire(enf, "location", rec, nodes::RECORD_LOCATIONS[0]);
+        self.wire(rec, "location", map_rec, "location");
+        self.save_project();
+        self.run();
+        self.msg = format!(
+            "ENF demo running: the hum decides the grid in about a minute. Your previous project: {}",
+            backup.map_or("not saved".into(), |b| b.display().to_string())
+        );
+    }
+
     fn default_project(&mut self) {
         let src = self.add(Kind::Stream { url: String::new() }, Pos2::new(30.0, 40.0));
         let mut rows = nodes::manual_defaults();
@@ -877,7 +919,7 @@ impl App {
                 let top = rect.top() + HEAD + ROW + 8.0;
                 let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0, top), Vec2::new(rect.width() - 12.0, (rect.width() - 12.0) / ROBINSON_ASPECT as f32));
                 let area = self.graph.feeder(i, "location").and_then(|(f, _)| self.area_from(f).ok()).map(|(a, _)| a);
-                paint_area_map(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref(), &self.grid_outlines());
+                paint_area_map(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref());
             }
             // Status line at the bottom of the node.
             let (status, running) = {
@@ -1315,11 +1357,10 @@ impl App {
             }
             Kind::Map => {
                 let earth = self.earth.as_ref().map(|t| t.id());
-                let outlines = self.grid_outlines();
                 match self.graph.feeder(i, "location") {
                     None => {
                         ui.colored_label(DIM, "wire a location into this node: ENF, Manual data, Combine, Invert or the Result record");
-                        draw_area_map(ui, earth, None, &outlines);
+                        draw_area_map(ui, earth, None);
                     }
                     Some((from, _)) => match self.area_from(from) {
                         Ok((a, note)) => {
@@ -1332,11 +1373,11 @@ impl App {
                                 al.area_km2() / 1e6
                             ));
                             ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { DIM }, note);
-                            draw_area_map(ui, earth, Some(&a), &outlines);
+                            draw_area_map(ui, earth, Some(&a));
                         }
                         Err(e) => {
                             ui.colored_label(DIM, format!("{}: {e}", self.nodes[from].label));
-                            draw_area_map(ui, earth, None, &outlines);
+                            draw_area_map(ui, earth, None);
                         }
                     },
                 }
@@ -1528,12 +1569,24 @@ impl App {
                 }
             }
             ui.separator();
-            let label = if self.mode == Mode::Demo { "◀ Back to workspace" } else { "Demo: protest scenario" };
-            if ui.button(label).clicked() {
-                self.mode = if self.mode == Mode::Demo { Mode::Work } else { Mode::Demo };
-                if self.demo.is_none() {
-                    self.demo = Some(demo::Demo::new());
+            if self.mode == Mode::Demo {
+                if ui.button("◀ Back to workspace").clicked() {
+                    self.mode = Mode::Work;
                 }
+            } else {
+                ui.menu_button("Demos", |ui| {
+                    if ui.button("Protest scenario (synthetic, view only)").clicked() {
+                        self.mode = Mode::Demo;
+                        if self.demo.is_none() {
+                            self.demo = Some(demo::Demo::new());
+                        }
+                        ui.close();
+                    }
+                    if ui.button("ENF location: live stream, place unknown").clicked() {
+                        self.enf_demo();
+                        ui.close();
+                    }
+                });
             }
             ui.colored_label(DIM, &self.msg);
         });
@@ -1699,9 +1752,11 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
-    // corroborate [path or URL] [--run]: --run starts the saved project at once (unattended runs).
+    // corroborate [path or URL] [--run] [--demo-enf]: --run starts the saved project at once
+    // (unattended runs); --demo-enf opens and runs the ENF location demo.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let autorun = args.iter().any(|a| a == "--run");
+    let demo_enf = args.iter().any(|a| a == "--demo-enf");
     let start = args.into_iter().find(|a| !a.starts_with("--"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 780.0]).with_title("Corroborate"),
@@ -1712,7 +1767,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App::new(start, autorun)))
+            let mut app = App::new(start, autorun);
+            if demo_enf {
+                app.enf_demo();
+            }
+            Ok(Box::new(app))
         }),
     )
 }
@@ -1752,35 +1811,21 @@ impl App {
         if steps.is_empty() {
             ui.colored_label(DIM, "wire areas (ENF location, Manual place) into the location inputs to subtract from the world");
         }
-        draw_area_map(ui, self.earth.as_ref().map(|t| t.id()), Some(&Area::add(m)), &self.grid_outlines());
+        draw_area_map(ui, self.earth.as_ref().map(|t| t.id()), Some(&Area::add(m)));
     }
 }
 
-impl App {
-    /// Outlines of the regions of every Grid frequencies node: the only geography drawn.
-    fn grid_outlines(&self) -> Vec<(f64, Vec<(f64, f64)>)> {
-        let mut v = Vec::new();
-        for n in self.nodes.iter().filter(|n| !n.hidden) {
-            if let Kind::GridFrequencies { path } = &n.kind {
-                if let Ok(g) = load_grid(path) {
-                    v.extend(g.regions.into_iter().map(|r| (r.hz, r.polygon)));
-                }
-            }
-        }
-        v
-    }
-}
 
 const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
 const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
 
 /// A world map in the Robinson projection. Green: cells the area keeps (where it adds
 /// possibility). Red: cells it rules out (where it subtracts). Grey: no area yet.
-fn draw_area_map(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option<&Area>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+fn draw_area_map(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option<&Area>) {
     let w = ui.available_width().clamp(200.0, 1400.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w / ROBINSON_ASPECT as f32), Sense::hover());
     let p = ui.painter_at(rect);
-    paint_area_map(&p, rect, earth, area, outlines);
+    paint_area_map(&p, rect, earth, area);
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
@@ -1802,7 +1847,7 @@ fn draw_area_map(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option
     }
     ui.colored_label(
         DIM,
-        "green: an area that adds (the place is here) · red: an area that subtracts (not here) · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · image: NASA Blue Marble (public domain) · coastlines: Natural Earth 1:110m",
+        "green: an area that adds (the place is here) · red: an area that subtracts (not here) · Robinson projection, 1° cells, lines every 30° · image: NASA Blue Marble (public domain) · coastlines: Natural Earth 1:110m",
     );
 }
 
@@ -1825,7 +1870,7 @@ fn coastlines() -> &'static [Vec<(f64, f64)>] {
     })
 }
 
-fn paint_area_map(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area: Option<&Area>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+fn paint_area_map(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area: Option<&Area>) {
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
@@ -1908,19 +1953,6 @@ fn paint_area_map(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>,
     for k in -2..=2 {
         let lat = k as f64 * 30.0;
         p.line_segment([at(lat, -180.0), at(lat, 180.0)], grat);
-    }
-    for (hz, poly) in outlines {
-        let mut pts = Vec::new();
-        for j in 0..poly.len() {
-            let (a, b) = (poly[j], poly[(j + 1) % poly.len()]);
-            let steps = ((a.0 - b.0).abs().max((a.1 - b.1).abs()) / 2.0).ceil().max(1.0) as usize;
-            for s in 0..steps {
-                let f = s as f64 / steps as f64;
-                pts.push(at(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f));
-            }
-        }
-        let c = if *hz > 55.0 { Color32::from_rgb(255, 200, 120) } else { Color32::from_rgb(150, 200, 255) };
-        p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, alpha(c, 0.8))));
     }
 }
 
