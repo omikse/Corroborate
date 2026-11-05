@@ -50,8 +50,11 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
   links are resolved with yt-dlp). Opening a new source closes the current one cleanly. **Settings ▸
   Recording…** sets the output folder, the format (raw stream copy or decoded WAV) and the file-name
   prefix. **Settings ▸ Theme** switches between light and dark; the plot areas stay dark in both.
-  Settings are saved in `%APPDATA%\doppler-view\settings.txt`. `doppler-view` can also start with no
-  arguments.
+  `doppler-view` can also start with no arguments.
+- **Settings file**: one file, `%APPDATA%\doppler-view\settings.txt`, keeps the theme, the recording folder,
+  format and prefix, the view toggles and the plugins, and is loaded at every start. The app rewrites it
+  whenever you change something; **Settings ▸ Show settings file** opens its folder. Edit it by hand only
+  while the app is closed.
 - **Defaults**: light theme, smooth on, audio on. Audio stays as you left it when you switch sources.
 
 - **Recordings**: analysed as fast as the machine allows, so the whole timeline can be scrolled
@@ -130,6 +133,10 @@ plugin that crashes stops on its own; the viewer carries on and says so in the p
 
 - **Plugins ▸ Import plugin…** adds a program; the list there switches plugins on or off and removes them.
   Changes restart the current source so the plugins see it from the first sample (not while recording).
+  The list is kept in the settings file, so plugins are imported once.
+- Plugins that come with the viewer (the other programs in its folder: `enf-plugin`, `meta-plugin`,
+  `adsb-check`) are added and switched on by themselves the first time the viewer sees them. One you remove
+  stays removed (`plugin_removed=` in the settings file); importing it again brings it back.
 - **Arguments**: `--source <path or URL>` and `--file` or `--live`, so a plugin can read the source's own
   metadata.
 - **Audio in** (stdin): raw f32 little-endian, mono, 16 000 Hz, from the first sample. End of input is the

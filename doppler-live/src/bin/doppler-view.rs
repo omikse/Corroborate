@@ -116,6 +116,8 @@ struct Settings {
     show_slice: bool,
     /// Imported plugins: executable path, on or off.
     plugins: Vec<(String, bool)>,
+    /// Bundled plugins the user removed: not added again.
+    removed_plugins: Vec<String>,
     rec: RecSettings,
 }
 
@@ -135,12 +137,16 @@ impl Settings {
             show_wave: true,
             show_slice: true,
             plugins: Vec::new(),
+            removed_plugins: Vec::new(),
             // Default: straight into the folder the app runs from, ready to record at once.
             rec: RecSettings { folder: cwd.to_string_lossy().into_owned(), raw: true, prefix: "doppler".into() },
         };
         let old_default_folder = cwd.join("recordings").to_string_lossy().into_owned();
         if let Some(text) = Self::file().and_then(|p| std::fs::read_to_string(p).ok()) {
             for line in text.lines() {
+                if line.trim_start().starts_with('#') {
+                    continue;
+                }
                 let Some((k, v)) = line.split_once('=') else { continue };
                 match k.trim() {
                     "theme" => s.light = v.trim() != "dark",
@@ -152,6 +158,7 @@ impl Settings {
                             s.plugins.push((path.trim().to_string(), state.trim() != "off"));
                         }
                     }
+                    "plugin_removed" if !v.trim().is_empty() => s.removed_plugins.push(v.trim().to_string()),
                     // Earlier builds saved their defaults (recordings/, "rec"): treat those as unset.
                     "rec_folder" if !v.trim().is_empty() && v.trim() != old_default_folder => {
                         s.rec.folder = v.trim().to_string()
@@ -171,7 +178,10 @@ impl Settings {
             let _ = std::fs::create_dir_all(d);
         }
         let mut text = format!(
-            "theme={}\nminimap={}\nshow_wave={}\nshow_slice={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
+            "# doppler-view settings: written by the app whenever you change something.\n\
+             # Edit by hand only while the app is closed. plugin=on|path or off|path; plugin_removed=path\n\
+             # keeps a bundled plugin from being added again.\n\
+             theme={}\nminimap={}\nshow_wave={}\nshow_slice={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
             if self.light { "light" } else { "dark" },
             if self.minimap { "on" } else { "off" },
             if self.show_wave { "on" } else { "off" },
@@ -183,7 +193,39 @@ impl Settings {
         for (path, on) in &self.plugins {
             text.push_str(&format!("plugin={}|{}\n", if *on { "on" } else { "off" }, path));
         }
+        for path in &self.removed_plugins {
+            text.push_str(&format!("plugin_removed={path}\n"));
+        }
         let _ = std::fs::write(p, text);
+    }
+
+    /// Plugins that come with the viewer (other programs in its own folder) are added, switched on,
+    /// the first time they are seen, unless the user removed them. True if any were added.
+    fn add_bundled_plugins(&mut self) -> bool {
+        let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) else { return false };
+        let mut added = false;
+        let mut found: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+            .filter(|p| {
+                let stem = p.file_stem().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+                stem != "doppler-view" && stem != "doppler-live"
+            })
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        for path in found {
+            let known = self.plugins.iter().any(|(q, _)| q.eq_ignore_ascii_case(&path))
+                || self.removed_plugins.iter().any(|q| q.eq_ignore_ascii_case(&path));
+            if !known {
+                self.plugins.push((path, true));
+                added = true;
+            }
+        }
+        added
     }
 
     /// Paths of the plugins that are switched on.
@@ -1577,6 +1619,17 @@ impl eframe::App for App {
                         self.rec_dialog = true;
                         ui.close();
                     }
+                    let file = Settings::file();
+                    let hover = file.as_ref().map_or("no settings folder".to_string(), |f| {
+                        format!("{}\nTheme, recording folder, view and plugins are kept here and loaded at every start.", f.display())
+                    });
+                    if ui.button("Show settings file").on_hover_text(hover).clicked() {
+                        if let Some(f) = file {
+                            // Opens Explorer with the file selected.
+                            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", f.display())).spawn();
+                        }
+                        ui.close();
+                    }
                     ui.menu_button("Theme", |ui| {
                         if ui.radio(!light(), "Dark").clicked() {
                             action = Some(Action::Theme(false));
@@ -2824,6 +2877,7 @@ Time is the PC clock when the audio arrives.")
                     .pick_file();
                 if let Some(path) = pick {
                     let path = path.to_string_lossy().into_owned();
+                    self.settings.removed_plugins.retain(|q| !q.eq_ignore_ascii_case(&path));
                     if !self.settings.plugins.iter().any(|(q, _)| *q == path) {
                         self.settings.plugins.push((path, true));
                     }
@@ -2838,7 +2892,9 @@ Time is the PC clock when the audio arrives.")
             }
             Some(Action::RemovePlugin(i)) => {
                 if i < self.settings.plugins.len() {
-                    self.settings.plugins.remove(i);
+                    let (path, _) = self.settings.plugins.remove(i);
+                    // So a bundled plugin is not added back at the next start.
+                    self.settings.removed_plugins.push(path);
                 }
                 self.plugins_changed();
             }
@@ -3127,14 +3183,18 @@ fn main() -> Result<(), String> {
             s => input = Some(s.to_string()),
         }
     }
-    LIGHT.store(Settings::load().light, Ordering::Relaxed);
+    let mut settings = Settings::load();
+    if settings.add_bundled_plugins() {
+        settings.save();
+    }
+    LIGHT.store(settings.light, Ordering::Relaxed);
     let current = if stdin {
         Some((Source::Stdin, "stdin".to_string()))
     } else {
         input.map(|i| (source_for(&i, start), short_label(&i)))
     };
     let session = match &current {
-        Some((src, label)) => Session::open(src.clone(), label.clone(), Settings::load().enabled_plugins(), load_manual(src)),
+        Some((src, label)) => Session::open(src.clone(), label.clone(), settings.enabled_plugins(), load_manual(src)),
         None => Session::idle(),
     };
 
