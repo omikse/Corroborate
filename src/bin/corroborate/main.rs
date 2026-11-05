@@ -300,18 +300,7 @@ impl App {
     /// to where that grid frequency is used (its own map shows it adding, green). Maps show it
     /// inverted (red) and stacked in the Result record. The current project is kept as project-before-demo.txt.
     fn enf_demo(&mut self) {
-        self.stop_all();
-        self.save_project();
-        let backup = project_file().map(|p| {
-            let b = p.with_file_name("project-before-demo.txt");
-            let _ = std::fs::copy(&p, &b);
-            b
-        });
-        self.graph = Graph::new();
-        self.nodes.clear();
-        self.textures.clear();
-        self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
+        let backup = self.clear_for_demo();
         let src = self.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 240.0));
         self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
         let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(240.0, 140.0));
@@ -328,6 +317,60 @@ impl App {
         self.run();
         self.msg = format!(
             "ENF demo running: the hum decides the grid in about a minute. Your previous project: {}",
+            backup.map_or("not saved".into(), |b| b.display().to_string())
+        );
+    }
+
+    /// Stops everything and empties the canvas; the current project is kept as project-before-demo.txt.
+    fn clear_for_demo(&mut self) -> Option<std::path::PathBuf> {
+        self.stop_all();
+        self.save_project();
+        let backup = project_file().map(|p| {
+            let b = p.with_file_name("project-before-demo.txt");
+            let _ = std::fs::copy(&p, &b);
+            b
+        });
+        self.graph = Graph::new();
+        self.nodes.clear();
+        self.textures.clear();
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
+        backup
+    }
+
+    /// Demo: the same Cornell Lab live stream, at its known site (Sapsucker Woods, Ithaca NY).
+    /// Planes hears the passes; adsb-check polls real flight data around the site, lists each
+    /// aircraft as heard / not heard, and draws the Doppler curve its real track predicts dashed
+    /// over the Planes spectrogram, so heard and real curves can be compared by eye.
+    fn adsb_demo(&mut self) {
+        let Some(adsb) = plugin_node::bundled().into_iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) else {
+            self.msg = "ADS-B demo: the adsb-check plugin is not next to the program (build it with cargo build --release)".into();
+            return;
+        };
+        let backup = self.clear_for_demo();
+        let src = self.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 40.0));
+        self.nodes[src].label = "Cornell Lab stream (Sapsucker Woods)".into();
+        let rows = vec![
+            ("place".into(), "Sapsucker Woods, Ithaca NY, USA (Cornell Lab of Ornithology)".into()),
+            ("coordinates".into(), "42.4797, -76.4514".into()),
+            ("elevation".into(), "335 m".into()),
+        ];
+        let man = self.add(Kind::Manual { rows }, Pos2::new(20.0, 470.0));
+        self.nodes[man].label = "Stream site".into();
+        let planes = self.add(Kind::Planes, Pos2::new(480.0, 40.0));
+        let a = self.add(Kind::Plugin { path: adsb }, Pos2::new(480.0, 560.0));
+        let rec = self.add(Kind::Record, Pos2::new(1100.0, 560.0));
+        self.wire(src, "audio", planes, "audio");
+        self.wire(src, "audio", a, "audio");
+        self.wire(src, "time", a, "time");
+        self.wire(man, "place", a, "place");
+        self.wire(planes, "aircrafts", rec, nodes::RECORD_EVENTS[0]);
+        self.wire(a, "findings", rec, nodes::RECORD_EVENTS[2]);
+        self.wire(man, "facts", rec, nodes::RECORD_FACTS[0]);
+        self.save_project();
+        self.run();
+        self.msg = format!(
+            "ADS-B demo running: real flights around the site are polled every 10 s; matches show as ✓ with dashed curves on the Planes spectrogram. Your previous project: {}",
             backup.map_or("not saved".into(), |b| b.display().to_string())
         );
     }
@@ -1050,6 +1093,10 @@ impl App {
                     }
                     if ui.button("ENF location: live stream, place unknown").clicked() {
                         self.enf_demo();
+                        ui.close();
+                    }
+                    if ui.button("ADS-B check: stream passes vs real flights").clicked() {
+                        self.adsb_demo();
                         ui.close();
                     }
                 });

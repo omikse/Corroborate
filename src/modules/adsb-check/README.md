@@ -17,6 +17,9 @@ then:
 Passes heard with no aircraft in the data are listed too (planes without ADS-B, or false detections). The
 status sums it up as heard/expected by distance: the detector's real range at that site.
 
+Ready to try: **Demos → ADS-B check: stream passes vs real flights** opens the Cornell Lab live stream with its
+site (42.4797, -76.4514, 335 m) filled in, wired into Planes and this plugin, and runs it.
+
 It needs:
 - the site: Manual data `coordinates` (lat, lon) and an `elevation` field in metres (add it with **+ field**);
   then switch the plugin off and on so it starts with them;
