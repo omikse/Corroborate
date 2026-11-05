@@ -239,29 +239,23 @@ impl App {
         }
     }
 
-    /// Stream → Planes and ADS-B check; Manual data gives ADS-B check the site; all into Record.
+    /// ENF test: Stream → GridFrequencies + ENF; Manual location for validation; all into Record.
     fn default_project(&mut self) {
         let src = self.add(Kind::Stream { url: String::new() }, Pos2::new(30.0, 40.0));
+        let grid = self.add(Kind::GridFrequencies, Pos2::new(330.0, 40.0));
+        let enf = self.add(Kind::Enf, Pos2::new(330.0, 130.0));
         let mut rows = nodes::manual_defaults();
         rows.push(("elevation".into(), String::new()));
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 260.0));
-        let planes = self.add(Kind::Planes, Pos2::new(330.0, 30.0));
         let rec = self.add(Kind::Record, Pos2::new(660.0, 60.0));
-        self.wire(src, "audio", planes, "audio");
-        self.wire(src, "time", planes, "time");
-        self.wire(planes, "passes", rec, nodes::RECORD_EVENTS[0]);
+
+        self.wire(src, "audio", enf, "audio");
+        self.wire(src, "time", enf, "time");
+        self.wire(grid, "data", enf, "grid");
+        self.wire(man, "place", enf, "location");
+        self.wire(enf, "hum", rec, nodes::RECORD_EVENTS[0]);
+        self.wire(enf, "location", rec, nodes::RECORD_EVENTS[1]);
         self.wire(man, "facts", rec, nodes::RECORD_FACTS[0]);
-        let bundled = nodes::bundled_plugins();
-        if let Some(adsb) = bundled.iter().find(|p| p.contains("adsb-check")) {
-            let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(330.0, 220.0));
-            self.wire(src, "audio", a, "audio");
-            self.wire(src, "time", a, "time");
-            self.wire(man, "place", a, "place");
-            self.wire(a, "findings", rec, nodes::RECORD_EVENTS[1]);
-            self.wire(a, "facts", rec, nodes::RECORD_FACTS[1]);
-        } else {
-            self.msg = "adsb-check not found next to this program: add plugins with right-click ▸ Add node".into();
-        }
     }
 
     // ---------------- project file
