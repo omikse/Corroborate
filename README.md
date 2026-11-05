@@ -57,8 +57,8 @@ To change one node, edit only its folder:
 | Invert location | [invert](src/modules/invert/README.md) | flips what a location adds and subtracts |
 | Map | [map](src/modules/map/README.md) | a location on a world map |
 
-Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, started by
-the Planes node: [planes/VIEWER.md](src/modules/planes/VIEWER.md).
+Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, is a
+separate program that nothing opens by itself: [planes/VIEWER.md](src/modules/planes/VIEWER.md).
 
 ## Location: the world, cut down by evidence
 

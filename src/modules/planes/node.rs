@@ -34,12 +34,6 @@ pub fn start(st: &Shared) -> Planes {
     p
 }
 
-/// The Planes module's own viewer (planes-view), a separate window on the same source.
-pub fn open_viewer(input: &str) {
-    let exe = std::env::current_exe().unwrap_or_default().with_file_name(format!("planes-view{}", std::env::consts::EXE_SUFFIX));
-    let _ = std::process::Command::new(exe).arg(input).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
-}
-
 /// Feed one block of the shared 16 kHz audio.
 pub fn push(p: &mut Planes, st: &Shared, x: &[f32], anchor: &Option<Anchor>, audio_s: f64) {
     let mut frames: Vec<(f64, Vec<u8>)> = Vec::new();

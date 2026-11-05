@@ -1,8 +1,8 @@
 # Planes (Doppler)
 
 Aircraft Doppler curves: does this audio hold propeller-aircraft passes clear enough to geolocate by?
-Node: audio and an optional time in, passes out. Its window shows the spectrogram; it also starts
-`planes-view` (the old viewer, in its own window; see [VIEWER.md](VIEWER.md)) on the same source.
+Node: audio and an optional time in, passes out. Its window shows the spectrogram. Run never opens
+`planes-view` (the old viewer, see [VIEWER.md](VIEWER.md)); it is only started by hand.
 
 Files: `mod.rs` (the module: name, label, ports), `spectro.rs` (whitened STFT), `ridge.rs` (Viterbi ridges),
 `fit.rs` (straight-pass Doppler model and fit), `detect.rs` (gates, merging, events), `node.rs` (the node in

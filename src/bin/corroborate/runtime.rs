@@ -122,9 +122,6 @@ fn run(job: Job) {
     let mut feeds: Vec<_> = job.plugins.iter().map(|p| plugin_node::start(p, &args, &job.work_dir)).collect();
     let mut planes: Vec<_> = job.planes.iter().map(|s| (planes_node::start(s), s.clone())).collect();
     let mut enfs: Vec<_> = job.enfs.iter().map(enf_node::start).collect();
-    if !planes.is_empty() {
-        planes_node::open_viewer(&ff_input);
-    }
 
     set_status(if live { "connecting…" } else { "decoding…" });
     let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
