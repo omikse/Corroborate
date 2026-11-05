@@ -88,4 +88,9 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
   (1/30 s): radius ~15 m. Synced on sounds from unknown places: radius ~790 m. For locating, sync
   needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
 
-Not yet: the viewer using these types, and the timeline UI.
+- `src/bin/corroborate.rs`: the new workbench GUI (`cargo run --release --features gui --bin corroborate`).
+  Node graph (drag, pan, select shows the evidence trail, double-click opens the node window), timeline
+  lanes (wheel zoom, drag pan, blocks = time ± error, faded outline = own clock), map window for the
+  locator, offsets table for the sync solver. Runs the engine on a synthetic protest scenario.
+
+Not yet: real sources feeding the graph, editing wires in the GUI, saving projects.

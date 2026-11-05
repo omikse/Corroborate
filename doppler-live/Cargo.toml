@@ -21,6 +21,11 @@ path = "src/bin/doppler-view.rs"
 required-features = ["gui"]
 
 [[bin]]
+name = "corroborate"
+path = "src/bin/corroborate.rs"
+required-features = ["gui"]
+
+[[bin]]
 name = "enf-plugin"
 path = "src/bin/enf-plugin.rs"
 
