@@ -1,7 +1,7 @@
 # Architecture groundwork
 
 This is the plan for the rewrite on the `rewrite` branch. The concept is in [VISION.md](../VISION.md).
-The stable version is tagged `v0.1-doppler-live` and copied to `C:\Apps\DopplerOsint`.
+The old stable version (doppler-view) is tag `v0.1-doppler-live`; this repo no longer touches its copy in `C:\Apps\DopplerOsint`.
 
 ## Layers
 
@@ -64,7 +64,7 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
 
 ## Implemented so far
 
-`doppler-live/src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
+`src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
 `Port` (required or optional), `Role` and `NodeSpec` (connection and readiness checks). Covered by tests.
 
 ## Graph and timeline (in the library)

@@ -17,9 +17,9 @@
 //! adsb.lol every 10 s (backing off when refused) and logs to `adsb-logs/` in the working folder.
 //! Aircraft without ADS-B Out, or too low for any receiver, are not in the data.
 
-use doppler_live::modules::planes::Planes;
-use doppler_live::plugin::{self, Json, PluginFinding};
-use doppler_live::{ingest, timebase, Config, Event, Finding, Module};
+use corroborate::modules::planes::Planes;
+use corroborate::plugin::{self, Json, PluginFinding};
+use corroborate::{ingest, timebase, Config, Event, Finding, Module};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -553,8 +553,8 @@ fn poll_live(site: Site, adsb: Arc<Mutex<Adsb>>, log_path: std::path::PathBuf) {
         let mut wait = POLL_S;
         loop {
             let t0 = std::time::Instant::now();
-            let got = doppler_live::no_window(&mut std::process::Command::new("curl"))
-                .args(["-s", "-m", "10", "-A", "doppler-live adsb-check plugin", &url])
+            let got = corroborate::no_window(&mut std::process::Command::new("curl"))
+                .args(["-s", "-m", "10", "-A", "corroborate adsb-check plugin", &url])
                 .output();
             // A refusal (rate limit) or failure is not aircraft JSON: wait longer, up to a minute.
             let parsed = got.ok().and_then(|o| plugin::parse_json(&String::from_utf8_lossy(&o.stdout))).filter(|j| j.get("ac").is_some());

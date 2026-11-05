@@ -1,7 +1,7 @@
 // Release builds are a Windows GUI program: no console window. Debug builds keep the
 // console for diagnostics.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! doppler-view: live display of the detector.
+//! planes-view: the Planes module's own viewer (the old doppler-view), started by the Planes node.
 //!
 //! Waveform, scrolling whitened spectrogram (exactly what the detector searches), a spectrum
 //! slice on the same frequency axis, raw ridges, held candidates and reported passes drawn as
@@ -16,12 +16,12 @@
 //! Audio is decoded at 16 kHz; the detector gets a 4 kHz copy. The window only reads shared
 //! state written by the worker thread.
 
-use doppler_live::modules::planes::fit::model;
-use doppler_live::timebase::{self, Anchor, SharedAnchor};
-use doppler_live::plugin::{self, PluginFinding};
-use doppler_live::modules::planes::Planes;
-use doppler_live::modules::planes::spectro::Frontend;
-use doppler_live::{ingest, Config, Detector, Event, Module};
+use corroborate::modules::planes::fit::model;
+use corroborate::timebase::{self, Anchor, SharedAnchor};
+use corroborate::plugin::{self, PluginFinding};
+use corroborate::modules::planes::Planes;
+use corroborate::modules::planes::spectro::Frontend;
+use corroborate::{ingest, Config, Detector, Event, Module};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Id, Key, Pos2, Rect, Sense, Shape, Stroke,
     TextureHandle, TextureOptions,
@@ -34,11 +34,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-doppler-view: live view of the Doppler-curve detector
+planes-view: live view of the Doppler-curve detector
 
 USAGE:
-  doppler-view <file-or-url> [--start <s>]
-  doppler-view --stdin            (raw f32le mono 16000 Hz on stdin)
+  planes-view <file-or-url> [--start <s>]
+  planes-view --stdin            (raw f32le mono 16000 Hz on stdin)
 
   --start <s>   seek into a file before analysing (via ffmpeg)
 
@@ -123,14 +123,11 @@ struct Settings {
 
 impl Settings {
     fn file() -> Option<std::path::PathBuf> {
-        let base = std::env::var_os("APPDATA")
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
-        Some(base.join("doppler-view").join("settings.txt"))
+        Some(corroborate::home().join("settings").join("planes-view.txt"))
     }
 
     fn load() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = corroborate::home().join("recordings");
         let mut s = Settings {
             light: true,
             minimap: true,
@@ -178,7 +175,7 @@ impl Settings {
             let _ = std::fs::create_dir_all(d);
         }
         let mut text = format!(
-            "# doppler-view settings: written by the app whenever you change something.\n\
+            "# planes-view settings: written by the app whenever you change something.\n\
              # Edit by hand only while the app is closed. plugin=on|path or off|path; plugin_removed=path\n\
              # keeps a bundled plugin from being added again.\n\
              theme={}\nminimap={}\nshow_wave={}\nshow_slice={}\nrec_folder={}\nrec_format={}\nrec_prefix={}\n",
@@ -212,7 +209,7 @@ impl Settings {
             .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
             .filter(|p| {
                 let stem = p.file_stem().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-                stem != "doppler-view" && stem != "doppler-live"
+                stem != "planes-view" && stem != "corroborate" && stem != "corroborate-cli"
             })
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
@@ -605,7 +602,7 @@ impl Recorder {
         j.push_str(&format!("  \"file\": \"{}\",\n", timebase::json_escape(self.file.rsplit('/').next().unwrap_or(&self.file))));
         j.push_str(&format!("  \"format\": \"{}\",\n", timebase::json_escape(&self.format)));
         j.push_str(&format!("  \"source_host\": \"{}\",\n", timebase::json_escape(&self.source_host)));
-        j.push_str("  \"recorded_by\": \"doppler-view\",\n");
+        j.push_str("  \"recorded_by\": \"planes-view (corroborate)\",\n");
         match &rec {
             Some(r) => {
                 j.push_str(&format!("  \"utc_start\": \"{}\",\n", timebase::fmt_utc(r.utc0)));
@@ -1017,7 +1014,7 @@ fn file_result_json(s: &Shared, path: &str, manual: &[(String, String)]) -> Stri
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let mut j = String::from("{\n");
     j.push_str(&format!("  \"file\": \"{}\",\n  \"path\": \"{}\",\n", esc(name), esc(path)));
-    j.push_str("  \"analysed_by\": \"doppler-view\",\n");
+    j.push_str("  \"analysed_by\": \"planes-view (corroborate)\",\n");
     j.push_str(&format!("  \"analysed_utc\": \"{}\",\n", timebase::fmt_utc(timebase::now_unix())));
     match &s.anchor {
         Some(a) => j.push_str(&format!("  \"utc_start\": \"{}\",\n  \"utc_source\": \"{}\",\n", timebase::fmt_utc(a.utc0), esc(&a.source))),
@@ -1059,7 +1056,7 @@ fn spawn_plugin(
 ) -> Option<std::sync::mpsc::SyncSender<Vec<f32>>> {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
-    let started = doppler_live::no_window(&mut Command::new(path))
+    let started = corroborate::no_window(&mut Command::new(path))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1960,7 +1957,7 @@ Time is the PC clock when the audio arrives.")
         let audio_err = self.audio_err.clone();
         egui::Panel::top("top").frame(egui::Frame::new().fill(bg()).inner_margin(8.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("DOPPLER-LIVE").font(mono(15.0)).color(accent()).strong());
+                ui.label(egui::RichText::new("PLANES VIEW").font(mono(15.0)).color(accent()).strong());
                 ui.add_space(12.0);
                 // Source: what is open, as a file or live, then its name.
                 ui.label(egui::RichText::new("Source:").font(mono(12.0)).color(DIM));
@@ -3199,10 +3196,10 @@ fn main() -> Result<(), String> {
     };
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1480.0, 920.0]).with_title("doppler-view"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1480.0, 920.0]).with_title("Planes view · Corroborate"),
         ..Default::default()
     };
-    eframe::run_native("doppler-view", options, Box::new(move |cc| Ok(Box::new(App::new(cc, session, current)))))
+    eframe::run_native("planes-view", options, Box::new(move |cc| Ok(Box::new(App::new(cc, session, current)))))
         .map_err(|e| e.to_string())
 }
 
@@ -3324,7 +3321,7 @@ fn needs_resolving(url: &str) -> bool {
 }
 
 fn resolve_with_ytdlp(url: &str) -> Result<String, String> {
-    let out = doppler_live::no_window(&mut std::process::Command::new("yt-dlp"))
+    let out = corroborate::no_window(&mut std::process::Command::new("yt-dlp"))
         .args(["--no-warnings", "-g", "-f", "ba/b", url])
         .output()
         .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;

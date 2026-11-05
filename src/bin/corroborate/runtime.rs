@@ -3,14 +3,14 @@
 //! plugins are separate programs fed through a pipe, as in the old viewer. Every node's
 //! results land in its own shared state, which the GUI reads.
 
-use doppler_live::modules::planes::detect::{Config, Event};
-use doppler_live::module::{Finding, Module};
-use doppler_live::modules::enf::{Enf, EnfPoint, EnfSegment};
-use doppler_live::modules::planes::Planes;
-use doppler_live::plugin::{self, PluginFinding};
-use doppler_live::timebase::{self, Anchor, SharedAnchor};
-use doppler_live::area::{GridMap, WorldMask};
-use doppler_live::{ingest, INPUT_SR};
+use corroborate::modules::planes::detect::{Config, Event};
+use corroborate::module::{Finding, Module};
+use corroborate::modules::enf::{Enf, EnfPoint, EnfSegment};
+use corroborate::modules::planes::Planes;
+use corroborate::plugin::{self, PluginFinding};
+use corroborate::timebase::{self, Anchor, SharedAnchor};
+use corroborate::area::{GridMap, WorldMask};
+use corroborate::{ingest, INPUT_SR};
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,7 +186,7 @@ fn resolve(url: &str) -> Result<String, String> {
     if !(url.contains("youtube.com/") || url.contains("youtu.be/")) {
         return Ok(url.to_string());
     }
-    let out = doppler_live::no_window(&mut Command::new("yt-dlp"))
+    let out = corroborate::no_window(&mut Command::new("yt-dlp"))
         .args(["--no-warnings", "-g", "-f", "ba/b", url])
         .output()
         .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
@@ -270,9 +270,9 @@ fn run(job: Job) {
         .collect();
     let mut enfs: Vec<(Enf, &EnfJob, Option<f64>)> = job.enfs.iter().map(|j| (Enf::new(), j, None)).collect();
 
-    // Spawn doppler-view as a separate visualization process for Planes data.
+    // The Planes module's own viewer, a separate window on the same source.
     if !planes.is_empty() {
-        let _ = Command::new(std::env::current_exe().unwrap_or_default().with_file_name(format!("doppler-view{}", std::env::consts::EXE_SUFFIX)))
+        let _ = Command::new(std::env::current_exe().unwrap_or_default().with_file_name(format!("planes-view{}", std::env::consts::EXE_SUFFIX)))
             .arg(&ff_input)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -416,7 +416,7 @@ fn finish(job: &Job, r: Result<f64, String>) {
 /// Start a plugin program on this source. Returns the channel feeding its stdin; threads
 /// read its messages (stdout) and its last log line (stderr) into the node's state.
 fn spawn_plugin(path: &str, st: Shared, args: &[String], dir: &std::path::Path) -> Option<SyncSender<Vec<f32>>> {
-    let started = doppler_live::no_window(&mut Command::new(path))
+    let started = corroborate::no_window(&mut Command::new(path))
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::piped())

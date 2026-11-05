@@ -7,11 +7,11 @@
 //!   a narrow margin. Items on a stream's own clock (offset unknown) are faded and outlined.
 //! - Every number shown says where it came from. The scenario is synthetic and says so.
 
-use doppler_live::core::{Location, Method, NodeSpec, Port, PortKind, Role, Source, SourceKind, TimeRef};
-use doppler_live::graph::{Graph, NodeId};
-use doppler_live::locate::{locate, Arrival, Fix, C_SOUND};
-use doppler_live::sync::{solve, Obs, Offset, Solution};
-use doppler_live::timeline::{Item, Timeline};
+use corroborate::core::{Location, Method, NodeSpec, Port, PortKind, Role, Source, SourceKind, TimeRef};
+use corroborate::graph::{Graph, NodeId};
+use corroborate::locate::{locate, Arrival, Fix, C_SOUND};
+use corroborate::sync::{solve, Obs, Offset, Solution};
+use corroborate::timeline::{Item, Timeline};
 use eframe::egui::{
     self, epaint::CubicBezierShape, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 };

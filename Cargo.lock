@@ -388,6 +388,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "corroborate"
+version = "0.2.0"
+dependencies = [
+ "cpal",
+ "eframe",
+ "hound",
+ "realfft",
+ "rfd",
+]
+
+[[package]]
 name = "cpal"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -484,17 +495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
-]
-
-[[package]]
-name = "doppler-live"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "eframe",
- "hound",
- "realfft",
- "rfd",
 ]
 
 [[package]]

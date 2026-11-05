@@ -1,7 +1,7 @@
-//! enf-plugin: the ENF (Electrical Network Frequency) module as a doppler-view plugin.
+//! enf-plugin: the ENF (Electrical Network Frequency) module as a plugin (for planes-view and Corroborate).
 //!
 //! A separate program: reads raw f32 little-endian mono 16 kHz audio on stdin and writes JSON
-//! lines on stdout (protocol in `doppler_live::plugin`). Import it in doppler-view with
+//! lines on stdout (protocol in `corroborate::plugin`). Import it in planes-view with
 //! Plugins ▸ Import plugin….
 //!
 //! It reports:
@@ -9,9 +9,9 @@
 //! - each run of clear hum (≥ 30 s) as a finding;
 //! - the grid, the latest reading and the band to view, as they change.
 
-use doppler_live::modules::enf::{Enf, EnfPoint};
-use doppler_live::plugin::{self, PluginFinding};
-use doppler_live::{ingest, Finding, Module};
+use corroborate::modules::enf::{Enf, EnfPoint};
+use corroborate::plugin::{self, PluginFinding};
+use corroborate::{ingest, Finding, Module};
 use std::io::Write;
 
 const COLOR: [u8; 3] = [120, 170, 255];

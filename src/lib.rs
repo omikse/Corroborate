@@ -26,6 +26,12 @@ pub mod timeline;
 pub use modules::planes::detect::{Config, Detector, Event};
 pub use module::{Finding, Module, INPUT_SR};
 
+/// The folder the program runs from. Settings, projects and results live under it, so the tool
+/// can be moved as one folder: nothing is kept in system folders.
+pub fn home() -> std::path::PathBuf {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())).unwrap_or_default()
+}
+
 /// Run helper tools (ffmpeg, ffprobe, curl, yt-dlp) without opening a console window of
 /// their own on Windows; elsewhere this does nothing.
 pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {

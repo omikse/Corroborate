@@ -1,5 +1,5 @@
-use doppler_live::synth::{render, Pass};
-use doppler_live::{Config, Detector, Event};
+use corroborate::synth::{render, Pass};
+use corroborate::{Config, Detector, Event};
 
 fn run(x: &[f32]) -> Vec<Event> {
     let mut d = Detector::new(Config::default());

@@ -3,7 +3,7 @@
 //! ENF detectors, plugins (metadata, ADS-B check, any other program), manual data, and the
 //! result record.
 
-use doppler_live::core::{NodeSpec, Port, PortKind, Role, SourceKind};
+use corroborate::core::{NodeSpec, Port, PortKind, Role, SourceKind};
 
 #[derive(Clone, Debug)]
 pub enum Kind {

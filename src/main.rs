@@ -1,20 +1,20 @@
-use doppler_live::modules::{enf::Enf, planes::Planes};
-use doppler_live::synth::{render, Pass};
-use doppler_live::{ingest, timebase, Config, Finding, Module, INPUT_SR};
+use corroborate::modules::{enf::Enf, planes::Planes};
+use corroborate::synth::{render, Pass};
+use corroborate::{ingest, timebase, Config, Finding, Module, INPUT_SR};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Instant;
 
 const USAGE: &str = "\
-doppler-live: detection modules for audio (aircraft Doppler curves, mains-hum ENF)
+corroborate-cli: detection modules for audio (aircraft Doppler curves, mains-hum ENF)
 
 USAGE:
-  doppler-live file <input> [--csv points.csv] [options]
+  corroborate-cli file <input> [--csv points.csv] [options]
       Any WAV, or anything ffmpeg can decode (mp3, m4a, mp4, mka, ...).
-  doppler-live listen (--url <stream-or-file> | --stdin) [--events events.jsonl] [options]
+  corroborate-cli listen (--url <stream-or-file> | --stdin) [--events events.jsonl] [options]
       Live: --url is decoded by ffmpeg; --stdin reads raw f32le mono at 16000 Hz, e.g.
-      ffmpeg -i <src> -ac 1 -ar 16000 -f f32le - | doppler-live listen --stdin
-  doppler-live synth <out.wav>
+      ffmpeg -i <src> -ac 1 -ar 16000 -f f32le - | corroborate-cli listen --stdin
+  corroborate-cli synth <out.wav>
       Write a 10-minute test recording with two passes, a 60 Hz hum and noise.
 
 OPTIONS:

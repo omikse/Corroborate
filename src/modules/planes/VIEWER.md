@@ -1,31 +1,15 @@
-# doppler-view (the old viewer)
+# planes-view
 
-The stable viewer from before the node workbench (tag `v0.1-doppler-live`), still built from
-`doppler-live/src/bin/doppler-view.rs`. The Planes node starts it on the same source.
-
-ffmpeg must be on `PATH` for anything other than WAV input.
-
-```bash
-cd doppler-live
-cargo build --release                  # detector only
-cargo build --release --features gui   # adds doppler-view
-cargo test --release
-```
+The Planes module's own viewer: the stable viewer from before the workbench (then called
+`doppler-view`, tag `v0.1-doppler-live`), built from `view.rs` in this folder. The Planes node
+starts it on the same source, in its own window.
 
 ```bash
-# A file: WAV, or anything ffmpeg decodes
-doppler-live file recording.mp3 --csv points.csv
-
-# Live: a stream URL or file through ffmpeg, or raw f32le mono 4 kHz on stdin
-doppler-live listen --url "<stream url>" --events events.jsonl
-ffmpeg -i <src> -ac 1 -ar 4000 -f f32le - | doppler-live listen --stdin
-
-# Viewer
-doppler-view recording.mp3        # analysed at full speed; scroll the whole timeline
-doppler-view "<stream url>"       # live; press REC to keep the timeline and save a WAV
-
-# A 10-minute synthetic test recording
-doppler-live synth test.wav
+planes-view recording.mp3        # analysed at full speed; scroll the whole timeline
+planes-view "<stream url>"       # live; press REC to keep the timeline and save a WAV
+corroborate-cli file recording.mp3 --csv points.csv     # the same detector, headless
+corroborate-cli listen --url "<stream url>" --events events.jsonl
+corroborate-cli synth test.wav   # a 10-minute synthetic test recording
 ```
 
 For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <video url>`.
@@ -36,8 +20,8 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
   links are resolved with yt-dlp). Opening a new source closes the current one cleanly. **Settings ▸
   Recording…** sets the output folder, the format (raw stream copy or decoded WAV) and the file-name
   prefix. **Settings ▸ Theme** switches between light and dark; the plot areas stay dark in both.
-  `doppler-view` can also start with no arguments.
-- **Settings file**: one file, `%APPDATA%\doppler-view\settings.txt`, keeps the theme, the recording folder,
+  `planes-view` can also start with no arguments.
+- **Settings file**: one file, `settings\planes-view.txt` next to the program, keeps the theme, the recording folder,
   format and prefix, the view toggles and the plugins, and is loaded at every start. The app rewrites it
   whenever you change something; **Settings ▸ Show settings file** opens its folder. Edit it by hand only
   while the app is closed.
@@ -47,7 +31,7 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
   straight away. Click the spectrogram to set the playhead, and tick **audio** to listen from there.
   Clicking a pass in the list jumps to it and plays from 20 s before its closest approach.
 - **Live streams**: only the visible 160 s is kept. **● REC** keeps the timeline from that moment, with
-  no limit, and saves `doppler-<UTC>/` in the folder the app runs from (change it in Settings ▸ Recording…), holding the raw stream copy (`.mka`) and a `.json` description. You can open
+  no limit, and saves `doppler-<UTC>/` in `recordings\` next to the program (change it in Settings ▸ Recording…), holding the raw stream copy (`.mka`) and a `.json` description. You can open
   that file later as a recording.
 - **smooth**: on, live streams play out through a 4 s buffer and the view scrolls between frames.
   Off is the raw view: data appears exactly as it arrives, network bursts and 0.25 s steps included.

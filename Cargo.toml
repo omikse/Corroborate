@@ -1,28 +1,38 @@
 [package]
-name = "doppler-live"
-version = "0.1.0"
+name = "corroborate"
+version = "0.2.0"
 edition = "2024"
-default-run = "doppler-live"
+description = "Live/Static audio-visual forensics using open source data"
+default-run = "corroborate"
+autobins = false
 
 [dependencies]
 hound = "3.5.1"
 realfft = "3.5.1"
-# Viewer only (`--features gui`); the detector binary does not link it.
+# GUI only; `cargo build --no-default-features` gives the lean headless CLI and plugins.
 eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 cpal = { version = "0.18.2", optional = true }
 rfd = { version = "0.17.2", optional = true }
 
 [features]
+default = ["gui"]
 gui = ["dep:eframe", "dep:cpal", "dep:rfd"]
 
-[[bin]]
-name = "doppler-view"
-path = "src/bin/doppler-view.rs"
-required-features = ["gui"]
-
+# The workbench.
 [[bin]]
 name = "corroborate"
 path = "src/bin/corroborate/main.rs"
+required-features = ["gui"]
+
+# Headless detectors: files or streams in, JSON lines out.
+[[bin]]
+name = "corroborate-cli"
+path = "src/main.rs"
+
+# Modules' own programs.
+[[bin]]
+name = "planes-view"
+path = "src/modules/planes/view.rs"
 required-features = ["gui"]
 
 [[bin]]

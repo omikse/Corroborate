@@ -5,9 +5,9 @@
 //! on video) or the travel time of sound biases every offset by up to distance / 343 m/s,
 //! which is far too coarse for locating anything. The result's radius says so honestly.
 
-use doppler_live::core::{Location, Method};
-use doppler_live::locate::{locate, Arrival, C_SOUND};
-use doppler_live::sync::{solve, Obs, Offset};
+use corroborate::core::{Location, Method};
+use corroborate::locate::{locate, Arrival, C_SOUND};
+use corroborate::sync::{solve, Obs, Offset};
 
 const LAT0: f64 = 48.8566;
 const LON0: f64 = 2.3522;
@@ -41,7 +41,7 @@ fn sync_obs(events: &[(f64, Option<(f64, f64)>)], err: f64) -> Vec<Obs> {
 }
 
 /// Sync, then locate the bang from its arrival on each stream's own clock.
-fn run(obs: &[Obs], sync_err_floor: f64) -> doppler_live::locate::Fix {
+fn run(obs: &[Obs], sync_err_floor: f64) -> corroborate::locate::Fix {
     let sol = solve(4, obs, &[]);
     let arrivals: Vec<Arrival> = RECS
         .iter()

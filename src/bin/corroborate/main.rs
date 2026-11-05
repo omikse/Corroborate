@@ -11,15 +11,15 @@ mod demo;
 mod nodes;
 mod runtime;
 
-use doppler_live::core::{PortKind, Role, SourceKind};
-use doppler_live::graph::{Graph, GraphError, NodeId};
-use doppler_live::timebase::{self, json_escape, Anchor};
+use corroborate::core::{PortKind, Role, SourceKind};
+use corroborate::graph::{Graph, GraphError, NodeId};
+use corroborate::timebase::{self, json_escape, Anchor};
 use eframe::egui::{
     self, epaint::CubicBezierShape, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions, Vec2,
 };
 use nodes::Kind;
-use doppler_live::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
+use corroborate::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
 use runtime::{EnfJob, Input, Job, PluginJob, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -135,12 +135,11 @@ struct NodeData {
 }
 
 fn project_file() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("corroborate").join("project.txt"))
+    Some(corroborate::home().join("settings").join("project.txt"))
 }
 
 fn results_dir() -> PathBuf {
-    let base = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("Desktop").join("record").join("corroborate")
+    corroborate::home().join("results")
 }
 
 fn clean(s: &str) -> String {
@@ -264,7 +263,7 @@ impl App {
         self.pan = Vec2::ZERO;
         let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 200.0));
         self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
-        let grid = self.add(Kind::GridFrequencies { path: nodes::bundled_grid_file() }, Pos2::new(20.0, 300.0));
+        let grid = self.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(20.0, 300.0));
         let enf = self.add(Kind::Enf, Pos2::new(250.0, 200.0));
         let inv = self.add(Kind::Invert, Pos2::new(250.0, 40.0));
         let map_add = self.add(Kind::Map, Pos2::new(500.0, 330.0));
@@ -294,7 +293,7 @@ impl App {
         rows.push(("elevation".into(), String::new()));
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 280.0));
         let planes = self.add(Kind::Planes, Pos2::new(330.0, 30.0));
-        let grid = self.add(Kind::GridFrequencies { path: nodes::bundled_grid_file() }, Pos2::new(330.0, 130.0));
+        let grid = self.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(330.0, 130.0));
         let enf = self.add(Kind::Enf, Pos2::new(330.0, 190.0));
         let rec = self.add(Kind::Record, Pos2::new(660.0, 60.0));
 
@@ -789,7 +788,7 @@ impl App {
         }
         ui.label(egui::RichText::new("DATA").small().color(DIM));
         if ui.button("Grid frequencies").clicked() {
-            pick = Some(Kind::GridFrequencies { path: nodes::bundled_grid_file() });
+            pick = Some(Kind::GridFrequencies { path: String::new() });
         }
         ui.label(egui::RichText::new("PLUGINS").small().color(DIM));
         for p in nodes::bundled_plugins() {
@@ -1265,7 +1264,7 @@ impl App {
                         }
                     });
                     if ui.button("Refresh").clicked() {
-                        match doppler_live::ingest::list_microphones() {
+                        match corroborate::ingest::list_microphones() {
                             Ok(m) => self.mics = m,
                             Err(e) => self.msg = e,
                         }
@@ -1305,7 +1304,7 @@ impl App {
             Kind::GridFrequencies { path } => {
                 ui.horizontal(|ui| {
                     ui.label("File");
-                    ui.add(egui::TextEdit::singleline(path).desired_width(300.0));
+                    ui.add(egui::TextEdit::singleline(path).hint_text("empty: the bundled file").desired_width(300.0));
                     if ui.button("Browse…").clicked() {
                         if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
                             *path = p.to_string_lossy().into_owned();
@@ -1322,6 +1321,9 @@ impl App {
                     Err(e) => {
                         ui.colored_label(WARN, e);
                     }
+                }
+                if path.trim().is_empty() {
+                    ui.colored_label(DIM, format!("bundled file: {}", nodes::bundled_grid_file()));
                 }
                 ui.colored_label(DIM, "Swap the file to use other grid data. Read at each Run.");
             }
@@ -1776,7 +1778,18 @@ fn main() -> eframe::Result {
     )
 }
 
+/// An empty path means the grid file that ships with the program (found relative to it).
 fn load_grid(path: &str) -> Result<GridMap, String> {
+    let bundled;
+    let path = if path.trim().is_empty() {
+        bundled = nodes::bundled_grid_file();
+        if bundled.is_empty() {
+            return Err("no grid file next to the program: choose one".into());
+        }
+        bundled.as_str()
+    } else {
+        path
+    };
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     GridMap::parse(&text).map_err(|e| format!("{path}: {e}"))
 }

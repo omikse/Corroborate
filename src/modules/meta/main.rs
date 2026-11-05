@@ -1,6 +1,6 @@
-//! meta-plugin: what the source says about itself, as doppler-view plugin metadata.
+//! meta-plugin: what the source says about itself, as plugin metadata.
 //!
-//! A separate program (protocol in `doppler_live::plugin`). For a file it reads, with ffprobe:
+//! A separate program (protocol in `corroborate::plugin`). For a file it reads, with ffprobe:
 //! the container, duration, size, the audio stream (codec, rate, channels), every tag (title,
 //! artist, creation_time, …), coordinates from location tags (ISO 6709), other streams (cover
 //! art, video) and the file system's created/modified times. For a live source it records the
@@ -8,8 +8,8 @@
 //!
 //! The audio is read to the end and ignored, so the viewer's analysis is never held up.
 
-use doppler_live::plugin;
-use doppler_live::timebase;
+use corroborate::plugin;
+use corroborate::timebase;
 use std::io::{Read, Write};
 use std::process::Command;
 
@@ -59,7 +59,7 @@ fn file_meta(path: &str, out: &mut impl Write) -> usize {
             put(out, "file modified (file system, UTC)", &timebase::fmt_utc(t));
         }
     }
-    let probed = doppler_live::no_window(&mut Command::new("ffprobe"))
+    let probed = corroborate::no_window(&mut Command::new("ffprobe"))
         .args(["-v", "error", "-show_format", "-show_streams", "-of", "flat", path])
         .output();
     let fields = match probed {
