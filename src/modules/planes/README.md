@@ -43,3 +43,5 @@ ridge level), `rms_hz` (fit misfit), `harmonics` (visible partials), `grade`, an
 Method references: hermes-aircraft-doppler-geolocation (Viterbi ridge + curve fit), dopplertrack
 (whitened spectrogram, straight-pass model), franken_doppler_finder (two-sided checks, ridge
 requirement), all independent implementations of colsto's method.
+
+On the canvas: the spectrogram with the detected curves, and the list of aircraft on the right (click one to centre it). Wheel zooms time, Shift+wheel zooms Hz, drag moves, double-click resets, FOLLOW tracks the newest audio. These change only the picture. Ports: input `audio`, output `aircrafts`.

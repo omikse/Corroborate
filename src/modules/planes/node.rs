@@ -90,12 +90,46 @@ pub fn json(s: &NodeState) -> String {
     format!(",\"passes\":[{}]", p.join(","))
 }
 
-impl App {
-    pub(crate) fn planes_window(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        let st = self.nodes[i].state.clone();
-        // Plugin tracks on the same source, drawn over the spectrogram (adsb-check's predicted curves).
+/// What part of the spectrogram the node shows. Only the picture: the detector always sees all audio.
+#[derive(Clone, Copy)]
+struct View {
+    /// Seconds shown; 0 = everything.
+    span: f64,
+    /// Right edge in audio seconds; None = follow the newest audio.
+    end: Option<f64>,
+    /// Frequency range shown; None = the detector's whole band.
+    band: Option<(f64, f64)>,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self { span: 160.0, end: None, band: None }
+    }
+}
+
+const LIST_W: f32 = 250.0;
+
+/// The Planes node on the canvas: the spectrogram with detected curves and plugin tracks, view
+/// controls (zoom and move time and Hz, Follow) and the list of aircraft; clicking one centres it.
+pub struct Look;
+
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, _standard: Vec2) -> Vec2 {
+        Vec2::new(1000.0, 460.0)
+    }
+
+    fn status(&self) -> bool {
+        false
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let z = app.zoom;
+        let id = egui::Id::new(("planes-view", i));
+        let mut v: View = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        let st = app.nodes[i].state.clone();
         let key = st.lock().unwrap().source_key.clone();
-        let overlays: Vec<(Color32, Vec<(String, Vec<(f64, f64, bool)>)>)> = self
+        let overlays: Vec<(Color32, Vec<(String, Vec<(f64, f64, bool)>)>)> = app
             .nodes
             .iter()
             .filter(|n| !n.hidden && matches!(n.kind, Kind::Plugin { .. }))
@@ -109,97 +143,190 @@ impl App {
             .collect();
         let s = st.lock().unwrap();
         let pl = &s.planes;
-        ui.horizontal(|ui| {
-            ui.label(format!("{} passes · {} candidates · {:.0} s analysed", pl.passes.len(), pl.pending.len(), s.audio_s));
-            ui.separator();
-            ui.label("show");
-            ui.add(egui::DragValue::new(&mut self.spec_minutes).range(0.0..=600.0).suffix(" min").speed(0.5));
-            ui.colored_label(DIM, "(0 = all)");
-        });
+        let a = s.anchor.clone();
+        let tlabel = |t: f64| a.as_ref().map_or(fmt_rel(t), |a| format!("{} UTC", fmt_clock(a.utc(t))));
+        let font = FontId::monospace(10.0 * z);
+        let list = Rect::from_min_max(Pos2::new(r.right() - LIST_W * z, r.top()), r.max);
+        let left = Rect::from_min_max(r.min, Pos2::new(list.left() - 8.0 * z, r.bottom()));
+        let bar = Rect::from_min_max(left.min, Pos2::new(left.right(), left.top() + 22.0 * z));
         let nb = pl.freqs.len();
         let nf = pl.hist_t.len();
-        if nb == 0 || nf == 0 {
-            ui.colored_label(DIM, "no audio yet: press Run");
+        let have = nb > 0 && nf > 0;
+        let (t_first, t_last) = if have { (pl.hist_t[0], *pl.hist_t.last().unwrap()) } else { (0.0, 0.0) };
+        let mut jump = None;
+        // Controls: they move only the picture.
+        crate::look::area(ui, bar, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{} aircraft · {} candidates · {} analysed", pl.passes.len(), pl.pending.len(), fmt_rel(s.audio_s))).small().color(DIM));
+                ui.separator();
+                ui.add(egui::DragValue::new(&mut v.span).range(0.0..=36000.0).suffix(" s view").speed(2.0));
+                if ui.small_button("all").clicked() {
+                    v.span = 0.0;
+                }
+                if ui.small_button("Hz reset").clicked() {
+                    v.band = None;
+                }
+                let follow = v.end.is_none();
+                if ui.selectable_label(follow, "● FOLLOW").clicked() {
+                    v.end = if follow { Some(t_last) } else { None };
+                }
+            });
+        });
+        // Aircraft list on the right.
+        crate::look::area(ui, list, |ui| {
+            ui.label(egui::RichText::new("AIRCRAFT · click to jump").small().color(TEXT));
+            crate::look::line(ui, "  #  closest      f0     v    d  grade", DIM);
+            egui::ScrollArea::vertical().id_salt(("planes-list", i)).auto_shrink([false; 2]).show(ui, |ui| {
+                if pl.passes.is_empty() {
+                    crate::look::line(ui, "none yet", DIM);
+                }
+                for e in &pl.passes {
+                    let t = format!("{:>3}  {}  {:5.1}  {:4.0}  {:.1}k  {}", e.id, tlabel(e.t_cpa), e.f0, e.speed, e.dist / 1000.0, e.grade());
+                    let b = ui.add(egui::Button::new(egui::RichText::new(t).small().monospace().color(grade_color(e.grade()))).frame(false));
+                    if b.clicked() {
+                        jump = Some(e.clone());
+                    }
+                    b.on_hover_text(format!("SNR (signal-to-noise ratio) {:.2}, fit rms {:.2} Hz, {:.0}–{:.0} s", e.snr, e.rms, e.t_start, e.t_end));
+                }
+            });
+        });
+        let plot_r = Rect::from_min_max(Pos2::new(left.left() + 36.0 * z, bar.bottom() + 4.0 * z), Pos2::new(left.right(), left.bottom() - 16.0 * z));
+        if !have {
+            ui.painter().text(plot_r.center(), Align2::CENTER_CENTER, "no audio yet: press Run", font, DIM);
+            drop(s);
+            ui.data_mut(|d| d.insert_temp(id, v));
             return;
         }
-        let t_end = *pl.hist_t.last().unwrap();
-        let t_start = if self.spec_minutes > 0.0 { (t_end - self.spec_minutes * 60.0).max(pl.hist_t[0]) } else { pl.hist_t[0] };
-        let f_first = pl.hist_t.partition_point(|&t| t < t_start);
-        let cols_n = nf - f_first;
+        let (f_lo0, f_hi0) = (pl.freqs[0], pl.freqs[nb - 1]);
+        // Jump: centre the clicked aircraft in time and Hz.
+        if let Some(e) = &jump {
+            let pad = ((e.t_end - e.t_start) * 0.5).max(10.0);
+            v.span = e.t_end - e.t_start + 2.0 * pad;
+            v.end = Some(e.t_end + pad);
+            let (lo, hi) = e.points.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &(_, f)| (lo.min(f), hi.max(f)));
+            if lo < hi {
+                let m = (hi - lo) * 0.6 + 5.0;
+                v.band = Some(((lo - m).max(f_lo0), (hi + m).min(f_hi0)));
+            }
+        }
+        let resp = ui.interact(plot_r, id.with("plot"), Sense::click_and_drag());
+        let span_of = |v: &View| if v.span > 0.0 { v.span } else { t_last - t_first }.max(1.0);
+        let t1 = v.end.unwrap_or(t_last);
+        let span = span_of(&v);
+        let t0 = t1 - span;
+        let (f_lo, f_hi) = v.band.unwrap_or((f_lo0, f_hi0));
+        // Wheel: zoom time at the cursor; Shift+wheel: zoom Hz; drag: move time and Hz.
+        if let Some(h) = resp.hover_pos() {
+            let (dy, shift) = ui.input_mut(|inp| {
+                let d = inp.smooth_scroll_delta.y + inp.smooth_scroll_delta.x;
+                inp.smooth_scroll_delta = Vec2::ZERO;
+                (d, inp.modifiers.shift)
+            });
+            if dy != 0.0 {
+                let k = (-(dy as f64) / 200.0).exp();
+                if shift {
+                    let fc = f_hi - ((h.y - plot_r.top()) / plot_r.height()) as f64 * (f_hi - f_lo);
+                    let (lo, hi) = ((fc - (fc - f_lo) * k).max(f_lo0), (fc + (f_hi - fc) * k).min(f_hi0));
+                    if hi - lo > 2.0 {
+                        v.band = Some((lo, hi));
+                    }
+                } else {
+                    let tc = t0 + ((h.x - plot_r.left()) / plot_r.width()) as f64 * span;
+                    let ns = (span * k).clamp(5.0, (t_last - t_first).max(5.0));
+                    let ne = tc + (t1 - tc) * ns / span;
+                    v.span = ns;
+                    v.end = if v.end.is_none() && ne >= t_last { None } else { Some(ne.min(t_last)) };
+                }
+            }
+        }
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            v.end = Some((t1 - (d.x / plot_r.width()) as f64 * span).clamp(t_first + 1.0, t_last));
+            let df = (d.y / plot_r.height()) as f64 * (f_hi - f_lo);
+            if df != 0.0 && f_lo + df >= f_lo0 && f_hi + df <= f_hi0 {
+                v.band = Some((f_lo + df, f_hi + df));
+            }
+        }
+        if resp.double_clicked() {
+            v = View::default();
+        }
+        // Draw with the view as it is after this frame's input.
+        let t1 = v.end.unwrap_or(t_last);
+        let t0 = t1 - span_of(&v);
+        let (f_lo, f_hi) = v.band.unwrap_or((f_lo0, f_hi0));
+        let f_first = pl.hist_t.partition_point(|&t| t < t0).min(nf - 1);
+        let f_last = pl.hist_t.partition_point(|&t| t <= t1).max(f_first + 1).min(nf);
+        let cols_n = f_last - f_first;
         let w = cols_n.clamp(1, 2048);
-        // Rebuild the texture when new frames arrived or the span changed.
-        let stamp = (pl.frames, t_start);
-        let fresh = self.textures.get(&i).is_none_or(|(f, ts, _)| (*f, *ts) != stamp);
-        if fresh {
+        // The picture is rebuilt when new frames arrive or the view moves in time.
+        let stamp = (pl.frames, f_first as f64 * 1e7 + f_last as f64);
+        if app.textures.get(&i).is_none_or(|(f, ts, _)| (*f, *ts) != stamp) {
             let mut px = vec![0u8; w * nb * 4];
             for c in 0..w {
                 let a = f_first + c * cols_n / w;
                 let b = (f_first + (c + 1) * cols_n / w).max(a + 1).min(nf);
                 for bin in 0..nb {
-                    let mut m = 0u8;
-                    for f in a..b {
-                        m = m.max(pl.hist[f * nb + bin]);
-                    }
+                    let m = (a..b).map(|f| pl.hist[f * nb + bin]).max().unwrap_or(0);
                     let row = nb - 1 - bin;
-                    px[(row * w + c) * 4..(row * w + c) * 4 + 4].copy_from_slice(&self.lut[m as usize]);
+                    px[(row * w + c) * 4..(row * w + c) * 4 + 4].copy_from_slice(&app.lut[m as usize]);
                 }
             }
             let img = ColorImage::from_rgba_unmultiplied([w, nb], &px);
-            match self.textures.get_mut(&i) {
+            match app.textures.get_mut(&i) {
                 Some((f, ts, tex)) => {
                     tex.set(img, TextureOptions::LINEAR);
-                    *f = stamp.0;
-                    *ts = stamp.1;
+                    (*f, *ts) = stamp;
                 }
                 None => {
                     let tex = ui.ctx().load_texture(format!("spec{i}"), img, TextureOptions::LINEAR);
-                    self.textures.insert(i, (stamp.0, stamp.1, tex));
+                    app.textures.insert(i, (stamp.0, stamp.1, tex));
                 }
             }
         }
-        let tex = self.textures[&i].2.id();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 360.0), Sense::hover());
-        let plot = Rect::from_min_max(rect.min + Vec2::new(44.0, 0.0), rect.max - Vec2::new(0.0, 18.0));
-        let p = ui.painter_at(rect);
-        p.image(tex, plot, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        let (f_lo, f_hi) = (pl.freqs[0], pl.freqs[nb - 1]);
-        let x_of = |t: f64| plot.left() + ((t - t_start) / (t_end - t_start).max(1e-6)) as f32 * plot.width();
-        let y_of = |f: f64| plot.bottom() - ((f - f_lo) / (f_hi - f_lo)) as f32 * plot.height();
-        for k in 0..=4 {
-            let f = f_lo + (f_hi - f_lo) * k as f64 / 4.0;
-            p.text(Pos2::new(plot.left() - 4.0, y_of(f)), Align2::RIGHT_CENTER, format!("{f:.0}"), FontId::proportional(10.0), DIM);
+        let tex = app.textures[&i].2.id();
+        let p = ui.painter_at(left);
+        p.rect_filled(plot_r, 0.0, Color32::BLACK);
+        let x_of = |t: f64| plot_r.left() + ((t - t0) / (t1 - t0).max(1e-6)) as f32 * plot_r.width();
+        let y_of = |f: f64| plot_r.bottom() - ((f - f_lo) / (f_hi - f_lo)) as f32 * plot_r.height();
+        // Columns may not fill [t0, t1] near the start; Hz zoom crops the texture's rows.
+        let img_r = Rect::from_min_max(Pos2::new(x_of(pl.hist_t[f_first]), plot_r.top()), Pos2::new(x_of(pl.hist_t[f_last - 1]), plot_r.bottom()));
+        let uv_y = |f: f64| (1.0 - (f - f_lo0) / (f_hi0 - f_lo0)) as f32;
+        p.with_clip_rect(plot_r).image(tex, img_r, Rect::from_min_max(Pos2::new(0.0, uv_y(f_hi)), Pos2::new(1.0, uv_y(f_lo))), Color32::WHITE);
+        for k in 0..=5 {
+            let f = f_lo + (f_hi - f_lo) * k as f64 / 5.0;
+            p.text(Pos2::new(plot_r.left() - 3.0 * z, y_of(f)), Align2::RIGHT_CENTER, format!("{f:.0}"), font.clone(), DIM);
         }
-        p.text(Pos2::new(rect.left(), plot.top()), Align2::LEFT_TOP, "Hz", FontId::proportional(10.0), DIM);
-        let a = s.anchor.clone();
-        let tlabel = |t: f64| a.as_ref().map_or(format!("{t:.0} s"), |a| format!("{} UTC", fmt_clock(a.utc(t))));
-        p.text(Pos2::new(plot.left(), rect.bottom()), Align2::LEFT_BOTTOM, tlabel(t_start), FontId::proportional(10.0), DIM);
-        p.text(Pos2::new(plot.right(), rect.bottom()), Align2::RIGHT_BOTTOM, tlabel(t_end), FontId::proportional(10.0), DIM);
-        let clip = p.with_clip_rect(plot);
-        // Plugin tracks (for adsb-check: the Doppler curve the flight data predicts).
+        p.text(Pos2::new(left.left(), plot_r.top()), Align2::LEFT_TOP, "Hz", font.clone(), DIM);
+        for k in 0..=6 {
+            let t = t0 + (t1 - t0) * k as f64 / 6.0;
+            let al = if k == 0 { Align2::LEFT_BOTTOM } else if k == 6 { Align2::RIGHT_BOTTOM } else { Align2::CENTER_BOTTOM };
+            p.text(Pos2::new(x_of(t), left.bottom()), al, tlabel(t), font.clone(), DIM);
+        }
+        let clip = p.with_clip_rect(plot_r);
         for (c, tracks) in &overlays {
             for (_, pts) in tracks {
                 for &(t, hz, ok) in pts {
-                    if t >= t_start && (f_lo..=f_hi).contains(&hz) {
-                        clip.circle_filled(Pos2::new(x_of(t), y_of(hz)), 1.4, alpha(*c, if ok { 0.9 } else { 0.4 }));
+                    if (t0..=t1).contains(&t) && (f_lo..=f_hi).contains(&hz) {
+                        clip.circle_filled(Pos2::new(x_of(t), y_of(hz)), 1.4 * z, alpha(*c, if ok { 0.9 } else { 0.4 }));
                     }
                 }
             }
         }
         let mut hover = None;
         for (e, pending) in pl.passes.iter().map(|e| (e, false)).chain(pl.pending.iter().map(|e| (e, true))) {
-            if e.t_end < t_start {
+            if e.t_end < t0 || e.t_start > t1 {
                 continue;
             }
             let col = if pending { alpha(TEXT, 0.5) } else { grade_color(e.grade()) };
             let pts: Vec<Pos2> = e.points.iter().map(|&(t, f)| Pos2::new(x_of(t), y_of(f))).collect();
             for w in pts.windows(2) {
-                clip.line_segment([w[0], w[1]], Stroke::new(1.6, col));
+                clip.line_segment([w[0], w[1]], Stroke::new(1.6 * z, col));
             }
             if let Some(first) = pts.first() {
-                clip.text(*first + Vec2::new(0.0, -6.0), Align2::LEFT_BOTTOM, format!("{:.0} m/s · {:.0} m", e.speed, e.dist), FontId::proportional(10.0), col);
+                clip.text(*first + Vec2::new(0.0, -6.0 * z), Align2::LEFT_BOTTOM, format!("#{} {:.0} m/s · {:.0} m", e.id, e.speed, e.dist), font.clone(), col);
                 if resp.hover_pos().is_some_and(|h| pts.iter().any(|q| q.distance(h) < 6.0)) {
                     hover = Some(format!(
-                        "pass {}{}\nclosest approach {}\nspeed {:.0} m/s, distance {:.0} m, f0 {:.1} Hz\nSNR {:.1}, fit rms {:.2} Hz, grade {}",
+                        "pass {}{}\nclosest approach {}\nspeed {:.0} m/s, distance {:.0} m, f0 {:.1} Hz\nSNR (signal-to-noise ratio) {:.1}, fit rms {:.2} Hz, grade {}",
                         e.id,
                         if pending { " (candidate)" } else { "" },
                         tlabel(e.t_cpa),
@@ -214,15 +341,13 @@ impl App {
             }
         }
         drop(s);
-        if let Some(t) = hover {
-            resp.on_hover_text(t);
-        }
-        ui.colored_label(DIM, "green/orange/grey: passes by grade · white: candidates · dots: plugin tracks (adsb-check: predicted curves from flight data)");
+        resp.on_hover_text(hover.unwrap_or_else(|| "wheel: zoom time · Shift+wheel: zoom Hz · drag: move · double-click: reset view".into()));
+        ui.data_mut(|d| d.insert_temp(id, v));
     }
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
-pub struct Look;
-
-impl crate::look::NodeLook for Look {}
+/// Audio seconds as H:MM:SS.
+fn fmt_rel(t: f64) -> String {
+    let s = t.max(0.0) as u64;
+    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}

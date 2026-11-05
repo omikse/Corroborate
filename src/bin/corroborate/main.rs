@@ -343,8 +343,7 @@ impl App {
 
         // Wire Planes
         self.wire(src, "audio", planes, "audio");
-        self.wire(src, "time", planes, "time");
-        self.wire(planes, "passes", rec, nodes::RECORD_EVENTS[0]);
+        self.wire(planes, "aircrafts", rec, nodes::RECORD_EVENTS[0]);
 
         // Wire ENF
         self.wire(src, "audio", enf, "audio");

@@ -21,8 +21,8 @@ pub fn spec() -> NodeSpec {
     NodeSpec {
         name: NAME,
         role: Role::Detector,
-        inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
-        outputs: vec![Port::req("passes", PortKind::Event)],
+        inputs: vec![Port::req("audio", PortKind::Audio)],
+        outputs: vec![Port::req("aircrafts", PortKind::Event)],
     }
 }
 
