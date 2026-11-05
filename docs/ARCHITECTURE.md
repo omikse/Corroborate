@@ -89,7 +89,7 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
   needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
 
 - `src/bin/corroborate.rs`: the new workbench GUI (`cargo run --release --features gui --bin corroborate`).
-  Node graph (drag, pan, select shows the evidence trail, double-click opens the node window), timeline
+  Node graph (wheel zoom, drag pan, select shows the evidence trail, double-click opens the node window), timeline
   lanes (wheel zoom, drag pan, blocks = time ± error, faded outline = own clock), map window for the
   locator, offsets table for the sync solver. Runs the engine on a synthetic protest scenario.
 

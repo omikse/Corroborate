@@ -3,7 +3,7 @@
 //! the timeline shows every finding on one clock with its time error; the Record node keeps
 //! a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
 //!
-//! Graph: drag a node by its header, drag empty space to pan, drag from an output port to an
+//! Graph: scroll to zoom, drag a node by its header, drag empty space to pan, drag from an output port to an
 //! input port to wire them (types must match), right-click an input to unwire it, right-click
 //! a node or empty space for more. Double-click a node to open its window.
 
@@ -160,6 +160,8 @@ struct App {
     graph: Graph,
     nodes: Vec<NodeData>,
     pan: Vec2,
+    /// Canvas magnification, kept separate from the graph's saved node positions.
+    zoom: f32,
     selected: Option<NodeId>,
     open: Vec<bool>,
     /// Wire being dragged from (node, output index).
@@ -195,6 +197,7 @@ impl App {
             graph: Graph::new(),
             nodes: Vec::new(),
             pan: Vec2::ZERO,
+            zoom: 1.0,
             selected: None,
             open: Vec::new(),
             wiring: None,
@@ -261,6 +264,7 @@ impl App {
         self.open.clear();
         self.textures.clear();
         self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
         let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 200.0));
         self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
         let grid = self.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(20.0, 300.0));
@@ -756,12 +760,18 @@ impl App {
         let rows = spec.inputs.len().max(spec.outputs.len()).max(1) as f32;
         // The Map node shows its map on the canvas, below its port.
         let (w, extra) = if matches!(self.nodes[i].kind, Kind::Map) { (MAP_NODE_W, MAP_NODE_W / ROBINSON_ASPECT as f32 + 8.0) } else { (NODE_W, 0.0) };
-        Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2(), Vec2::new(w, HEAD + rows * ROW + 26.0 + extra))
+        Rect::from_min_size(
+            origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom,
+            Vec2::new(w, HEAD + rows * ROW + 26.0 + extra) * self.zoom,
+        )
     }
 
     fn port_pos(&self, origin: Pos2, i: NodeId, idx: usize, out: bool) -> Pos2 {
         let r = self.node_rect(origin, i);
-        Pos2::new(if out { r.right() } else { r.left() }, r.top() + HEAD + 4.0 + idx as f32 * ROW + ROW / 2.0)
+        Pos2::new(
+            if out { r.right() } else { r.left() },
+            r.top() + (HEAD + 4.0 + idx as f32 * ROW + ROW / 2.0) * self.zoom,
+        )
     }
 
     fn add_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
@@ -831,7 +841,16 @@ impl App {
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, BG);
-        let step = 22.0;
+        // Scale around the pointer, keeping the item under it in place while scrolling.
+        if let Some(pointer) = bg.hover_pos() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let world = (pointer - area.min - self.pan) / self.zoom;
+                self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(0.4, 2.5);
+                self.pan = pointer - area.min - world * self.zoom;
+            }
+        }
+        let step = 22.0 * self.zoom;
         let off = Vec2::new(self.pan.x.rem_euclid(step), self.pan.y.rem_euclid(step));
         let mut y = area.top() + off.y;
         while y < area.bottom() {
@@ -849,7 +868,7 @@ impl App {
             self.selected = None;
         }
         let origin = area.min;
-        let menu_at = bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan;
+        let menu_at = (bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));
 
         let trail = self.selected.and_then(|s| self.graph.trail(s).ok()).unwrap_or_default();
@@ -880,10 +899,10 @@ impl App {
                 continue;
             }
             let rect = self.node_rect(origin, i);
-            let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD));
+            let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD * self.zoom));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
             if resp.dragged() && self.wiring.is_none() {
-                self.nodes[i].pos += resp.drag_delta();
+                self.nodes[i].pos += resp.drag_delta() / self.zoom;
             }
             if resp.clicked() {
                 clicked = Some(i);
@@ -905,18 +924,18 @@ impl App {
             let is_sel = self.selected == Some(i);
             let in_trail = trail.contains(&i);
             let fade = self.selected.is_some() && !in_trail;
-            painter.rect_filled(rect, 6.0, if fade { alpha(NODE, 0.6) } else { NODE });
+            painter.rect_filled(rect, 6.0 * self.zoom, if fade { alpha(NODE, 0.6) } else { NODE });
             let border = if is_sel { SEL } else if in_trail { alpha(SEL, 0.6) } else { LINE };
-            painter.rect_stroke(rect, 6.0, Stroke::new(if is_sel { 2.0 } else { 1.0 }, border), StrokeKind::Inside);
-            painter.line_segment([Pos2::new(rect.left(), head.bottom()), Pos2::new(rect.right(), head.bottom())], Stroke::new(1.0, LINE));
+            painter.rect_stroke(rect, 6.0 * self.zoom, Stroke::new((if is_sel { 2.0 } else { 1.0 }) * self.zoom, border), StrokeKind::Inside);
+            painter.line_segment([Pos2::new(rect.left(), head.bottom()), Pos2::new(rect.right(), head.bottom())], Stroke::new(self.zoom, LINE));
             let tc = if fade { DIM } else { TEXT };
             let lab = &self.nodes[i].label;
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
-            painter.text(head.left_center() + Vec2::new(9.0, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0), tc);
-            painter.text(head.right_center() - Vec2::new(9.0, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0), DIM);
+            painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
+            painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
             if matches!(self.nodes[i].kind, Kind::Map) {
-                let top = rect.top() + HEAD + ROW + 8.0;
-                let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0, top), Vec2::new(rect.width() - 12.0, (rect.width() - 12.0) / ROBINSON_ASPECT as f32));
+                let top = rect.top() + (HEAD + ROW + 8.0) * self.zoom;
+                let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0 * self.zoom, top), Vec2::new(rect.width() - 12.0 * self.zoom, (rect.width() - 12.0 * self.zoom) / ROBINSON_ASPECT as f32));
                 let area = self.graph.feeder(i, "location").and_then(|(f, _)| self.area_from(f).ok()).map(|(a, _)| a);
                 paint_area_map(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref());
             }
@@ -948,38 +967,38 @@ impl App {
                 (st, s.running)
             };
             let status = if status.chars().count() > 34 { format!("{}…", status.chars().take(33).collect::<String>()) } else { status };
-            let sy = rect.bottom() - 12.0;
+            let sy = rect.bottom() - 12.0 * self.zoom;
             if running {
                 let on = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-                painter.circle_filled(Pos2::new(rect.left() + 12.0, sy), 3.5, if on { LIVE } else { alpha(LIVE, 0.3) });
+                painter.circle_filled(Pos2::new(rect.left() + 12.0 * self.zoom, sy), 3.5 * self.zoom, if on { LIVE } else { alpha(LIVE, 0.3) });
             }
-            painter.text(Pos2::new(rect.left() + 22.0, sy), Align2::LEFT_CENTER, status, FontId::proportional(10.5), DIM);
+            painter.text(Pos2::new(rect.left() + 22.0 * self.zoom, sy), Align2::LEFT_CENTER, status, FontId::proportional(10.5 * self.zoom), DIM);
 
             let missing = self.graph.missing(i);
             for (k, p) in spec.inputs.iter().enumerate() {
                 let c = self.port_pos(origin, i, k, false);
                 let col = kind_color(p.kind);
                 if p.required {
-                    painter.circle_filled(c, 5.0, col);
+                    painter.circle_filled(c, 5.0 * self.zoom, col);
                 } else {
-                    painter.circle_filled(c, 5.0, NODE);
-                    painter.circle_stroke(c, 4.5, Stroke::new(1.6, col));
+                    painter.circle_filled(c, 5.0 * self.zoom, NODE);
+                    painter.circle_stroke(c, 4.5 * self.zoom, Stroke::new(1.6 * self.zoom, col));
                 }
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
-                painter.text(c + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, p.name, FontId::proportional(11.5), nc);
-                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0)), egui::Id::new(("in", i, k)), Sense::click());
+                painter.text(c + Vec2::new(10.0 * self.zoom, 0.0), Align2::LEFT_CENTER, p.name, FontId::proportional(11.5 * self.zoom), nc);
+                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click());
                 if pr.secondary_clicked() {
                     unwire = Some((i, p.name));
                 }
-                if self.wiring.is_some() && released && pointer.is_some_and(|q| q.distance(c) < 12.0) {
+                if self.wiring.is_some() && released && pointer.is_some_and(|q| q.distance(c) < 12.0 * self.zoom) {
                     drop_on = Some((i, k));
                 }
             }
             for (k, p) in spec.outputs.iter().enumerate() {
                 let c = self.port_pos(origin, i, k, true);
-                painter.circle_filled(c, 5.0, kind_color(p.kind));
-                painter.text(c - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, p.name, FontId::proportional(11.5), tc);
-                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0)), egui::Id::new(("out", i, k)), Sense::drag());
+                painter.circle_filled(c, 5.0 * self.zoom, kind_color(p.kind));
+                painter.text(c - Vec2::new(10.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, p.name, FontId::proportional(11.5 * self.zoom), tc);
+                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
                 if pr.drag_started() {
                     self.wiring = Some((i, k));
                 }
@@ -996,7 +1015,7 @@ impl App {
                     [a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b],
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(2.0, kind_color(kind)),
+                    Stroke::new(2.0 * self.zoom, kind_color(kind)),
                 ));
             }
             if released {
@@ -1037,7 +1056,7 @@ impl App {
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / delete · double-click: open",
+            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / delete · double-click: open",
             FontId::proportional(11.0),
             DIM,
         );
