@@ -27,14 +27,25 @@ ENF location demo.
 
 ## Modules
 
-Each module has its own folder under `src/modules/` with its code and a README.
+Every node is a module: its own folder under `src/modules/` with its code and a README. A node's
+name, label and ports are written only there; the app reads them from the module.
 
-| Module | Folder | What it gives |
+| Node | Folder | What it gives |
 |---|---|---|
+| File | [file](src/modules/file/README.md) | audio and time from a recording on disk |
+| Stream | [stream](src/modules/stream/README.md) | audio and time from a URL, live |
+| Microphone | [mic](src/modules/mic/README.md) | audio and time from a capture device |
+| Manual data | [manual](src/modules/manual/README.md) | facts typed in: date, time, place, coordinates, notes |
 | Planes (Doppler) | [planes](src/modules/planes/README.md) | aircraft passes: speed, closest approach, distance |
-| Power hum (ENF) + Grid frequencies | [enf](src/modules/enf/README.md) | mains hum runs, and the area where that grid frequency is used |
+| Power hum (ENF) | [enf](src/modules/enf/README.md) | mains hum runs, and the area where that grid frequency is used |
+| Grid frequencies | [grid_frequencies](src/modules/grid_frequencies/README.md) | 50/60 Hz zones by region, for ENF |
+| Plugin | [plugin](src/modules/plugin/README.md) | runs a separate program on the same audio |
 | ADS-B check (plugin) | [adsb-check](src/modules/adsb-check/README.md) | flight data versus heard passes |
 | Metadata (plugin) | [meta](src/modules/meta/README.md) | what a file says about itself |
+| Result record | [record](src/modules/record/README.md) | the result JSON, evidence trail and agreed location |
+| Combine locations | [combine](src/modules/combine/README.md) | several locations into one (all or any) |
+| Invert location | [invert](src/modules/invert/README.md) | flips what a location adds and subtracts |
+| Map | [map](src/modules/map/README.md) | a location on a world map |
 
 Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, started by
 the Planes node: [planes/VIEWER.md](src/modules/planes/VIEWER.md).

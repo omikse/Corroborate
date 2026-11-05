@@ -7,7 +7,7 @@ Node: `audio` (required), `grid` (required: a Grid frequencies node), `time` and
 (optional) in; `hum` (runs of clear hum) and `location` (an area) out.
 
 Files: `mod.rs` (the detector), `plugin.rs` (the same detector as a plugin for the old viewer,
-`enf-plugin.exe`), `grid-frequencies.json` (the default grid map).
+`enf-plugin.exe`), `grid_frequencies\grid-frequencies.json` (the default grid map, in its own module folder).
 
 ## Detecting the hum
 

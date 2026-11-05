@@ -21,6 +21,24 @@ use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 use std::sync::Arc;
 
+pub const NAME: &str = "enf";
+pub const LABEL: &str = "Power hum (ENF)";
+
+/// The node's ports: the one definition, used by the workbench and by `Module::spec`.
+pub fn spec() -> NodeSpec {
+    NodeSpec {
+        name: NAME,
+        role: Role::Detector,
+        inputs: vec![
+            Port::req("audio", PortKind::Audio),
+            Port::req("grid", PortKind::Json),
+            Port::opt("time", PortKind::Time),
+            Port::opt("location", PortKind::Location),
+        ],
+        outputs: vec![Port::req("hum", PortKind::Event), Port::req("location", PortKind::Location)],
+    }
+}
+
 const SR: f64 = 4000.0;
 const WIN_S: f64 = 16.0;
 const HOP_S: f64 = 1.0;
@@ -320,16 +338,11 @@ impl Enf {
 
 impl Module for Enf {
     fn name(&self) -> &'static str {
-        "enf"
+        NAME
     }
 
     fn spec(&self) -> NodeSpec {
-        NodeSpec {
-            name: "enf",
-            role: Role::Detector,
-            inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
-            outputs: vec![Port::req("hum", PortKind::Event)],
-        }
+        spec()
     }
 
     fn describe(&self) -> String {

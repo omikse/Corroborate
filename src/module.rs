@@ -100,8 +100,9 @@ mod tests {
             assert_eq!(spec.role, Role::Detector);
             assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Audio && p.required));
             assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Time && !p.required));
-            assert!(spec.outputs.iter().all(|p| p.kind == PortKind::Event));
-            assert!(spec.ready(&["audio"]));
+            assert!(spec.outputs.iter().any(|p| p.kind == PortKind::Event));
+            let required: Vec<&str> = spec.inputs.iter().filter(|p| p.required).map(|p| p.name).collect();
+            assert!(spec.ready(&required));
             assert!(!spec.ready(&["time"]));
         }
     }

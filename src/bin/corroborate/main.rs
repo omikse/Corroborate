@@ -293,7 +293,7 @@ impl App {
 
     fn default_project(&mut self) {
         let src = self.add(Kind::Stream { url: String::new() }, Pos2::new(30.0, 40.0));
-        let mut rows = nodes::manual_defaults();
+        let mut rows = corroborate::modules::manual::defaults();
         rows.push(("elevation".into(), String::new()));
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 280.0));
         let planes = self.add(Kind::Planes, Pos2::new(330.0, 30.0));
@@ -318,7 +318,7 @@ impl App {
 
         // ADS-B check if available
         let bundled = nodes::bundled_plugins();
-        if let Some(adsb) = bundled.iter().find(|p| p.contains("adsb-check")) {
+        if let Some(adsb) = bundled.iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) {
             let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(330.0, 260.0));
             self.wire(src, "audio", a, "audio");
             self.wire(src, "time", a, "time");
@@ -337,20 +337,7 @@ impl App {
         let new_id = |old: NodeId| keep.iter().position(|&k| k == old);
         for &i in &keep {
             let n = &self.nodes[i];
-            let (k, param) = match &n.kind {
-                Kind::File { path } => ("file", path.clone()),
-                Kind::Stream { url } => ("stream", url.clone()),
-                Kind::Mic { device } => ("mic", device.clone()),
-                Kind::Manual { .. } => ("manual", String::new()),
-                Kind::Planes => ("planes", String::new()),
-                Kind::Enf => ("enf", String::new()),
-                Kind::GridFrequencies { path } => ("grid-frequencies", path.clone()),
-                Kind::Plugin { path } => ("plugin", path.clone()),
-                Kind::Record => ("record", String::new()),
-                Kind::Map => ("map", String::new()),
-                Kind::Combine { any } => ("combine", if *any { "any" } else { "all" }.to_string()),
-                Kind::Invert => ("invert", String::new()),
-            };
+            let (k, param) = (n.kind.spec().name, n.kind.saved_param());
             text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
         for (ni, &i) in keep.iter().enumerate() {
@@ -382,22 +369,7 @@ impl App {
             let f: Vec<&str> = line.split('|').collect();
             match f.as_slice() {
                 ["node", k, x, y, label, param] => {
-                    let p = param.to_string();
-                    let kind = match *k {
-                        "file" => Kind::File { path: p },
-                        "stream" => Kind::Stream { url: p },
-                        "mic" => Kind::Mic { device: p },
-                        "manual" => Kind::Manual { rows: Vec::new() },
-                        "planes" => Kind::Planes,
-                        "enf" => Kind::Enf,
-                        "grid-frequencies" => Kind::GridFrequencies { path: p.clone() },
-                        "plugin" => Kind::Plugin { path: p },
-                        "record" => Kind::Record,
-                        "map" => Kind::Map,
-                        "combine" => Kind::Combine { any: p == "any" },
-                        "invert" => Kind::Invert,
-                        _ => continue,
-                    };
+                    let Some(kind) = Kind::from_saved(k, param.to_string()) else { continue };
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
                     if !label.trim().is_empty() {
                         self.nodes[id].label = label.to_string();
@@ -776,58 +748,18 @@ impl App {
 
     fn add_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
         let mut pick: Option<Kind> = None;
-        ui.label(egui::RichText::new("SOURCES").small().color(DIM));
-        if ui.button("File").clicked() {
-            pick = Some(Kind::File { path: String::new() });
-        }
-        if ui.button("Stream (URL)").clicked() {
-            pick = Some(Kind::Stream { url: String::new() });
-        }
-        if ui.button("Microphone").clicked() {
-            pick = Some(Kind::Mic { device: String::new() });
-        }
-        if ui.button("Manual data").clicked() {
-            pick = Some(Kind::Manual { rows: nodes::manual_defaults() });
-        }
-        ui.label(egui::RichText::new("DETECTORS").small().color(DIM));
-        if ui.button("Planes (Doppler)").clicked() {
-            pick = Some(Kind::Planes);
-        }
-        if ui.button("Power hum (ENF)").clicked() {
-            pick = Some(Kind::Enf);
-        }
-        ui.label(egui::RichText::new("DATA").small().color(DIM));
-        if ui.button("Grid frequencies").clicked() {
-            pick = Some(Kind::GridFrequencies { path: String::new() });
-        }
-        ui.label(egui::RichText::new("PLUGINS").small().color(DIM));
-        for p in nodes::bundled_plugins() {
-            if ui.button(nodes::plugin_label(&p)).clicked() {
-                pick = Some(Kind::Plugin { path: p });
+        for (section, kinds) in nodes::menu() {
+            ui.label(egui::RichText::new(section).small().color(DIM));
+            for k in kinds {
+                if ui.button(k.default_label()).clicked() {
+                    pick = Some(k);
+                }
             }
-        }
-        if ui.button("Plugin from file…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("program", &["exe"]).pick_file() {
-                pick = Some(Kind::Plugin { path: p.to_string_lossy().into_owned() });
+            if section == nodes::PLUGINS && ui.button("Plugin from file…").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("program", &["exe"]).pick_file() {
+                    pick = Some(Kind::Plugin { path: p.to_string_lossy().into_owned() });
+                }
             }
-        }
-        ui.label(egui::RichText::new("OUTPUT").small().color(DIM));
-        if ui.button("Result record").clicked() {
-            pick = Some(Kind::Record);
-        }
-        ui.label(egui::RichText::new("LOCATION").small().color(DIM));
-        if ui.button("Combine locations (all)").clicked() {
-            pick = Some(Kind::Combine { any: false });
-        }
-        if ui.button("Combine locations (any)").clicked() {
-            pick = Some(Kind::Combine { any: true });
-        }
-        if ui.button("Invert location").clicked() {
-            pick = Some(Kind::Invert);
-        }
-        ui.label(egui::RichText::new("VIEW").small().color(DIM));
-        if ui.button("Map").clicked() {
-            pick = Some(Kind::Map);
         }
         if let Some(k) = pick {
             let id = self.add(k, at);

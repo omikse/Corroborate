@@ -13,6 +13,19 @@ use crate::ingest::Resampler;
 use crate::core::{NodeSpec, Port, PortKind, Role};
 use crate::module::{Finding, Module, INPUT_SR};
 
+pub const NAME: &str = "planes";
+pub const LABEL: &str = "Planes (Doppler)";
+
+/// The node's ports: the one definition, used by the workbench and by `Module::spec`.
+pub fn spec() -> NodeSpec {
+    NodeSpec {
+        name: NAME,
+        role: Role::Detector,
+        inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
+        outputs: vec![Port::req("passes", PortKind::Event)],
+    }
+}
+
 pub struct Planes {
     rs: Resampler,
     det: Detector,
@@ -44,16 +57,11 @@ impl Planes {
 
 impl Module for Planes {
     fn name(&self) -> &'static str {
-        "planes"
+        NAME
     }
 
     fn spec(&self) -> NodeSpec {
-        NodeSpec {
-            name: "planes",
-            role: Role::Detector,
-            inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
-            outputs: vec![Port::req("pass", PortKind::Event)],
-        }
+        spec()
     }
 
     fn describe(&self) -> String {

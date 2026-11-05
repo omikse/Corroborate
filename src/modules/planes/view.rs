@@ -923,19 +923,9 @@ fn source_key(src: &Source) -> String {
     }
 }
 
-/// Manual data fields every source starts with, and what to type in them.
-const MANUAL_KEYS: [(&str, &str); 5] = [
-    ("date", "YYYY-MM-DD"),
-    ("time", "HH:MM, with the time zone"),
-    ("place", "town, region, country"),
-    ("coordinates", "lat, lon"),
-    ("notes", "anything else"),
-];
+/// Manual data fields every source starts with: defined once, in the manual module.
+use corroborate::modules::manual::{defaults as manual_defaults, FIELDS as MANUAL_KEYS};
 const MANUAL_C: Color32 = Color32::from_rgb(230, 190, 110);
-
-fn manual_defaults() -> Vec<(String, String)> {
-    MANUAL_KEYS.iter().map(|(k, _)| (k.to_string(), String::new())).collect()
-}
 
 /// Manual data for a source: the standard fields, filled from the file's result JSON when an
 /// earlier session wrote one.
