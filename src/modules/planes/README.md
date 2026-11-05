@@ -4,8 +4,9 @@ Aircraft Doppler curves: does this audio hold propeller-aircraft passes clear en
 Node: audio and an optional time in, passes out. Its window shows the spectrogram; it also starts
 `planes-view` (the old viewer, in its own window; see [VIEWER.md](VIEWER.md)) on the same source.
 
-Files: `mod.rs` (the module), `spectro.rs` (whitened STFT), `ridge.rs` (Viterbi ridges),
-`fit.rs` (straight-pass Doppler model and fit), `detect.rs` (gates, merging, events).
+Files: `mod.rs` (the module: name, label, ports), `spectro.rs` (whitened STFT), `ridge.rs` (Viterbi ridges),
+`fit.rs` (straight-pass Doppler model and fit), `detect.rs` (gates, merging, events), `node.rs` (the node in
+the workbench: state while running, spectrogram window, timeline marks, result file), `view.rs` (`planes-view`).
 
 ## How it works
 

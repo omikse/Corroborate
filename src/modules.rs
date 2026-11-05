@@ -1,5 +1,7 @@
 //! Modules: each node kind has its own folder under `src/modules/` with its code and a README.md.
-//! Library modules hold the node's ports and labels (and, for planes and enf, the detector).
+//! `mod.rs` (in this library) holds the node's name, label and ports, and for planes and enf the
+//! detector. `node.rs` holds what the node does in the workbench (its state while running, window,
+//! timeline marks, result file); it is compiled into the `corroborate` program, not this library.
 //! Plugin folders (adsb-check, meta) hold a separate program each, built as its own binary (see Cargo.toml).
 
 use crate::core::{Port, PortKind};

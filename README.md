@@ -27,8 +27,10 @@ ENF location demo.
 
 ## Modules
 
-Every node is a module: its own folder under `src/modules/` with its code and a README. A node's
-name, label and ports are written only there; the app reads them from the module.
+Every node is a module: its own folder under `src/modules/` with its code and a README. `mod.rs`
+holds the node's name, label and ports, written only there; `node.rs` holds everything it does in the
+workbench (state while running, window, canvas status, timeline marks, result file). The app
+(`src/bin/corroborate/`) only draws the graph and calls into the modules.
 
 | Node | Folder | What it gives |
 |---|---|---|

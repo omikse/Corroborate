@@ -117,38 +117,11 @@ pub fn menu() -> Vec<(&'static str, Vec<Kind>)> {
         ),
         ("DETECTORS", vec![Kind::Planes, Kind::Enf]),
         ("DATA", vec![Kind::GridFrequencies { path: String::new() }]),
-        (PLUGINS, bundled_plugins().into_iter().map(|path| Kind::Plugin { path }).collect()),
+        (PLUGINS, crate::plugin_node::bundled().into_iter().map(|path| Kind::Plugin { path }).collect()),
         ("OUTPUT", vec![Kind::Record]),
         ("LOCATION", vec![Kind::Combine { any: false }, Kind::Combine { any: true }, Kind::Invert]),
         ("VIEW", vec![Kind::Map]),
     ]
-}
-
-/// Programs next to this one that speak the plugin protocol (bundled plugins).
-pub fn bundled_plugins() -> Vec<String> {
-    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) else {
-        return Vec::new();
-    };
-    let mut found: Vec<String> = plugin::BUNDLED
-        .iter()
-        .map(|(exe, _)| dir.join(format!("{exe}{}", std::env::consts::EXE_SUFFIX)))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    found.sort();
-    found
-}
-
-/// The grid-frequency file that ships with the program: next to it, or in the source tree it was built from.
-pub fn bundled_grid_file() -> String {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let dir = exe.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    let name = grid_frequencies::BUNDLED_FILE;
-    let in_source = |root: std::path::PathBuf| root.join(grid_frequencies::SOURCE_DIR).join(name);
-    [dir.join(name), dir.join("data").join(name), in_source(dir.join("../..")), in_source(env!("CARGO_MANIFEST_DIR").into())]
-        .into_iter()
-        .find(|p| p.exists())
-        .map_or(String::new(), |p| p.canonicalize().unwrap_or(p).to_string_lossy().trim_start_matches(r"\\?\").to_string())
 }
 
 #[cfg(test)]

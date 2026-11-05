@@ -1,73 +1,21 @@
 //! Running a graph: each source node decodes its audio (ffmpeg, 16 kHz mono) on its own
-//! thread and feeds every node wired to its audio output. Planes and ENF run in that thread;
-//! plugins are separate programs fed through a pipe, as in the old viewer. Every node's
-//! results land in its own shared state, which the GUI reads.
+//! thread and feeds every node wired to its audio output. What each kind of node does with
+//! the audio is in its module's `node.rs`; this file only decodes, hands out the audio, and
+//! keeps the shared state the GUI reads.
 
-use corroborate::modules::planes::detect::{Config, Event};
-use corroborate::module::{Finding, Module};
-use corroborate::modules::enf::{Enf, EnfPoint, EnfSegment};
-use corroborate::modules::planes::Planes;
-use corroborate::plugin::{self, PluginFinding};
+use crate::enf_node::{self, EnfJob, EnfState};
+use crate::planes_node::{self, PlanesState};
+use crate::plugin_node::{self, PluginJob, PluginState};
+use crate::stream_node;
 use corroborate::timebase::{self, Anchor, SharedAnchor};
-use corroborate::area::{GridMap, WorldMask};
 use corroborate::{ingest, INPUT_SR};
-use std::io::{BufRead, Write};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub type Shared = Arc<Mutex<NodeState>>;
 
-/// Spectrogram value range kept for display (whitened z-scores).
-const Z_LO: f32 = -1.0;
-const Z_HI: f32 = 6.0;
-
-#[derive(Default, Clone)]
-pub struct PluginState {
-    pub name: String,
-    pub about: String,
-    pub color: Option<[u8; 3]>,
-    pub status: String,
-    /// Where the process stands: starting, running, finished, or what went wrong.
-    pub state: String,
-    /// Last line on stderr.
-    pub log: String,
-    pub tracks: Vec<(String, Vec<(f64, f64, bool)>)>,
-    pub findings: Vec<PluginFinding>,
-    pub meta: Vec<(String, String)>,
-    /// Live audio the plugin could not keep up with, seconds.
-    pub dropped_s: f64,
-}
-
-impl PluginState {
-    fn apply(&mut self, m: plugin::Msg) {
-        match m {
-            plugin::Msg::Hello { name, about, color } => {
-                if !name.is_empty() {
-                    self.name = name;
-                }
-                self.about = about;
-                self.color = color;
-                self.state = "running".into();
-            }
-            plugin::Msg::Status(t) => self.status = t,
-            plugin::Msg::View { .. } => {}
-            plugin::Msg::Track { id, t, hz, ok } => match self.tracks.iter_mut().find(|(i, _)| *i == id) {
-                Some((_, v)) => v.push((t, hz, ok)),
-                None => self.tracks.push((id, vec![(t, hz, ok)])),
-            },
-            plugin::Msg::Finding(f) => self.findings.push(f),
-            plugin::Msg::Meta { key, value } => match self.meta.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => *v = value,
-                None => self.meta.push((key, value)),
-            },
-        }
-    }
-}
-
-/// What one node has produced so far. Fields are used by the kinds they belong to.
+/// What one node has produced so far: the part every node has, and each kind's own part.
 #[derive(Default)]
 pub struct NodeState {
     pub status: String,
@@ -80,24 +28,8 @@ pub struct NodeState {
     /// UTC of the source's relative time 0, and where it came from.
     pub anchor: Option<Anchor>,
     pub audio_s: f64,
-    // Planes.
-    pub freqs: Vec<f64>,
-    pub hist: Vec<u8>,
-    pub hist_t: Vec<f64>,
-    /// Frames ever added: changes whenever the spectrogram changes.
-    pub frames: u64,
-    pub passes: Vec<Event>,
-    pub pending: Vec<Event>,
-    pub ridges: Vec<Vec<(f64, f64)>>,
-    // ENF.
-    pub enf_points: Vec<EnfPoint>,
-    pub enf_segments: Vec<EnfSegment>,
-    pub enf_nominal: Option<f64>,
-    /// Where the measured grid frequency is used (AND the location wired in), once decided.
-    pub enf_area: Option<Arc<WorldMask>>,
-    /// How that area was reached: regions, data source, contradictions.
-    pub enf_area_note: String,
-    // Plugin.
+    pub planes: PlanesState,
+    pub enf: EnfState,
     pub plugin: PluginState,
 }
 
@@ -126,13 +58,6 @@ impl Input {
     }
 }
 
-pub struct PluginJob {
-    pub path: String,
-    pub state: Shared,
-    /// Manual data rows from a Manual node wired into the plugin.
-    pub manual: Vec<(String, String)>,
-}
-
 pub struct Job {
     pub label: String,
     pub input: Input,
@@ -145,56 +70,8 @@ pub struct Job {
     pub work_dir: std::path::PathBuf,
 }
 
-/// An ENF node: its state, the grid map wired into it, and the location wired into it (if any).
-pub struct EnfJob {
-    pub state: Shared,
-    pub grid: Result<Arc<GridMap>, String>,
-    pub prior: Option<(WorldMask, String)>,
-}
-
 pub fn start(job: Job) {
     thread::spawn(move || run(job));
-}
-
-fn quantise(z: f32) -> u8 {
-    (((z - Z_LO) / (Z_HI - Z_LO)).clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-/// Where a measured nominal frequency is used, AND the location wired into the node.
-/// An empty result is kept: it says the hum contradicts that location.
-fn enf_area(nominal: f64, j: &EnfJob) -> (Option<WorldMask>, String) {
-    let g = match &j.grid {
-        Ok(g) => g,
-        Err(e) => return (None, format!("no area: {e}")),
-    };
-    let names: Vec<&str> = g.regions_for(nominal).iter().map(|r| r.id.as_str()).collect();
-    let mut m = g.mask_for(nominal);
-    let mut note = format!("{nominal:.0} Hz grid: {} (grid data: {})", names.join("; "), g.source);
-    if let Some((p, label)) = &j.prior {
-        m = m.and(p);
-        if m.is_empty() {
-            note = format!("CONTRADICTION: {nominal:.0} Hz hum is not used anywhere in {label}. {note}");
-        } else {
-            note = format!("{note}; limited to {label}");
-        }
-    }
-    (Some(m), note)
-}
-
-/// YouTube page links need resolving to a direct stream URL (yt-dlp); others are used as-is.
-fn resolve(url: &str) -> Result<String, String> {
-    if !(url.contains("youtube.com/") || url.contains("youtu.be/")) {
-        return Ok(url.to_string());
-    }
-    let out = corroborate::no_window(&mut Command::new("yt-dlp"))
-        .args(["--no-warnings", "-g", "-f", "ba/b", url])
-        .output()
-        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    match text.lines().next() {
-        Some(u) if out.status.success() && u.contains("://") => Ok(u.trim().to_string()),
-        _ => Err(format!("yt-dlp: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no URL returned"))),
-    }
 }
 
 fn all_states(job: &Job) -> Vec<Shared> {
@@ -224,7 +101,7 @@ fn run(job: Job) {
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
             set_status("resolving the stream URL…");
-            match resolve(u) {
+            match stream_node::resolve(u) {
                 Ok(r) => r,
                 Err(e) => return finish(&job, Err(e)),
             }
@@ -242,41 +119,11 @@ fn run(job: Job) {
     if let Some(a) = anchor.lock().unwrap().as_ref() {
         args.extend(["--utc0".to_string(), format!("{:.3}", a.utc0), "--utc-source".to_string(), a.source.clone()]);
     }
-    let mut feeds: Vec<Option<SyncSender<Vec<f32>>>> = job
-        .plugins
-        .iter()
-        .map(|p| {
-            let mut a = args.clone();
-            for (k, v) in p.manual.iter().filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty()) {
-                a.extend(["--manual".to_string(), format!("{}={}", k.trim(), v.trim())]);
-            }
-            {
-                let mut s = p.state.lock().unwrap();
-                s.plugin.state = "starting".into();
-                s.status = "running".into();
-            }
-            spawn_plugin(&p.path, p.state.clone(), &a, &job.work_dir)
-        })
-        .collect();
-
-    let mut planes: Vec<(Planes, Shared)> = job
-        .planes
-        .iter()
-        .map(|s| {
-            let p = Planes::new(Config::default());
-            s.lock().unwrap().freqs = p.detector().bin_freqs();
-            (p, s.clone())
-        })
-        .collect();
-    let mut enfs: Vec<(Enf, &EnfJob, Option<f64>)> = job.enfs.iter().map(|j| (Enf::new(), j, None)).collect();
-
-    // The Planes module's own viewer, a separate window on the same source.
+    let mut feeds: Vec<_> = job.plugins.iter().map(|p| plugin_node::start(p, &args, &job.work_dir)).collect();
+    let mut planes: Vec<_> = job.planes.iter().map(|s| (planes_node::start(s), s.clone())).collect();
+    let mut enfs: Vec<_> = job.enfs.iter().map(enf_node::start).collect();
     if !planes.is_empty() {
-        let _ = Command::new(std::env::current_exe().unwrap_or_default().with_file_name(format!("planes-view{}", std::env::consts::EXE_SUFFIX)))
-            .arg(&ff_input)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        planes_node::open_viewer(&ff_input);
     }
 
     set_status(if live { "connecting…" } else { "decoding…" });
@@ -302,88 +149,35 @@ fn run(job: Job) {
         }
         n += x.len() as u64;
         let an = anchor.lock().unwrap().clone();
+        let audio_s = n as f64 / INPUT_SR;
 
-        // Plugins: a file waits for them; live audio never does, and what a plugin misses is counted.
         for (i, feed) in feeds.iter_mut().enumerate() {
-            if let Some(tx) = feed {
-                let gone = if live {
-                    match tx.try_send(x.clone()) {
-                        Ok(()) => false,
-                        Err(TrySendError::Full(_)) => {
-                            job.plugins[i].state.lock().unwrap().plugin.dropped_s += x.len() as f64 / INPUT_SR;
-                            false
-                        }
-                        Err(TrySendError::Disconnected(_)) => true,
-                    }
-                } else {
-                    tx.send(x.clone()).is_err()
-                };
-                if gone {
-                    *feed = None;
-                }
+            if feed.as_ref().is_some_and(|tx| !plugin_node::feed(tx, &x, live, &job.plugins[i].state)) {
+                *feed = None;
             }
         }
-
         for (p, s) in planes.iter_mut() {
-            let mut frames: Vec<(f64, Vec<u8>)> = Vec::new();
-            let evs = p.push_with(&x, |t, z| frames.push((t, z.iter().map(|&v| quantise(v)).collect())));
-            let mut s = s.lock().unwrap();
-            for (t, q) in frames {
-                s.hist.extend_from_slice(&q);
-                s.hist_t.push(t);
-                s.frames += 1;
-            }
-            s.ridges = p.detector().ridges().to_vec();
-            s.pending = p.detector().pending().cloned().collect();
-            s.passes.extend(evs);
-            s.anchor = an.clone();
-            s.audio_s = n as f64 / INPUT_SR;
-            s.status = format!("{} passes", s.passes.len());
+            planes_node::push(p, s, &x, &an, audio_s);
         }
-        for (e, j, last) in enfs.iter_mut() {
-            let found = e.push(&x);
-            let pts = e.take_points();
-            let mut s = j.state.lock().unwrap();
-            s.enf_points.extend(pts);
-            s.enf_segments.extend(found.into_iter().filter_map(|f| if let Finding::Enf(g) = f { Some(g) } else { None }));
-            s.enf_nominal = e.nominal();
-            s.anchor = an.clone();
-            s.audio_s = n as f64 / INPUT_SR;
-            if s.enf_nominal != *last {
-                *last = s.enf_nominal;
-                if let Some(f) = s.enf_nominal {
-                    let (area, note) = enf_area(f, j);
-                    s.enf_area = area.map(Arc::new);
-                    s.enf_area_note = note;
-                }
-            }
-            s.status = match s.enf_nominal {
-                Some(f) => format!("{f:.0} Hz grid, {} runs", s.enf_segments.len()),
-                None => "listening for hum".into(),
-            };
+        for r in enfs.iter_mut() {
+            enf_node::push(r, &x, &an, audio_s);
         }
         for p in &job.plugins {
             p.state.lock().unwrap().anchor = an.clone();
         }
         let mut s = job.source.lock().unwrap();
         s.anchor = an;
-        s.audio_s = n as f64 / INPUT_SR;
+        s.audio_s = audio_s;
         s.status = if live { "live".into() } else { "decoding…".into() };
     }
     let _ = child.wait();
     // End of input: plugins report what they hold and exit.
     drop(feeds);
     for (p, s) in planes.iter_mut() {
-        let evs = p.flush_events();
-        let mut s = s.lock().unwrap();
-        s.passes.extend(evs);
-        s.pending.clear();
-        s.status = format!("{} passes", s.passes.len());
+        planes_node::flush(p, s);
     }
-    for (e, j, _) in enfs.iter_mut() {
-        let found = e.flush();
-        let mut s = j.state.lock().unwrap();
-        s.enf_segments.extend(found.into_iter().filter_map(|f| if let Finding::Enf(g) = f { Some(g) } else { None }));
+    for r in enfs.iter_mut() {
+        enf_node::flush(r);
     }
     finish(&job, Ok(n as f64 / INPUT_SR));
 }
@@ -411,64 +205,4 @@ fn finish(job: &Job, r: Result<f64, String>) {
             st.status = text.clone();
         }
     }
-}
-
-/// Start a plugin program on this source. Returns the channel feeding its stdin; threads
-/// read its messages (stdout) and its last log line (stderr) into the node's state.
-fn spawn_plugin(path: &str, st: Shared, args: &[String], dir: &std::path::Path) -> Option<SyncSender<Vec<f32>>> {
-    let started = corroborate::no_window(&mut Command::new(path))
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match started {
-        Ok(c) => c,
-        Err(e) => {
-            st.lock().unwrap().plugin.state = format!("could not start: {e}");
-            return None;
-        }
-    };
-    let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill();
-        return None;
-    };
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(64);
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        for x in rx {
-            bytes.clear();
-            for v in x {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-            if stdin.write_all(&bytes).is_err() {
-                break;
-            }
-        }
-    });
-    {
-        let st = st.clone();
-        thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(m) = plugin::parse_line(&line) {
-                    st.lock().unwrap().plugin.apply(m);
-                }
-            }
-            let state = match child.wait() {
-                Ok(s) if s.success() => "finished".to_string(),
-                Ok(s) => format!("stopped ({s})"),
-                Err(e) => format!("stopped ({e})"),
-            };
-            st.lock().unwrap().plugin.state = state;
-        });
-    }
-    thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
-            if !line.trim().is_empty() {
-                st.lock().unwrap().plugin.log = line;
-            }
-        }
-    });
-    Some(tx)
 }

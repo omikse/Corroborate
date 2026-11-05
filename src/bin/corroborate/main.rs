@@ -6,10 +6,39 @@
 //! Graph: scroll to zoom, drag a node by its header, drag empty space to pan, drag from an output port to an
 //! input port to wire them (types must match), right-click an input to unwire it, right-click
 //! a node or empty space for more. Double-click a node to open its window.
+//!
+//! This file draws the graph, the timeline and the windows' frames. What each node shows and does
+//! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
 mod demo;
 mod nodes;
 mod runtime;
+
+// Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
+#[path = "../../modules/combine/node.rs"]
+mod combine_node;
+#[path = "../../modules/enf/node.rs"]
+mod enf_node;
+#[path = "../../modules/file/node.rs"]
+mod file_node;
+#[path = "../../modules/grid_frequencies/node.rs"]
+mod grid_node;
+#[path = "../../modules/invert/node.rs"]
+mod invert_node;
+#[path = "../../modules/manual/node.rs"]
+mod manual_node;
+#[path = "../../modules/map/node.rs"]
+mod map_node;
+#[path = "../../modules/mic/node.rs"]
+mod mic_node;
+#[path = "../../modules/planes/node.rs"]
+mod planes_node;
+#[path = "../../modules/plugin/node.rs"]
+mod plugin_node;
+#[path = "../../modules/record/node.rs"]
+mod record_node;
+#[path = "../../modules/stream/node.rs"]
+mod stream_node;
 
 use corroborate::core::{PortKind, Role, SourceKind};
 use corroborate::graph::{Graph, GraphError, NodeId};
@@ -20,7 +49,7 @@ use eframe::egui::{
 };
 use nodes::Kind;
 use corroborate::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
-use runtime::{EnfJob, Input, Job, PluginJob, Shared};
+use runtime::{Input, Job, NodeState, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,6 +152,22 @@ fn fmt_clock(utc: f64) -> String {
     timebase::fmt_utc_clock(utc)
 }
 
+/// A finding on the timeline: its span on the shared clock, the clock's error, and how it looks.
+struct Mark {
+    t0: f64,
+    t1: f64,
+    err: f64,
+    label: String,
+    detail: String,
+    col: Color32,
+}
+
+/// A node's clock: source seconds to UTC (when anchored), and that clock's error in seconds.
+fn clock(a: &Option<Anchor>) -> (impl Fn(f64) -> f64 + '_, f64) {
+    let err = a.as_ref().map_or(0.0, anchor_error_s);
+    (move |t: f64| a.as_ref().map_or(t, |a| a.utc(t)), err)
+}
+
 // ---------------------------------------------------------------- project
 
 struct NodeData {
@@ -185,7 +230,6 @@ struct App {
 }
 
 const NODE_W: f32 = 210.0;
-const MAP_NODE_W: f32 = 320.0;
 const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
@@ -317,7 +361,7 @@ impl App {
         self.wire(man, "facts", rec, nodes::RECORD_FACTS[0]);
 
         // ADS-B check if available
-        let bundled = nodes::bundled_plugins();
+        let bundled = plugin_node::bundled();
         if let Some(adsb) = bundled.iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) {
             let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(330.0, 260.0));
             self.wire(src, "audio", a, "audio");
@@ -403,108 +447,17 @@ impl App {
         self.nodes.iter().any(|n| n.state.lock().unwrap().running)
     }
 
-    fn manual_rows_into(&self, id: NodeId) -> Vec<(String, String)> {
-        let mut rows = Vec::new();
-        for inp in ["place", "time"] {
-            if let Some((from, _)) = self.graph.feeder(id, inp) {
-                if let Kind::Manual { rows: r } = &self.nodes[from].kind {
-                    for (k, v) in r {
-                        if !rows.iter().any(|(q, _): &(String, String)| q == k) {
-                            rows.push((k.clone(), v.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        rows
-    }
-
-    /// The grid map from the Grid frequencies node wired into `id`'s "grid" input.
-    fn grid_into(&self, id: NodeId) -> Result<Arc<GridMap>, String> {
-        let Some((from, _)) = self.graph.feeder(id, "grid") else { return Err("no grid data wired".into()) };
-        match &self.nodes[from].kind {
-            Kind::GridFrequencies { path } => load_grid(path).map(Arc::new),
-            _ => Err("grid input is not a Grid frequencies node".into()),
-        }
-    }
-
-    /// A Manual node's coordinates wired into `id`'s input, as an area: within `radius_km` of
-    /// the point (a row in the Manual node), or the 1° cell holding it when no radius is given.
-    fn manual_area_into(&self, id: NodeId, inp: &str) -> Option<(WorldMask, String)> {
-        let (from, _) = self.graph.feeder(id, inp)?;
-        let Kind::Manual { rows } = &self.nodes[from].kind else { return None };
-        manual_area(rows)
-    }
-
     /// The area a node gives on its location output, and how it was reached.
     fn area_from(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
         let n = &self.nodes[from];
         match &n.kind {
-            Kind::Enf => {
-                let s = n.state.lock().unwrap();
-                match &s.enf_area {
-                    Some(a) => Ok((Arc::new(Area::add((**a).clone())), s.enf_area_note.clone())),
-                    None if !s.enf_area_note.is_empty() => Err(s.enf_area_note.clone()),
-                    None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
-                }
-            }
-            Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(Area::add(a)), l)).ok_or("no coordinates typed in".to_string()),
-            Kind::Record => {
-                let (m, steps) = self.record_area(from);
-                let k = steps.iter().filter(|s| s.2.is_some()).count();
-                Ok((Arc::new(Area::add(m)), format!("the whole world cut by {k} area(s)")))
-            }
-            Kind::Combine { any } => {
-                let mut acc: Option<WorldMask> = None;
-                let mut used = Vec::new();
-                for inp in nodes::COMBINE_INPUTS {
-                    let Some((f, _)) = self.graph.feeder(from, inp) else { continue };
-                    if let Ok((a, _)) = self.area_from(f) {
-                        let al = a.allowed();
-                        acc = Some(match acc {
-                            None => al,
-                            Some(m) if *any => m.or(&al),
-                            Some(m) => m.and(&al),
-                        });
-                        used.push(self.nodes[f].label.clone());
-                    }
-                }
-                let m = acc.ok_or("no location with an area wired in yet")?;
-                let how = if *any { "any of" } else { "all of" };
-                let note = if m.is_empty() {
-                    format!("CONTRADICTION: nothing is possible under {how} {}", used.join(", "))
-                } else {
-                    format!("possible under {how} {}", used.join(", "))
-                };
-                Ok((Arc::new(Area::add(m)), note))
-            }
-            Kind::Invert => {
-                let (f, _) = self.graph.feeder(from, "location").ok_or("no location wired in")?;
-                let (a, note) = self.area_from(f)?;
-                Ok((Arc::new(a.inverted()), format!("inverted ({}): {note}", if a.add { "adds → subtracts" } else { "subtracts → adds" })))
-            }
+            Kind::Enf => enf_node::area_out(&n.state),
+            Kind::Manual { rows } => manual_node::area_out(rows),
+            Kind::Record => self.record_area_out(from),
+            Kind::Combine { any } => self.combine_area_out(from, *any),
+            Kind::Invert => self.invert_area_out(from),
             _ => Err("this node gives no area".into()),
         }
-    }
-
-    /// The Record node's location: the whole world, AND each area wired into its location inputs.
-    /// Steps: (node, how its area was reached, the fraction of Earth it allows or None while it has none).
-    fn record_area(&self, rec: NodeId) -> (WorldMask, Vec<(String, String, Option<f64>)>) {
-        let mut m = WorldMask::world();
-        let mut steps = Vec::new();
-        for inp in nodes::RECORD_LOCATIONS {
-            let Some((from, _)) = self.graph.feeder(rec, inp) else { continue };
-            let label = self.nodes[from].label.clone();
-            match self.area_from(from) {
-                Ok((a, note)) => {
-                    let al = a.allowed();
-                    m = m.and(&al);
-                    steps.push((label, note, Some(al.fraction())));
-                }
-                Err(e) => steps.push((label, e, None)),
-            }
-        }
-        (m, steps)
     }
 
     fn run(&mut self) {
@@ -523,13 +476,14 @@ impl App {
                 continue;
             }
             let input = match &n.kind {
-                Kind::File { path } if !path.trim().is_empty() => Input::File(path.trim().to_string()),
-                Kind::Stream { url } if !url.trim().is_empty() => Input::Url(url.trim().to_string()),
-                Kind::Mic { device } if !device.trim().is_empty() => Input::Mic(device.trim().to_string()),
-                _ => {
-                    n.state.lock().unwrap().status = "nothing to open: set it in the node's window".into();
-                    continue;
-                }
+                Kind::File { path } => file_node::input(path),
+                Kind::Stream { url } => stream_node::input(url),
+                Kind::Mic { device } => mic_node::input(device),
+                _ => None,
+            };
+            let Some(input) = input else {
+                n.state.lock().unwrap().status = "nothing to open: set it in the node's window".into();
+                continue;
             };
             let mut job = Job {
                 label: n.label.clone(),
@@ -548,10 +502,8 @@ impl App {
                 }
                 match &tn.kind {
                     Kind::Planes => job.planes.push(tn.state.clone()),
-                    Kind::Enf => job.enfs.push(EnfJob { state: tn.state.clone(), grid: self.grid_into(t), prior: self.manual_area_into(t, "location") }),
-                    Kind::Plugin { path } => {
-                        job.plugins.push(PluginJob { path: path.clone(), state: tn.state.clone(), manual: self.manual_rows_into(t) })
-                    }
+                    Kind::Enf => job.enfs.push(self.enf_job(t)),
+                    Kind::Plugin { path } => job.plugins.push(self.plugin_job(t, path)),
                     _ => {}
                 }
             }
@@ -601,91 +553,20 @@ impl App {
                 json_escape(&s.source_key),
                 json_escape(&s.status)
             );
-            match &n.kind {
-                Kind::Planes => {
-                    let p: Vec<String> = s.passes.iter().map(|e| e.to_json(anchor.as_ref())).collect();
-                    body.push_str(&format!(",\"passes\":[{}]", p.join(",")));
-                }
-                Kind::Enf => {
-                    let p: Vec<String> = s.enf_segments.iter().map(|e| e.to_json(anchor.as_ref())).collect();
-                    let frac = s.enf_area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));
-                    body.push_str(&format!(
-                        ",\"hum_runs\":[{}],\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
-                        p.join(","),
-                        json_escape(&s.enf_area_note)
-                    ));
-                }
-                Kind::GridFrequencies { path } => {
-                    let r = match load_grid(path) {
-                        Ok(g) => format!("\"regions\":{},\"data_source\":\"{}\"", g.regions.len(), json_escape(&g.source)),
-                        Err(e) => format!("\"error\":\"{}\"", json_escape(&e)),
-                    };
-                    body.push_str(&format!(",\"file\":\"{}\",{r}", json_escape(path)));
-                }
-                Kind::Plugin { path } => {
-                    let f: Vec<String> = s
-                        .plugin
-                        .findings
-                        .iter()
-                        .map(|f| {
-                            let utc = anchor.as_ref().map_or("null".to_string(), |a| format!("\"{}\"", timebase::fmt_utc(a.utc(f.t_start))));
-                            format!(
-                                "{{\"t_start\":{:.2},\"t_end\":{:.2},\"utc_start\":{utc},\"label\":\"{}\",\"detail\":\"{}\"}}",
-                                f.t_start,
-                                f.t_end,
-                                json_escape(&f.label),
-                                json_escape(&f.detail)
-                            )
-                        })
-                        .collect();
-                    let m: Vec<String> =
-                        s.plugin.meta.iter().map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v))).collect();
-                    body.push_str(&format!(
-                        ",\"program\":\"{}\",\"state\":\"{}\",\"plugin_status\":\"{}\",\"dropped_s\":{:.1},\"findings\":[{}],\"facts\":{{{}}}",
-                        json_escape(path),
-                        json_escape(&s.plugin.state),
-                        json_escape(&s.plugin.status),
-                        s.plugin.dropped_s,
-                        f.join(","),
-                        m.join(",")
-                    ));
-                }
-                Kind::Manual { rows } => {
-                    let m: Vec<String> = rows
-                        .iter()
-                        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
-                        .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k.trim()), json_escape(v.trim())))
-                        .collect();
-                    body.push_str(&format!(",\"facts\":{{{}}}", m.join(",")));
-                }
-                Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => {
-                    body.push_str(&format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live));
-                }
-                Kind::Map | Kind::Invert | Kind::Combine { .. } => {}
+            let own = match &n.kind {
+                Kind::Planes => planes_node::json(&s),
+                Kind::Enf => enf_node::json(&s),
+                Kind::GridFrequencies { path } => grid_node::json(path),
+                Kind::Plugin { path } => plugin_node::json(path, &s),
+                Kind::Manual { rows } => manual_node::json(rows),
+                Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
+                Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
                 Kind::Record => {
                     drop(s);
-                    let (m, steps) = self.record_area(i);
-                    let st: Vec<String> = steps
-                        .iter()
-                        .map(|(n, note, f)| {
-                            format!(
-                                "{{\"node\":\"{}\",\"note\":\"{}\",\"fraction_of_earth\":{}}}",
-                                json_escape(n),
-                                json_escape(note),
-                                f.map_or("null".to_string(), |f| format!("{f:.5}"))
-                            )
-                        })
-                        .collect();
-                    body.push_str(&format!(
-                        ",\"location\":{{\"start\":\"whole world\",\"cell_deg\":1,\"remaining_fraction_of_earth\":{:.5},\"remaining_km2\":{:.0},\"contradiction\":{},\"steps\":[{}],\"cells_row_first_last\":{}}}",
-                        m.fraction(),
-                        m.area_km2(),
-                        m.is_empty(),
-                        st.join(","),
-                        m.runs_json()
-                    ));
+                    self.record_json(i)
                 }
-            }
+            };
+            body.push_str(&own);
             nodes_j.push(format!("{{{body}}}"));
         }
         let wires: Vec<String> = self
@@ -731,7 +612,7 @@ impl App {
         let spec = &self.graph.nodes()[i].spec;
         let rows = spec.inputs.len().max(spec.outputs.len()).max(1) as f32;
         // The Map node shows its map on the canvas, below its port.
-        let (w, extra) = if matches!(self.nodes[i].kind, Kind::Map) { (MAP_NODE_W, MAP_NODE_W / ROBINSON_ASPECT as f32 + 8.0) } else { (NODE_W, 0.0) };
+        let (w, extra) = if matches!(self.nodes[i].kind, Kind::Map) { (map_node::NODE_W, map_node::canvas_extra()) } else { (NODE_W, 0.0) };
         Rect::from_min_size(
             origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom,
             Vec2::new(w, HEAD + rows * ROW + 26.0 + extra) * self.zoom,
@@ -866,34 +747,20 @@ impl App {
             painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
             if matches!(self.nodes[i].kind, Kind::Map) {
-                let top = rect.top() + (HEAD + ROW + 8.0) * self.zoom;
-                let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0 * self.zoom, top), Vec2::new(rect.width() - 12.0 * self.zoom, (rect.width() - 12.0 * self.zoom) / ROBINSON_ASPECT as f32));
-                let area = self.graph.feeder(i, "location").and_then(|(f, _)| self.area_from(f).ok()).map(|(a, _)| a);
-                paint_area_map(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref());
+                self.map_on_canvas(&painter, rect, i);
             }
             // Status line at the bottom of the node.
             let (status, running) = {
                 let s = self.nodes[i].state.lock().unwrap();
                 let st = match &self.nodes[i].kind {
-                    Kind::Plugin { .. } if !s.plugin.state.is_empty() => {
-                        let first = s.plugin.status.lines().next().unwrap_or("");
-                        if first.is_empty() { s.plugin.state.clone() } else { first.to_string() }
-                    }
-                    Kind::Manual { rows } => format!("{} facts", rows.iter().filter(|(_, v)| !v.trim().is_empty()).count()),
-                    Kind::Map => match self.graph.feeder(i, "location").map(|(f, _)| self.area_from(f)) {
-                        Some(Ok((a, _))) => area_status(&a),
-                        Some(Err(e)) => e,
-                        None => "no location wired".into(),
-                    },
+                    Kind::Plugin { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
+                    Kind::Manual { rows } => manual_node::status(rows),
+                    Kind::Map => self.map_status(i),
                     Kind::Combine { .. } | Kind::Invert => match self.area_from(i) {
-                        Ok((a, _)) => area_status(&a),
+                        Ok((a, _)) => map_node::area_status(&a),
                         Err(e) => e,
                     },
-                    Kind::Record => {
-                        let (m, _) = self.record_area(i);
-                        let left = if m.is_empty() { "nothing left: contradiction".to_string() } else { format!("{:.1} % of Earth left", m.fraction() * 100.0) };
-                        format!("{left} · {}", self.saved_note)
-                    }
+                    Kind::Record => self.record_status(i),
                     _ => s.status.clone(),
                 };
                 (st, s.running)
@@ -997,14 +864,6 @@ impl App {
     // ---------------- timeline
 
     fn timeline_view(&mut self, ui: &mut egui::Ui) {
-        struct Mark {
-            t0: f64,
-            t1: f64,
-            err: f64,
-            label: String,
-            detail: String,
-            col: Color32,
-        }
         struct Lane {
             name: String,
             utc: bool,
@@ -1017,50 +876,13 @@ impl App {
         for n in self.nodes.iter().filter(|n| !n.hidden) {
             let s = n.state.lock().unwrap();
             let a = s.anchor.clone();
-            let err = a.as_ref().map_or(0.0, anchor_error_s);
-            let to = |t: f64| a.as_ref().map_or(t, |a| a.utc(t));
-            let mut marks = Vec::new();
-            match &n.kind {
-                Kind::Planes => {
-                    for e in &s.passes {
-                        marks.push(Mark {
-                            t0: to(e.t_start),
-                            t1: to(e.t_end),
-                            err,
-                            label: format!("{:.0} m/s", e.speed),
-                            detail: format!(
-                                "pass {}: closest approach {}, {:.0} m/s, {:.0} m, f0 {:.1} Hz, grade {}",
-                                e.id,
-                                a.as_ref().map_or(format!("{:.1} s", e.t_cpa), |a| format!("{} UTC", fmt_clock(a.utc(e.t_cpa)))),
-                                e.speed,
-                                e.dist,
-                                e.f0,
-                                e.grade()
-                            ),
-                            col: grade_color(e.grade()),
-                        });
-                    }
-                }
-                Kind::Enf => {
-                    for g in &s.enf_segments {
-                        marks.push(Mark {
-                            t0: to(g.t_start),
-                            t1: to(g.t_end),
-                            err,
-                            label: format!("{:.3} Hz", g.mean_hz),
-                            detail: format!("hum {:.3} Hz ({:.3}–{:.3}), harmonic {}", g.mean_hz, g.min_hz, g.max_hz, g.harmonic),
-                            col: Color32::from_rgb(110, 170, 255),
-                        });
-                    }
-                }
-                Kind::Plugin { .. } => {
-                    let col = s.plugin.color.map_or(Color32::from_rgb(200, 200, 200), |[r, g, b]| Color32::from_rgb(r, g, b));
-                    for f in &s.plugin.findings {
-                        marks.push(Mark { t0: to(f.t_start), t1: to(f.t_end), err, label: f.label.clone(), detail: f.detail.clone(), col });
-                    }
-                }
+            let (to, err) = clock(&a);
+            let marks = match &n.kind {
+                Kind::Planes => planes_node::marks(&s),
+                Kind::Enf => enf_node::marks(&s),
+                Kind::Plugin { .. } => plugin_node::marks(&s),
                 _ => continue,
-            }
+            };
             if s.audio_s > 0.0 {
                 end = end.max(to(s.audio_s));
             }
@@ -1188,309 +1010,22 @@ impl App {
         ui.separator();
         let state = self.nodes[i].state.clone();
         match &mut self.nodes[i].kind {
-            Kind::File { path } => {
-                ui.horizontal(|ui| {
-                    ui.label("File");
-                    ui.add(egui::TextEdit::singleline(path).desired_width(300.0));
-                    if ui.button("Browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            *path = p.to_string_lossy().into_owned();
-                        }
-                    }
-                });
-                source_info(ui, &state);
-            }
-            Kind::Stream { url } => {
-                ui.horizontal(|ui| {
-                    ui.label("URL");
-                    ui.add(egui::TextEdit::singleline(url).desired_width(340.0).hint_text("https://… (YouTube links are resolved with yt-dlp)"));
-                });
-                source_info(ui, &state);
-            }
-            Kind::Mic { device } => {
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt(("mic", i)).selected_text(if device.is_empty() { "choose a microphone" } else { device.as_str() }).show_ui(ui, |ui| {
-                        for m in &self.mics {
-                            ui.selectable_value(device, m.clone(), m);
-                        }
-                    });
-                    if ui.button("Refresh").clicked() {
-                        match corroborate::ingest::list_microphones() {
-                            Ok(m) => self.mics = m,
-                            Err(e) => self.msg = e,
-                        }
-                    }
-                });
-                source_info(ui, &state);
-            }
-            Kind::Manual { rows } => {
-                ui.colored_label(DIM, "Facts you know. Wired into a plugin, they are passed to it at Run (coordinates as lat, lon; elevation in m).");
-                let mut remove = None;
-                egui::Grid::new(("manual", i)).num_columns(3).show(ui, |ui| {
-                    for (r, (k, v)) in rows.iter_mut().enumerate() {
-                        ui.add(egui::TextEdit::singleline(k).desired_width(110.0));
-                        ui.add(egui::TextEdit::singleline(v).desired_width(240.0));
-                        if ui.small_button("✕").clicked() {
-                            remove = Some(r);
-                        }
-                        ui.end_row();
-                    }
-                });
-                if let Some(r) = remove {
-                    rows.remove(r);
-                }
-                if ui.button("+ field").clicked() {
-                    rows.push((String::new(), String::new()));
-                }
-            }
+            Kind::File { path } => file_node::window(ui, path, &state),
+            Kind::Stream { url } => stream_node::window(ui, url, &state),
+            Kind::Mic { .. } => self.mic_window(ui, i),
+            Kind::Manual { rows } => manual_node::window(ui, i, rows),
             Kind::Planes => self.planes_window(ui, i),
-            Kind::Enf => {
-                enf_window(ui, &state);
-                let note = state.lock().unwrap().enf_area_note.clone();
-                if !note.is_empty() {
-                    ui.separator();
-                    ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { TEXT }, format!("area: {note}"));
-                }
-            }
-            Kind::GridFrequencies { path } => {
-                ui.horizontal(|ui| {
-                    ui.label("File");
-                    ui.add(egui::TextEdit::singleline(path).hint_text("empty: the bundled file").desired_width(300.0));
-                    if ui.button("Browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                            *path = p.to_string_lossy().into_owned();
-                        }
-                    }
-                });
-                match load_grid(path) {
-                    Ok(g) => {
-                        ui.colored_label(DIM, format!("data: {}", g.source));
-                        for r in &g.regions {
-                            ui.label(format!("{:.0} Hz · {}", r.hz, r.id));
-                        }
-                    }
-                    Err(e) => {
-                        ui.colored_label(WARN, e);
-                    }
-                }
-                if path.trim().is_empty() {
-                    ui.colored_label(DIM, format!("bundled file: {}", nodes::bundled_grid_file()));
-                }
-                ui.colored_label(DIM, "Swap the file to use other grid data. Read at each Run.");
-            }
-            Kind::Plugin { path } => {
-                ui.colored_label(DIM, format!("program: {path}"));
-                plugin_window(ui, &state);
-            }
-            Kind::Combine { any } => {
-                ui.horizontal(|ui| {
-                    ui.radio_value(any, false, "all must hold (AND)");
-                    ui.radio_value(any, true, "any may hold (OR)");
-                });
-                ui.colored_label(DIM, "Takes what each wired location still allows and combines it. The result adds (green).");
-                match self.area_from(i) {
-                    Ok((_, note)) => {
-                        ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { TEXT }, note);
-                    }
-                    Err(e) => {
-                        ui.colored_label(DIM, e);
-                    }
-                }
-            }
-            Kind::Invert => {
-                ui.colored_label(DIM, "Flips a location: a green (adds) area becomes red (subtracts) on the same cells, and the other way round.");
-                match self.area_from(i) {
-                    Ok((_, note)) => {
-                        ui.label(note);
-                    }
-                    Err(e) => {
-                        ui.colored_label(DIM, e);
-                    }
-                }
-            }
-            Kind::Map => {
-                let earth = self.earth.as_ref().map(|t| t.id());
-                match self.graph.feeder(i, "location") {
-                    None => {
-                        ui.colored_label(DIM, "wire a location into this node: ENF, Manual data, Combine, Invert or the Result record");
-                        draw_area_map(ui, earth, None);
-                    }
-                    Some((from, _)) => match self.area_from(from) {
-                        Ok((a, note)) => {
-                            let lab = &self.nodes[from].label;
-                            let al = a.allowed();
-                            ui.label(format!(
-                                "{lab}: {} · {:.2} % of Earth still possible ({:.1} million km²)",
-                                if a.add { "adds (green: here)" } else { "subtracts (red: not here)" },
-                                al.fraction() * 100.0,
-                                al.area_km2() / 1e6
-                            ));
-                            ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { DIM }, note);
-                            draw_area_map(ui, earth, Some(&a));
-                        }
-                        Err(e) => {
-                            ui.colored_label(DIM, format!("{}: {e}", self.nodes[from].label));
-                            draw_area_map(ui, earth, None);
-                        }
-                    },
-                }
-            }
-            Kind::Record => {
-                self.record_map(ui, i);
-                ui.separator();
-                ui.label("Keeps one result JSON for the current run: every node's findings and facts, and the wires (the evidence trail). Saved every 30 s while running and when the run ends.");
-                match &self.result_file {
-                    Some(p) => {
-                        ui.colored_label(TEXT, p.display().to_string());
-                        ui.colored_label(DIM, &self.saved_note);
-                    }
-                    None => {
-                        ui.colored_label(DIM, "not running yet");
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(self.result_file.is_some(), egui::Button::new("Save now")).clicked() {
-                        self.save_result();
-                    }
-                    if ui.button("Open folder").clicked() {
-                        let d = results_dir();
-                        let _ = std::fs::create_dir_all(&d);
-                        let _ = std::process::Command::new("explorer").arg(d).spawn();
-                    }
-                });
-            }
+            Kind::Enf => enf_node::window(ui, &state),
+            Kind::GridFrequencies { path } => grid_node::window(ui, path),
+            Kind::Plugin { path } => plugin_node::window(ui, path, &state),
+            Kind::Combine { .. } => self.combine_window(ui, i),
+            Kind::Invert => self.invert_window(ui, i),
+            Kind::Map => self.map_window(ui, i),
+            Kind::Record => self.record_window(ui, i),
         }
         if running && self.nodes[i].kind.is_source() {
             ui.colored_label(DIM, "Changes to sources take effect at the next Run.");
         }
-    }
-
-    fn planes_window(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        let st = self.nodes[i].state.clone();
-        // Plugin tracks on the same source, drawn over the spectrogram (adsb-check's predicted curves).
-        let key = st.lock().unwrap().source_key.clone();
-        let overlays: Vec<(Color32, Vec<(String, Vec<(f64, f64, bool)>)>)> = self
-            .nodes
-            .iter()
-            .filter(|n| !n.hidden && matches!(n.kind, Kind::Plugin { .. }))
-            .filter_map(|n| {
-                let s = n.state.lock().unwrap();
-                (s.source_key == key && !key.is_empty() && !s.plugin.tracks.is_empty()).then(|| {
-                    let c = s.plugin.color.map_or(Color32::WHITE, |[r, g, b]| Color32::from_rgb(r, g, b));
-                    (c, s.plugin.tracks.clone())
-                })
-            })
-            .collect();
-        let s = st.lock().unwrap();
-        ui.horizontal(|ui| {
-            ui.label(format!("{} passes · {} candidates · {:.0} s analysed", s.passes.len(), s.pending.len(), s.audio_s));
-            ui.separator();
-            ui.label("show");
-            ui.add(egui::DragValue::new(&mut self.spec_minutes).range(0.0..=600.0).suffix(" min").speed(0.5));
-            ui.colored_label(DIM, "(0 = all)");
-        });
-        let nb = s.freqs.len();
-        let nf = s.hist_t.len();
-        if nb == 0 || nf == 0 {
-            ui.colored_label(DIM, "no audio yet: press Run");
-            return;
-        }
-        let t_end = *s.hist_t.last().unwrap();
-        let t_start = if self.spec_minutes > 0.0 { (t_end - self.spec_minutes * 60.0).max(s.hist_t[0]) } else { s.hist_t[0] };
-        let f_first = s.hist_t.partition_point(|&t| t < t_start);
-        let cols_n = nf - f_first;
-        let w = cols_n.clamp(1, 2048);
-        // Rebuild the texture when new frames arrived or the span changed.
-        let stamp = (s.frames, t_start);
-        let fresh = self.textures.get(&i).is_none_or(|(f, ts, _)| (*f, *ts) != stamp);
-        if fresh {
-            let mut px = vec![0u8; w * nb * 4];
-            for c in 0..w {
-                let a = f_first + c * cols_n / w;
-                let b = (f_first + (c + 1) * cols_n / w).max(a + 1).min(nf);
-                for bin in 0..nb {
-                    let mut m = 0u8;
-                    for f in a..b {
-                        m = m.max(s.hist[f * nb + bin]);
-                    }
-                    let row = nb - 1 - bin;
-                    px[(row * w + c) * 4..(row * w + c) * 4 + 4].copy_from_slice(&self.lut[m as usize]);
-                }
-            }
-            let img = ColorImage::from_rgba_unmultiplied([w, nb], &px);
-            match self.textures.get_mut(&i) {
-                Some((f, ts, tex)) => {
-                    tex.set(img, TextureOptions::LINEAR);
-                    *f = stamp.0;
-                    *ts = stamp.1;
-                }
-                None => {
-                    let tex = ui.ctx().load_texture(format!("spec{i}"), img, TextureOptions::LINEAR);
-                    self.textures.insert(i, (stamp.0, stamp.1, tex));
-                }
-            }
-        }
-        let tex = self.textures[&i].2.id();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 360.0), Sense::hover());
-        let plot = Rect::from_min_max(rect.min + Vec2::new(44.0, 0.0), rect.max - Vec2::new(0.0, 18.0));
-        let p = ui.painter_at(rect);
-        p.image(tex, plot, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        let (f_lo, f_hi) = (s.freqs[0], s.freqs[nb - 1]);
-        let x_of = |t: f64| plot.left() + ((t - t_start) / (t_end - t_start).max(1e-6)) as f32 * plot.width();
-        let y_of = |f: f64| plot.bottom() - ((f - f_lo) / (f_hi - f_lo)) as f32 * plot.height();
-        for k in 0..=4 {
-            let f = f_lo + (f_hi - f_lo) * k as f64 / 4.0;
-            p.text(Pos2::new(plot.left() - 4.0, y_of(f)), Align2::RIGHT_CENTER, format!("{f:.0}"), FontId::proportional(10.0), DIM);
-        }
-        p.text(Pos2::new(rect.left(), plot.top()), Align2::LEFT_TOP, "Hz", FontId::proportional(10.0), DIM);
-        let a = s.anchor.clone();
-        let tlabel = |t: f64| a.as_ref().map_or(format!("{t:.0} s"), |a| format!("{} UTC", fmt_clock(a.utc(t))));
-        p.text(Pos2::new(plot.left(), rect.bottom()), Align2::LEFT_BOTTOM, tlabel(t_start), FontId::proportional(10.0), DIM);
-        p.text(Pos2::new(plot.right(), rect.bottom()), Align2::RIGHT_BOTTOM, tlabel(t_end), FontId::proportional(10.0), DIM);
-        let clip = p.with_clip_rect(plot);
-        // Plugin tracks (for adsb-check: the Doppler curve the flight data predicts).
-        for (c, tracks) in &overlays {
-            for (_, pts) in tracks {
-                for &(t, hz, ok) in pts {
-                    if t >= t_start && (f_lo..=f_hi).contains(&hz) {
-                        clip.circle_filled(Pos2::new(x_of(t), y_of(hz)), 1.4, alpha(*c, if ok { 0.9 } else { 0.4 }));
-                    }
-                }
-            }
-        }
-        let mut hover = None;
-        for (e, pending) in s.passes.iter().map(|e| (e, false)).chain(s.pending.iter().map(|e| (e, true))) {
-            if e.t_end < t_start {
-                continue;
-            }
-            let col = if pending { alpha(TEXT, 0.5) } else { grade_color(e.grade()) };
-            let pts: Vec<Pos2> = e.points.iter().map(|&(t, f)| Pos2::new(x_of(t), y_of(f))).collect();
-            for w in pts.windows(2) {
-                clip.line_segment([w[0], w[1]], Stroke::new(1.6, col));
-            }
-            if let Some(first) = pts.first() {
-                clip.text(*first + Vec2::new(0.0, -6.0), Align2::LEFT_BOTTOM, format!("{:.0} m/s · {:.0} m", e.speed, e.dist), FontId::proportional(10.0), col);
-                if resp.hover_pos().is_some_and(|h| pts.iter().any(|q| q.distance(h) < 6.0)) {
-                    hover = Some(format!(
-                        "pass {}{}\nclosest approach {}\nspeed {:.0} m/s, distance {:.0} m, f0 {:.1} Hz\nSNR {:.1}, fit rms {:.2} Hz, grade {}",
-                        e.id,
-                        if pending { " (candidate)" } else { "" },
-                        tlabel(e.t_cpa),
-                        e.speed,
-                        e.dist,
-                        e.f0,
-                        e.snr,
-                        e.rms,
-                        e.grade()
-                    ));
-                }
-            }
-        }
-        drop(s);
-        if let Some(t) = hover {
-            resp.on_hover_text(t);
-        }
-        ui.colored_label(DIM, "green/orange/grey: passes by grade · white: candidates · dots: plugin tracks (adsb-check: predicted curves from flight data)");
     }
 
     // ---------------- frame
@@ -1606,69 +1141,10 @@ fn plot_series(ui: &mut egui::Ui, series: &[(Color32, Vec<(f64, f64, bool)>)], h
     p.text(Pos2::new(plot.right(), rect.bottom()), Align2::RIGHT_BOTTOM, format!("{t1:.0} s"), FontId::proportional(10.0), DIM);
 }
 
-fn enf_window(ui: &mut egui::Ui, st: &Shared) {
-    let s = st.lock().unwrap();
-    ui.label(format!("status: {}", s.status));
-    let pts: Vec<(f64, f64, bool)> = s.enf_points.iter().map(|p| (p.t, p.hz / p.harmonic as f64, p.ok)).collect();
-    drop(s);
-    ui.colored_label(DIM, "grid frequency (Hz, folded to the fundamental) over source time; faded = unclear reading");
-    plot_series(ui, &[(Color32::from_rgb(110, 170, 255), pts)], 220.0);
-    let s = st.lock().unwrap();
-    for g in s.enf_segments.iter().rev().take(20) {
-        ui.label(format!("{:.0}–{:.0} s · {:.3} Hz ({:.3}–{:.3}) · h{}", g.t_start, g.t_end, g.mean_hz, g.min_hz, g.max_hz, g.harmonic));
-    }
-}
-
-fn plugin_window(ui: &mut egui::Ui, st: &Shared) {
-    let s = st.lock().unwrap();
-    let pl = s.plugin.clone();
-    drop(s);
-    ui.label(format!("{} · {}", if pl.name.is_empty() { "plugin" } else { &pl.name }, pl.state));
-    if !pl.about.is_empty() {
-        ui.colored_label(DIM, &pl.about);
-    }
-    if pl.dropped_s > 0.0 {
-        ui.colored_label(WARN, format!("missed {:.0} s of live audio (could not keep up)", pl.dropped_s));
-    }
-    if !pl.status.is_empty() {
-        ui.separator();
-        for line in pl.status.lines() {
-            ui.label(line);
-        }
-    }
-    if !pl.log.is_empty() {
-        ui.colored_label(DIM, format!("log: {}", pl.log));
-    }
-    if !pl.tracks.is_empty() {
-        let c = pl.color.map_or(Color32::WHITE, |[r, g, b]| Color32::from_rgb(r, g, b));
-        let all: Vec<(f64, f64, bool)> = pl.tracks.iter().flat_map(|(_, v)| v.iter().copied()).collect();
-        ui.colored_label(DIM, format!("{} tracks (also drawn on the Planes spectrogram of the same source)", pl.tracks.len()));
-        plot_series(ui, &[(c, all)], 140.0);
-    }
-    if !pl.findings.is_empty() {
-        ui.separator();
-        ui.label(egui::RichText::new(format!("FINDINGS ({})", pl.findings.len())).small().color(DIM));
-        for f in pl.findings.iter().rev().take(40) {
-            ui.label(format!("{:.0}–{:.0} s · {}", f.t_start, f.t_end, f.label)).on_hover_text(&f.detail);
-        }
-    }
-    if !pl.meta.is_empty() {
-        ui.separator();
-        ui.label(egui::RichText::new("FACTS").small().color(DIM));
-        egui::Grid::new(ui.next_auto_id()).num_columns(2).striped(true).show(ui, |ui| {
-            for (k, v) in &pl.meta {
-                ui.colored_label(DIM, k);
-                ui.label(v);
-                ui.end_row();
-            }
-        });
-    }
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.earth.is_none() {
-            self.earth = Some(load_earth(ui.ctx()));
+            self.earth = Some(map_node::load_earth(ui.ctx()));
         }
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
@@ -1727,219 +1203,4 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
-}
-
-/// An empty path means the grid file that ships with the program (found relative to it).
-fn load_grid(path: &str) -> Result<GridMap, String> {
-    let bundled;
-    let path = if path.trim().is_empty() {
-        bundled = nodes::bundled_grid_file();
-        if bundled.is_empty() {
-            return Err("no grid file next to the program: choose one".into());
-        }
-        bundled.as_str()
-    } else {
-        path
-    };
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    GridMap::parse(&text).map_err(|e| format!("{path}: {e}"))
-}
-
-fn manual_area(rows: &[(String, String)]) -> Option<(WorldMask, String)> {
-    let val = |k: &str| rows.iter().find(|(q, _)| q.trim() == k).map(|(_, v)| v.trim()).filter(|v| !v.is_empty());
-    let c: Vec<f64> = val("coordinates")?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    let (lat, lon) = (*c.first()?, *c.get(1)?);
-    match val("radius_km").and_then(|r| r.parse::<f64>().ok()) {
-        Some(r) => Some((WorldMask::circle(lat, lon, r), format!("{r:.0} km around {lat:.4}, {lon:.4} (manual)"))),
-        None => Some((WorldMask::circle(lat, lon, 0.0), format!("the 1° cell holding {lat:.4}, {lon:.4} (manual, no radius_km given)"))),
-    }
-}
-
-impl App {
-    fn record_map(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        let (m, steps) = self.record_area(i);
-        if m.is_empty() {
-            ui.colored_label(WARN, "Location: nothing left. The evidence contradicts itself: check the steps below.");
-        } else {
-            ui.label(format!(
-                "Location: {:.2} % of Earth's surface left ({:.1} million km²), 1° cells",
-                m.fraction() * 100.0,
-                m.area_km2() / 1e6
-            ));
-        }
-        ui.colored_label(DIM, "start: the whole world");
-        for (n, note, f) in &steps {
-            let f = f.map_or("—".to_string(), |f| format!("{:.2} %", f * 100.0));
-            ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { TEXT }, format!("∩ {n} ({f}): {note}"));
-        }
-        if steps.is_empty() {
-            ui.colored_label(DIM, "wire areas (ENF location, Manual place) into the location inputs to subtract from the world");
-        }
-        draw_area_map(ui, self.earth.as_ref().map(|t| t.id()), Some(&Area::add(m)));
-    }
-}
-
-
-const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
-const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
-
-/// A world map in the Robinson projection. Green: cells the area keeps (where it adds
-/// possibility). Red: cells it rules out (where it subtracts). Grey: no area yet.
-fn draw_area_map(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option<&Area>) {
-    let w = ui.available_width().clamp(200.0, 1400.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w / ROBINSON_ASPECT as f32), Sense::hover());
-    let p = ui.painter_at(rect);
-    paint_area_map(&p, rect, earth, area);
-    let at = |lat: f64, lon: f64| {
-        let (x, y) = robinson(lat, lon);
-        Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
-    };
-    if let Some(h) = resp.hover_pos() {
-        // The nearest cell centre under the pointer.
-        let mut best = (f32::MAX, 0.0, 0.0);
-        for r in 0..ROWS {
-            for c in (0..COLS).step_by(2) {
-                let (lat, lon) = (89.5 - r as f64, c as f64 - 179.5);
-                let d = at(lat, lon).distance_sq(h);
-                if d < best.0 {
-                    best = (d, lat, lon);
-                }
-            }
-        }
-        let txt = format!("{:.1}°, {:.1}°", best.1, best.2);
-        p.text(rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, txt, FontId::proportional(11.0), TEXT);
-    }
-    ui.colored_label(
-        DIM,
-        "green: an area that adds (the place is here) · red: an area that subtracts (not here) · Robinson projection, 1° cells, lines every 30° · image: NASA Blue Marble (public domain) · coastlines: Natural Earth 1:110m",
-    );
-}
-
-/// Natural Earth 1:110m coastlines, built into the program: lines of (lat, lon).
-fn coastlines() -> &'static [Vec<(f64, f64)>] {
-    static C: std::sync::OnceLock<Vec<Vec<(f64, f64)>>> = std::sync::OnceLock::new();
-    C.get_or_init(|| {
-        include_str!("coastlines.txt")
-            .lines()
-            .filter(|l| !l.starts_with('#'))
-            .map(|l| {
-                l.split(' ')
-                    .filter_map(|p| {
-                        let (lon, lat) = p.split_once(',')?;
-                        Some((lat.parse().ok()?, lon.parse().ok()?))
-                    })
-                    .collect()
-            })
-            .collect()
-    })
-}
-
-fn paint_area_map(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area: Option<&Area>) {
-    let at = |lat: f64, lon: f64| {
-        let (x, y) = robinson(lat, lon);
-        Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
-    };
-    // The Earth image, warped from its plate carrée grid onto the Robinson shape in 2° × 4° patches.
-    match earth {
-        Some(tex) => {
-            let mut img = egui::epaint::Mesh::with_texture(tex);
-            for r in 0..90 {
-                let (t, b) = (90.0 - 2.0 * r as f64, 88.0 - 2.0 * r as f64);
-                for c in 0..90 {
-                    let (l, rt) = (-180.0 + 4.0 * c as f64, -176.0 + 4.0 * c as f64);
-                    let i = img.vertices.len() as u32;
-                    for (lat, lon) in [(t, l), (t, rt), (b, rt), (b, l)] {
-                        let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
-                        img.vertices.push(egui::epaint::Vertex { pos: at(lat, lon), uv, color: Color32::WHITE });
-                    }
-                    img.add_triangle(i, i + 1, i + 2);
-                    img.add_triangle(i, i + 2, i + 3);
-                }
-            }
-            p.add(egui::Shape::mesh(img));
-        }
-        None => {
-            let pts: Vec<Pos2> = (0..=36).map(|j| at(90.0 - j as f64 * 5.0, 180.0)).chain((0..=36).map(|j| at(-90.0 + j as f64 * 5.0, -180.0))).collect();
-            p.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(44, 48, 54), Stroke::NONE));
-        }
-    }
-    // The area's cells, tinted over the image: green when it adds, red when it subtracts.
-    // Merged into runs per row: within a row the projection is linear in longitude, so a run is
-    // exactly a trapezoid.
-    if let Some(area) = area {
-        let tint = if area.add { KEPT } else { CUT };
-        let mut mesh = egui::epaint::Mesh::default();
-        for r in 0..ROWS {
-            let (top, bot) = (90.0 - r as f64, 89.0 - r as f64);
-            let mut c = 0;
-            while c < COLS {
-                if !area.cells.get(r, c) {
-                    c += 1;
-                    continue;
-                }
-                let a = c;
-                while c + 1 < COLS && area.cells.get(r, c + 1) {
-                    c += 1;
-                }
-                let (l, rt) = (a as f64 - 180.0, c as f64 - 179.0);
-                let i = mesh.vertices.len() as u32;
-                for q in [at(top, l), at(top, rt), at(bot, rt), at(bot, l)] {
-                    mesh.colored_vertex(q, tint);
-                }
-                mesh.add_triangle(i, i + 1, i + 2);
-                mesh.add_triangle(i, i + 2, i + 3);
-                c += 1;
-            }
-        }
-        p.add(egui::Shape::mesh(mesh));
-    }
-    let coast = Stroke::new(0.8, Color32::from_rgba_unmultiplied(235, 240, 235, 110));
-    for line in coastlines() {
-        let mut seg: Vec<Pos2> = Vec::new();
-        for w in line.windows(2) {
-            if seg.is_empty() {
-                seg.push(at(w[0].0, w[0].1));
-            }
-            if (w[1].1 - w[0].1).abs() > 180.0 {
-                p.add(egui::Shape::line(std::mem::take(&mut seg), coast));
-                continue;
-            }
-            seg.push(at(w[1].0, w[1].1));
-        }
-        p.add(egui::Shape::line(seg, coast));
-    }
-    let grat = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90));
-    for k in -6i32..=6 {
-        let lon = k as f64 * 30.0;
-        let pts: Vec<Pos2> = (0..=36).map(|j| at(90.0 - j as f64 * 5.0, lon)).collect();
-        p.add(egui::Shape::line(pts, if k.abs() == 6 { Stroke::new(1.0, LINE) } else { grat }));
-    }
-    for k in -2..=2 {
-        let lat = k as f64 * 30.0;
-        p.line_segment([at(lat, -180.0), at(lat, 180.0)], grat);
-    }
-}
-
-/// NASA Blue Marble (public domain), 2048 × 1024 plate carrée, stored as a 256-colour palette
-/// followed by one palette index per pixel.
-fn load_earth(ctx: &egui::Context) -> TextureHandle {
-    const W: usize = 2048;
-    const H: usize = 1024;
-    let raw: &[u8] = include_bytes!("earth.idx");
-    let (pal, idx) = raw.split_at(768);
-    let mut px = Vec::with_capacity(W * H * 4);
-    for &i in &idx[..W * H] {
-        let k = i as usize * 3;
-        px.extend_from_slice(&[pal[k], pal[k + 1], pal[k + 2], 255]);
-    }
-    ctx.load_texture("earth", ColorImage::from_rgba_unmultiplied([W, H], &px), TextureOptions::LINEAR)
-}
-
-fn area_status(a: &Area) -> String {
-    let al = a.allowed();
-    if al.is_empty() {
-        "nothing possible: contradiction".into()
-    } else {
-        format!("{} · {:.1} % of Earth possible", if a.add { "adds" } else { "subtracts" }, al.fraction() * 100.0)
-    }
 }
