@@ -14,8 +14,8 @@ pub enum Kind {
     Manual { rows: Vec<(String, String)> },
     Planes,
     Enf,
-    /// Grid frequency map (50/60 Hz zones by region) for ENF geolocation.
-    GridFrequencies,
+    /// Grid frequency map (50/60 Hz zones by region) for ENF: a JSON file, swappable.
+    GridFrequencies { path: String },
     /// A separate program speaking the plugin protocol (meta-plugin, adsb-check, …).
     Plugin { path: String },
     Record,
@@ -41,7 +41,7 @@ impl Kind {
             Kind::Manual { .. } => "Manual data".into(),
             Kind::Planes => "Planes (Doppler)".into(),
             Kind::Enf => "Power hum (ENF)".into(),
-            Kind::GridFrequencies => "Grid frequencies (50/60 Hz)".into(),
+            Kind::GridFrequencies { .. } => "Grid frequencies (50/60 Hz)".into(),
             Kind::Plugin { path } => plugin_label(path),
             Kind::Record => "Result record".into(),
         }
@@ -77,7 +77,7 @@ impl Kind {
                 ],
                 outputs: vec![Port::req("hum", Event), Port::req("location", Location)],
             },
-            Kind::GridFrequencies => NodeSpec {
+            Kind::GridFrequencies { .. } => NodeSpec {
                 name: "grid-frequencies",
                 role: Role::Source(SourceKind::Reference),
                 inputs: vec![],
@@ -127,6 +127,16 @@ pub fn bundled_plugins() -> Vec<String> {
         .collect();
     found.sort();
     found
+}
+
+/// The grid-frequency file that ships with the program: next to it, or in the repo's data folder.
+pub fn bundled_grid_file() -> String {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let dir = exe.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    [dir.join("grid-frequencies.json"), dir.join("data").join("grid-frequencies.json"), dir.join("../../data/grid-frequencies.json")]
+        .into_iter()
+        .find(|p| p.exists())
+        .map_or(String::new(), |p| p.canonicalize().unwrap_or(p).to_string_lossy().trim_start_matches(r"\?\").to_string())
 }
 
 pub fn manual_defaults() -> Vec<(String, String)> {

@@ -10,6 +10,7 @@
 //! - `ingest` reads WAV files and ffmpeg/stdin streams; `timebase` handles UTC
 //!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
+pub mod area;
 pub mod core;
 pub mod detect;
 pub mod fit;

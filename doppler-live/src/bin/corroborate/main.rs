@@ -19,7 +19,8 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2,
 };
 use nodes::Kind;
-use runtime::{Input, Job, PluginJob, Shared};
+use doppler_live::area::{GridMap, WorldMask, COLS, ROWS};
+use runtime::{EnfJob, Input, Job, PluginJob, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,7 +247,7 @@ impl App {
         rows.push(("elevation".into(), String::new()));
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 280.0));
         let planes = self.add(Kind::Planes, Pos2::new(330.0, 30.0));
-        let grid = self.add(Kind::GridFrequencies, Pos2::new(330.0, 130.0));
+        let grid = self.add(Kind::GridFrequencies { path: nodes::bundled_grid_file() }, Pos2::new(330.0, 130.0));
         let enf = self.add(Kind::Enf, Pos2::new(330.0, 190.0));
         let rec = self.add(Kind::Record, Pos2::new(660.0, 60.0));
 
@@ -293,7 +294,7 @@ impl App {
                 Kind::Manual { .. } => ("manual", String::new()),
                 Kind::Planes => ("planes", String::new()),
                 Kind::Enf => ("enf", String::new()),
-                Kind::GridFrequencies => ("grid-frequencies", String::new()),
+                Kind::GridFrequencies { path } => ("grid-frequencies", path.clone()),
                 Kind::Plugin { path } => ("plugin", path.clone()),
                 Kind::Record => ("record", String::new()),
             };
@@ -336,7 +337,7 @@ impl App {
                         "manual" => Kind::Manual { rows: Vec::new() },
                         "planes" => Kind::Planes,
                         "enf" => Kind::Enf,
-                        "grid-frequencies" => Kind::GridFrequencies,
+                        "grid-frequencies" => Kind::GridFrequencies { path: p.clone() },
                         "plugin" => Kind::Plugin { path: p },
                         "record" => Kind::Record,
                         _ => continue,
@@ -390,6 +391,54 @@ impl App {
         rows
     }
 
+    /// The grid map from the Grid frequencies node wired into `id`'s "grid" input.
+    fn grid_into(&self, id: NodeId) -> Result<Arc<GridMap>, String> {
+        let Some((from, _)) = self.graph.feeder(id, "grid") else { return Err("no grid data wired".into()) };
+        match &self.nodes[from].kind {
+            Kind::GridFrequencies { path } => load_grid(path).map(Arc::new),
+            _ => Err("grid input is not a Grid frequencies node".into()),
+        }
+    }
+
+    /// A Manual node's coordinates wired into `id`'s input, as an area: within `radius_km` of
+    /// the point (a row in the Manual node), or the 1° cell holding it when no radius is given.
+    fn manual_area_into(&self, id: NodeId, inp: &str) -> Option<(WorldMask, String)> {
+        let (from, _) = self.graph.feeder(id, inp)?;
+        let Kind::Manual { rows } = &self.nodes[from].kind else { return None };
+        manual_area(rows)
+    }
+
+    /// The Record node's location: the whole world, AND each area wired into its location inputs.
+    /// Steps: (node, how its area was reached, its fraction of Earth or None while it has none).
+    fn record_area(&self, rec: NodeId) -> (WorldMask, Vec<(String, String, Option<f64>)>) {
+        let mut m = WorldMask::world();
+        let mut steps = Vec::new();
+        for inp in nodes::RECORD_LOCATIONS {
+            let Some((from, _)) = self.graph.feeder(rec, inp) else { continue };
+            let n = &self.nodes[from];
+            let area: Result<(Arc<WorldMask>, String), String> = match &n.kind {
+                Kind::Enf => {
+                    let s = n.state.lock().unwrap();
+                    match &s.enf_area {
+                        Some(a) => Ok((a.clone(), s.enf_area_note.clone())),
+                        None if !s.enf_area_note.is_empty() => Err(s.enf_area_note.clone()),
+                        None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
+                    }
+                }
+                Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(a), l)).ok_or("no coordinates typed in".to_string()),
+                _ => Err("this node gives no area".into()),
+            };
+            match area {
+                Ok((a, note)) => {
+                    m = m.and(&a);
+                    steps.push((n.label.clone(), note, Some(a.fraction())));
+                }
+                Err(e) => steps.push((n.label.clone(), e, None)),
+            }
+        }
+        (m, steps)
+    }
+
     fn run(&mut self) {
         self.stop_all();
         self.save_project();
@@ -423,7 +472,6 @@ impl App {
                 plugins: Vec::new(),
                 stop: stop.clone(),
                 work_dir: dir.clone(),
-                grid_data: runtime::load_grid_data(),
             };
             for (t, _) in self.graph.targets(i, "audio") {
                 let tn = &self.nodes[t];
@@ -432,7 +480,7 @@ impl App {
                 }
                 match &tn.kind {
                     Kind::Planes => job.planes.push(tn.state.clone()),
-                    Kind::Enf => job.enfs.push(tn.state.clone()),
+                    Kind::Enf => job.enfs.push(EnfJob { state: tn.state.clone(), grid: self.grid_into(t), prior: self.manual_area_into(t, "location") }),
                     Kind::Plugin { path } => {
                         job.plugins.push(PluginJob { path: path.clone(), state: tn.state.clone(), manual: self.manual_rows_into(t) })
                     }
@@ -492,7 +540,19 @@ impl App {
                 }
                 Kind::Enf => {
                     let p: Vec<String> = s.enf_segments.iter().map(|e| e.to_json(anchor.as_ref())).collect();
-                    body.push_str(&format!(",\"hum_runs\":[{}]", p.join(",")));
+                    let frac = s.enf_area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));
+                    body.push_str(&format!(
+                        ",\"hum_runs\":[{}],\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
+                        p.join(","),
+                        json_escape(&s.enf_area_note)
+                    ));
+                }
+                Kind::GridFrequencies { path } => {
+                    let r = match load_grid(path) {
+                        Ok(g) => format!("\"regions\":{},\"data_source\":\"{}\"", g.regions.len(), json_escape(&g.source)),
+                        Err(e) => format!("\"error\":\"{}\"", json_escape(&e)),
+                    };
+                    body.push_str(&format!(",\"file\":\"{}\",{r}", json_escape(path)));
                 }
                 Kind::Plugin { path } => {
                     let f: Vec<String> = s
@@ -533,7 +593,29 @@ impl App {
                 Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => {
                     body.push_str(&format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live));
                 }
-                Kind::Record => {}
+                Kind::Record => {
+                    drop(s);
+                    let (m, steps) = self.record_area(i);
+                    let st: Vec<String> = steps
+                        .iter()
+                        .map(|(n, note, f)| {
+                            format!(
+                                "{{\"node\":\"{}\",\"note\":\"{}\",\"fraction_of_earth\":{}}}",
+                                json_escape(n),
+                                json_escape(note),
+                                f.map_or("null".to_string(), |f| format!("{f:.5}"))
+                            )
+                        })
+                        .collect();
+                    body.push_str(&format!(
+                        ",\"location\":{{\"start\":\"whole world\",\"cell_deg\":1,\"remaining_fraction_of_earth\":{:.5},\"remaining_km2\":{:.0},\"contradiction\":{},\"steps\":[{}],\"cells_row_first_last\":{}}}",
+                        m.fraction(),
+                        m.area_km2(),
+                        m.is_empty(),
+                        st.join(","),
+                        m.runs_json()
+                    ));
+                }
             }
             nodes_j.push(format!("{{{body}}}"));
         }
@@ -611,7 +693,7 @@ impl App {
         }
         ui.label(egui::RichText::new("DATA").small().color(DIM));
         if ui.button("Grid frequencies").clicked() {
-            pick = Some(Kind::GridFrequencies);
+            pick = Some(Kind::GridFrequencies { path: nodes::bundled_grid_file() });
         }
         ui.label(egui::RichText::new("PLUGINS").small().color(DIM));
         for p in nodes::bundled_plugins() {
@@ -732,7 +814,11 @@ impl App {
                         if first.is_empty() { s.plugin.state.clone() } else { first.to_string() }
                     }
                     Kind::Manual { rows } => format!("{} facts", rows.iter().filter(|(_, v)| !v.trim().is_empty()).count()),
-                    Kind::Record => self.saved_note.clone(),
+                    Kind::Record => {
+                        let (m, _) = self.record_area(i);
+                        let left = if m.is_empty() { "nothing left: contradiction".to_string() } else { format!("{:.1} % of Earth left", m.fraction() * 100.0) };
+                        format!("{left} · {}", self.saved_note)
+                    }
                     _ => s.status.clone(),
                 };
                 (st, s.running)
@@ -1083,12 +1169,44 @@ impl App {
                 }
             }
             Kind::Planes => self.planes_window(ui, i),
-            Kind::Enf => enf_window(ui, &state),
+            Kind::Enf => {
+                enf_window(ui, &state);
+                let note = state.lock().unwrap().enf_area_note.clone();
+                if !note.is_empty() {
+                    ui.separator();
+                    ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { TEXT }, format!("area: {note}"));
+                }
+            }
+            Kind::GridFrequencies { path } => {
+                ui.horizontal(|ui| {
+                    ui.label("File");
+                    ui.add(egui::TextEdit::singleline(path).desired_width(300.0));
+                    if ui.button("Browse…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                            *path = p.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                match load_grid(path) {
+                    Ok(g) => {
+                        ui.colored_label(DIM, format!("data: {}", g.source));
+                        for r in &g.regions {
+                            ui.label(format!("{:.0} Hz · {}", r.hz, r.id));
+                        }
+                    }
+                    Err(e) => {
+                        ui.colored_label(WARN, e);
+                    }
+                }
+                ui.colored_label(DIM, "Swap the file to use other grid data. Read at each Run.");
+            }
             Kind::Plugin { path } => {
                 ui.colored_label(DIM, format!("program: {path}"));
                 plugin_window(ui, &state);
             }
             Kind::Record => {
+                self.record_map(ui, i);
+                ui.separator();
                 ui.label("Keeps one result JSON for the current run: every node's findings and facts, and the wires (the evidence trail). Saved every 30 s while running and when the run ends.");
                 match &self.result_file {
                     Some(p) => {
@@ -1457,4 +1575,83 @@ fn main() -> eframe::Result {
             Ok(Box::new(App::new(start, autorun)))
         }),
     )
+}
+
+fn load_grid(path: &str) -> Result<GridMap, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    GridMap::parse(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn manual_area(rows: &[(String, String)]) -> Option<(WorldMask, String)> {
+    let val = |k: &str| rows.iter().find(|(q, _)| q.trim() == k).map(|(_, v)| v.trim()).filter(|v| !v.is_empty());
+    let c: Vec<f64> = val("coordinates")?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let (lat, lon) = (*c.first()?, *c.get(1)?);
+    match val("radius_km").and_then(|r| r.parse::<f64>().ok()) {
+        Some(r) => Some((WorldMask::circle(lat, lon, r), format!("{r:.0} km around {lat:.4}, {lon:.4} (manual)"))),
+        None => Some((WorldMask::circle(lat, lon, 0.0), format!("the 1° cell holding {lat:.4}, {lon:.4} (manual, no radius_km given)"))),
+    }
+}
+
+impl App {
+    fn record_map(&mut self, ui: &mut egui::Ui, i: NodeId) {
+        let (m, steps) = self.record_area(i);
+        if m.is_empty() {
+            ui.colored_label(WARN, "Location: nothing left. The evidence contradicts itself: check the steps below.");
+        } else {
+            ui.label(format!(
+                "Location: {:.2} % of Earth's surface left ({:.1} million km²), 1° cells",
+                m.fraction() * 100.0,
+                m.area_km2() / 1e6
+            ));
+        }
+        ui.colored_label(DIM, "start: the whole world");
+        for (n, note, f) in &steps {
+            let f = f.map_or("—".to_string(), |f| format!("{:.2} %", f * 100.0));
+            ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { TEXT }, format!("∩ {n} ({f}): {note}"));
+        }
+        if steps.is_empty() {
+            ui.colored_label(DIM, "wire areas (ENF location, Manual place) into the location inputs to subtract from the world");
+        }
+        let n = m.cells.iter().filter(|&&c| c).count() as u64;
+        let stamp = (n, m.fraction());
+        if self.textures.get(&i).is_none_or(|(a, b, _)| (*a, *b) != stamp) {
+            let mut px = Vec::with_capacity(ROWS * COLS * 4);
+            for r in 0..ROWS {
+                for c in 0..COLS {
+                    px.extend_from_slice(&if m.get(r, c) { [70, 150, 130, 255] } else { [28, 30, 34, 255] });
+                }
+            }
+            let img = ColorImage::from_rgba_unmultiplied([COLS, ROWS], &px);
+            let tex = ui.ctx().load_texture(format!("area{i}"), img, TextureOptions::NEAREST);
+            self.textures.insert(i, (stamp.0, stamp.1, tex));
+        }
+        let w = ui.available_width().min(720.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / 2.0), Sense::hover());
+        let p = ui.painter_at(rect);
+        p.image(self.textures[&i].2.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        let at = |lat: f64, lon: f64| {
+            Pos2::new(rect.left() + ((lon + 180.0) / 360.0) as f32 * rect.width(), rect.top() + ((90.0 - lat) / 180.0) as f32 * rect.height())
+        };
+        for k in -5..=5 {
+            let lon = k as f64 * 30.0;
+            p.line_segment([at(90.0, lon), at(-90.0, lon)], Stroke::new(1.0, alpha(LINE, 0.6)));
+        }
+        for k in -2..=2 {
+            let lat = k as f64 * 30.0;
+            p.line_segment([at(lat, -180.0), at(lat, 180.0)], Stroke::new(1.0, alpha(LINE, 0.6)));
+        }
+        // The grid regions are the only geography drawn: there are no coastlines.
+        for n in self.nodes.iter().filter(|n| !n.hidden) {
+            if let Kind::GridFrequencies { path } = &n.kind {
+                if let Ok(g) = load_grid(path) {
+                    for r in &g.regions {
+                        let pts: Vec<Pos2> = r.polygon.iter().map(|&(a, b)| at(a, b)).collect();
+                        let c = if r.hz > 55.0 { Color32::from_rgb(224, 164, 88) } else { Color32::from_rgb(110, 170, 255) };
+                        p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, alpha(c, 0.7))));
+                    }
+                }
+            }
+        }
+        ui.colored_label(DIM, "teal: still possible · outlines: grid regions (blue 50 Hz, orange 60 Hz) · lines every 30° · no coastlines drawn");
+    }
 }

@@ -9,6 +9,7 @@ use doppler_live::modules::enf::{Enf, EnfPoint, EnfSegment};
 use doppler_live::modules::planes::Planes;
 use doppler_live::plugin::{self, PluginFinding};
 use doppler_live::timebase::{self, Anchor, SharedAnchor};
+use doppler_live::area::{GridMap, WorldMask};
 use doppler_live::{ingest, INPUT_SR};
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
@@ -92,11 +93,10 @@ pub struct NodeState {
     pub enf_points: Vec<EnfPoint>,
     pub enf_segments: Vec<EnfSegment>,
     pub enf_nominal: Option<f64>,
-    pub grid_data: Option<String>,
-    /// Location constraint from ENF (feasible regions where detected frequency is used).
-    pub location_constraint: Option<String>,
-    // Record.
-    pub location_constraints: Vec<String>,
+    /// Where the measured grid frequency is used (AND the location wired in), once decided.
+    pub enf_area: Option<Arc<WorldMask>>,
+    /// How that area was reached: regions, data source, contradictions.
+    pub enf_area_note: String,
     // Plugin.
     pub plugin: PluginState,
 }
@@ -138,13 +138,18 @@ pub struct Job {
     pub input: Input,
     pub source: Shared,
     pub planes: Vec<Shared>,
-    pub enfs: Vec<Shared>,
+    pub enfs: Vec<EnfJob>,
     pub plugins: Vec<PluginJob>,
     pub stop: Arc<AtomicBool>,
     /// Working folder for plugins (adsb-check writes its flight log there).
     pub work_dir: std::path::PathBuf,
-    /// Grid frequency data (50/60 Hz zones), loaded from data/grid-frequencies.json.
-    pub grid_data: Option<String>,
+}
+
+/// An ENF node: its state, the grid map wired into it, and the location wired into it (if any).
+pub struct EnfJob {
+    pub state: Shared,
+    pub grid: Result<Arc<GridMap>, String>,
+    pub prior: Option<(WorldMask, String)>,
 }
 
 pub fn start(job: Job) {
@@ -155,28 +160,25 @@ fn quantise(z: f32) -> u8 {
     (((z - Z_LO) / (Z_HI - Z_LO)).clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-/// Load grid frequency data from the bundled JSON file.
-pub fn load_grid_data() -> Option<String> {
-    let paths = [
-        "doppler-live/data/grid-frequencies.json",
-        "data/grid-frequencies.json",
-        "grid-frequencies.json",
-    ];
-    for path in &paths {
-        if let Ok(data) = std::fs::read_to_string(path) {
-            return Some(data);
+/// Where a measured nominal frequency is used, AND the location wired into the node.
+/// An empty result is kept: it says the hum contradicts that location.
+fn enf_area(nominal: f64, j: &EnfJob) -> (Option<WorldMask>, String) {
+    let g = match &j.grid {
+        Ok(g) => g,
+        Err(e) => return (None, format!("no area: {e}")),
+    };
+    let names: Vec<&str> = g.regions_for(nominal).iter().map(|r| r.id.as_str()).collect();
+    let mut m = g.mask_for(nominal);
+    let mut note = format!("{nominal:.0} Hz grid: {} (grid data: {})", names.join("; "), g.source);
+    if let Some((p, label)) = &j.prior {
+        m = m.and(p);
+        if m.is_empty() {
+            note = format!("CONTRADICTION: {nominal:.0} Hz hum is not used anywhere in {label}. {note}");
+        } else {
+            note = format!("{note}; limited to {label}");
         }
     }
-    None
-}
-
-/// Compute location constraint from detected ENF frequency and grid data.
-/// If frequency is 50 Hz, return 50Hz regions; if 60 Hz, return 60Hz regions.
-/// Returns a JSON description of the feasible regions.
-fn location_from_enf_frequency(nominal_hz: f64, _grid_data: Option<&str>) -> Option<String> {
-    let hz = if nominal_hz > 55.0 { 60.0 } else { 50.0 };
-    let label = if hz > 55.0 { "60 Hz grid (Americas, Japan-East)" } else { "50 Hz grid (Europe, Africa, Asia)" };
-    Some(format!("{{\"method\":\"ENF {:.0} Hz\",\"label\":\"{}\"}}", hz, label))
+    (Some(m), note)
 }
 
 /// YouTube page links need resolving to a direct stream URL (yt-dlp); others are used as-is.
@@ -198,7 +200,7 @@ fn resolve(url: &str) -> Result<String, String> {
 fn all_states(job: &Job) -> Vec<Shared> {
     let mut v = vec![job.source.clone()];
     v.extend(job.planes.iter().cloned());
-    v.extend(job.enfs.iter().cloned());
+    v.extend(job.enfs.iter().map(|e| e.state.clone()));
     v.extend(job.plugins.iter().map(|p| p.state.clone()));
     v
 }
@@ -266,16 +268,11 @@ fn run(job: Job) {
             (p, s.clone())
         })
         .collect();
-    let mut enfs: Vec<(Enf, Shared)> = job.enfs.iter().map(|s| (Enf::new(), s.clone())).collect();
-
-    // Make grid frequency data available to all ENF nodes.
-    for (_, s) in enfs.iter() {
-        s.lock().unwrap().grid_data = job.grid_data.clone();
-    }
+    let mut enfs: Vec<(Enf, &EnfJob, Option<f64>)> = job.enfs.iter().map(|j| (Enf::new(), j, None)).collect();
 
     // Spawn doppler-view as a separate visualization process for Planes data.
     if !planes.is_empty() {
-        let _ = Command::new("C:\\Apps\\DopplerOsint\\doppler-view.exe")
+        let _ = Command::new(std::env::current_exe().unwrap_or_default().with_file_name(format!("doppler-view{}", std::env::consts::EXE_SUFFIX)))
             .arg(&ff_input)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -331,7 +328,6 @@ fn run(job: Job) {
             let mut frames: Vec<(f64, Vec<u8>)> = Vec::new();
             let evs = p.push_with(&x, |t, z| frames.push((t, z.iter().map(|&v| quantise(v)).collect())));
             let mut s = s.lock().unwrap();
-            let nb = s.freqs.len();
             for (t, q) in frames {
                 s.hist.extend_from_slice(&q);
                 s.hist_t.push(t);
@@ -344,18 +340,22 @@ fn run(job: Job) {
             s.audio_s = n as f64 / INPUT_SR;
             s.status = format!("{} passes", s.passes.len());
         }
-        for (e, s) in enfs.iter_mut() {
+        for (e, j, last) in enfs.iter_mut() {
             let found = e.push(&x);
             let pts = e.take_points();
-            let mut s = s.lock().unwrap();
+            let mut s = j.state.lock().unwrap();
             s.enf_points.extend(pts);
             s.enf_segments.extend(found.into_iter().filter_map(|f| if let Finding::Enf(g) = f { Some(g) } else { None }));
             s.enf_nominal = e.nominal();
             s.anchor = an.clone();
             s.audio_s = n as f64 / INPUT_SR;
-            // Compute location constraint from detected frequency.
-            if let Some(f) = s.enf_nominal {
-                s.location_constraint = location_from_enf_frequency(f, s.grid_data.as_deref());
+            if s.enf_nominal != *last {
+                *last = s.enf_nominal;
+                if let Some(f) = s.enf_nominal {
+                    let (area, note) = enf_area(f, j);
+                    s.enf_area = area.map(Arc::new);
+                    s.enf_area_note = note;
+                }
             }
             s.status = match s.enf_nominal {
                 Some(f) => format!("{f:.0} Hz grid, {} runs", s.enf_segments.len()),
@@ -380,9 +380,9 @@ fn run(job: Job) {
         s.pending.clear();
         s.status = format!("{} passes", s.passes.len());
     }
-    for (e, s) in enfs.iter_mut() {
+    for (e, j, _) in enfs.iter_mut() {
         let found = e.flush();
-        let mut s = s.lock().unwrap();
+        let mut s = j.state.lock().unwrap();
         s.enf_segments.extend(found.into_iter().filter_map(|f| if let Finding::Enf(g) = f { Some(g) } else { None }));
     }
     finish(&job, Ok(n as f64 / INPUT_SR));
@@ -405,7 +405,7 @@ fn finish(job: &Job, r: Result<f64, String>) {
     // Detectors that never got audio show why.
     let text = s.status.clone();
     drop(s);
-    for st in job.planes.iter().chain(&job.enfs) {
+    for st in job.planes.iter().chain(job.enfs.iter().map(|e| &e.state)) {
         let mut st = st.lock().unwrap();
         if st.status == "starting" {
             st.status = text.clone();
