@@ -92,6 +92,7 @@ pub struct NodeState {
     pub enf_points: Vec<EnfPoint>,
     pub enf_segments: Vec<EnfSegment>,
     pub enf_nominal: Option<f64>,
+    pub grid_data: Option<String>,
     // Plugin.
     pub plugin: PluginState,
 }
@@ -138,6 +139,8 @@ pub struct Job {
     pub stop: Arc<AtomicBool>,
     /// Working folder for plugins (adsb-check writes its flight log there).
     pub work_dir: std::path::PathBuf,
+    /// Grid frequency data (50/60 Hz zones), loaded from data/grid-frequencies.json.
+    pub grid_data: Option<String>,
 }
 
 pub fn start(job: Job) {
@@ -146,6 +149,21 @@ pub fn start(job: Job) {
 
 fn quantise(z: f32) -> u8 {
     (((z - Z_LO) / (Z_HI - Z_LO)).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Load grid frequency data from the bundled JSON file.
+pub fn load_grid_data() -> Option<String> {
+    let paths = [
+        "doppler-live/data/grid-frequencies.json",
+        "data/grid-frequencies.json",
+        "grid-frequencies.json",
+    ];
+    for path in &paths {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            return Some(data);
+        }
+    }
+    None
 }
 
 /// YouTube page links need resolving to a direct stream URL (yt-dlp); others are used as-is.
@@ -236,6 +254,11 @@ fn run(job: Job) {
         })
         .collect();
     let mut enfs: Vec<(Enf, Shared)> = job.enfs.iter().map(|s| (Enf::new(), s.clone())).collect();
+
+    // Make grid frequency data available to all ENF nodes.
+    for (_, s) in enfs.iter() {
+        s.lock().unwrap().grid_data = job.grid_data.clone();
+    }
 
     // Spawn doppler-view as a separate visualization process for Planes data.
     if !planes.is_empty() {
