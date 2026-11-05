@@ -4,7 +4,8 @@
 //!
 //! - `size`: the node's size on the canvas (unzoomed), given the standard size.
 //! - `fill`: the node's background colour.
-//! - `body`: draw inside the node, below its ports and above its status line. `ui` is a child
+//! - `body`: draw inside the node, below its title and above its status line (the port dots and
+//!   names, centred on the side edges, are drawn over it). `ui` is a child
 //!   area there: paint with `ui.painter()`, or add controls (buttons, text fields, combo boxes);
 //!   controls take clicks before the node's own drag. Multiply sizes by `app.zoom`.
 //! - `status`: false hides the status line at the bottom of the node.

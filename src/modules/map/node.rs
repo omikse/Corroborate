@@ -87,28 +87,42 @@ fn coastlines() -> &'static [Vec<(f64, f64)>] {
     })
 }
 
+/// The Earth image warped from its plate carrée grid onto the Robinson shape in 2° × 4° patches:
+/// vertex positions (0..1 across the map) and texture positions, worked out once.
+fn earth_patches() -> &'static (Vec<(Pos2, Pos2)>, Vec<u32>) {
+    static P: std::sync::OnceLock<(Vec<(Pos2, Pos2)>, Vec<u32>)> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let (mut verts, mut idx) = (Vec::new(), Vec::new());
+        for r in 0..90 {
+            let (t, b) = (90.0 - 2.0 * r as f64, 88.0 - 2.0 * r as f64);
+            for c in 0..90 {
+                let (l, rt) = (-180.0 + 4.0 * c as f64, -176.0 + 4.0 * c as f64);
+                let i = verts.len() as u32;
+                for (lat, lon) in [(t, l), (t, rt), (b, rt), (b, l)] {
+                    let (x, y) = robinson(lat, lon);
+                    let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
+                    verts.push((Pos2::new(x as f32, y as f32), uv));
+                }
+                idx.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+            }
+        }
+        (verts, idx)
+    })
+}
+
 pub fn paint(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area: Option<&Area>) {
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
     };
-    // The Earth image, warped from its plate carrée grid onto the Robinson shape in 2° × 4° patches.
+    let place = |u: Pos2| Pos2::new(rect.left() + u.x * rect.width(), rect.top() + u.y * rect.height());
+    // The Earth image, with the coastlines and the 30° lines already drawn into it (see `load_earth`).
     match earth {
         Some(tex) => {
+            let (verts, idx) = earth_patches();
             let mut img = egui::epaint::Mesh::with_texture(tex);
-            for r in 0..90 {
-                let (t, b) = (90.0 - 2.0 * r as f64, 88.0 - 2.0 * r as f64);
-                for c in 0..90 {
-                    let (l, rt) = (-180.0 + 4.0 * c as f64, -176.0 + 4.0 * c as f64);
-                    let i = img.vertices.len() as u32;
-                    for (lat, lon) in [(t, l), (t, rt), (b, rt), (b, l)] {
-                        let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
-                        img.vertices.push(egui::epaint::Vertex { pos: at(lat, lon), uv, color: Color32::WHITE });
-                    }
-                    img.add_triangle(i, i + 1, i + 2);
-                    img.add_triangle(i, i + 2, i + 3);
-                }
-            }
+            img.vertices = verts.iter().map(|&(u, uv)| egui::epaint::Vertex { pos: place(u), uv, color: Color32::WHITE }).collect();
+            img.indices = idx.clone();
             p.add(egui::Shape::mesh(img));
         }
         None => {
@@ -146,46 +160,79 @@ pub fn paint(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area
         }
         p.add(egui::Shape::mesh(mesh));
     }
-    let coast = Stroke::new(0.8, Color32::from_rgba_unmultiplied(235, 240, 235, 110));
-    for line in coastlines() {
-        let mut seg: Vec<Pos2> = Vec::new();
-        for w in line.windows(2) {
-            if seg.is_empty() {
-                seg.push(at(w[0].0, w[0].1));
+    if earth.is_none() {
+        // No image: the coastlines as lines (slower; normally they are in the image).
+        let coast = Stroke::new(0.8, Color32::from_rgba_unmultiplied(235, 240, 235, 110));
+        for line in coastlines() {
+            let mut seg: Vec<Pos2> = Vec::new();
+            for w in line.windows(2) {
+                if seg.is_empty() {
+                    seg.push(at(w[0].0, w[0].1));
+                }
+                if (w[1].1 - w[0].1).abs() > 180.0 {
+                    p.add(egui::Shape::line(std::mem::take(&mut seg), coast));
+                    continue;
+                }
+                seg.push(at(w[1].0, w[1].1));
             }
-            if (w[1].1 - w[0].1).abs() > 180.0 {
-                p.add(egui::Shape::line(std::mem::take(&mut seg), coast));
-                continue;
-            }
-            seg.push(at(w[1].0, w[1].1));
+            p.add(egui::Shape::line(seg, coast));
         }
-        p.add(egui::Shape::line(seg, coast));
     }
-    let grat = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90));
-    for k in -6i32..=6 {
-        let lon = k as f64 * 30.0;
-        let pts: Vec<Pos2> = (0..=36).map(|j| at(90.0 - j as f64 * 5.0, lon)).collect();
-        p.add(egui::Shape::line(pts, if k.abs() == 6 { Stroke::new(1.0, LINE) } else { grat }));
+}
+
+const EARTH_W: usize = 2048;
+const EARTH_H: usize = 1024;
+
+/// Blend a colour into one pixel of the Earth image (plate carrée: x from longitude, y from latitude).
+fn blend(px: &mut [u8], lat: f64, lon: f64, rgb: [u8; 3], a: f32) {
+    let x = (((lon + 180.0) / 360.0) * EARTH_W as f64).floor().clamp(0.0, (EARTH_W - 1) as f64) as usize;
+    let y = (((90.0 - lat) / 180.0) * EARTH_H as f64).floor().clamp(0.0, (EARTH_H - 1) as f64) as usize;
+    // Two pixels wide, so the line survives the image being drawn small.
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        let k = ((y + dy).min(EARTH_H - 1) * EARTH_W + (x + dx).min(EARTH_W - 1)) * 4;
+        for c in 0..3 {
+            px[k + c] = (px[k + c] as f32 * (1.0 - a) + rgb[c] as f32 * a).round() as u8;
+        }
     }
-    for k in -2..=2 {
-        let lat = k as f64 * 30.0;
-        p.line_segment([at(lat, -180.0), at(lat, 180.0)], grat);
+}
+
+/// A line in the image from one (lat, lon) to another, a pixel at a time.
+fn line_into(px: &mut [u8], a: (f64, f64), b: (f64, f64), rgb: [u8; 3], alpha: f32) {
+    let step = 180.0 / EARTH_H as f64;
+    let n = (((b.0 - a.0).abs().max((b.1 - a.1).abs())) / step).ceil().max(1.0) as usize;
+    for k in 0..=n {
+        let f = k as f64 / n as f64;
+        blend(px, a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, rgb, alpha);
     }
 }
 
 /// NASA Blue Marble (public domain), 2048 × 1024 plate carrée, stored as a 256-colour palette
-/// followed by one palette index per pixel.
+/// followed by one palette index per pixel. The coastlines (Natural Earth 1:110m) and the lines
+/// every 30° are drawn into it once here, so maps cost little to draw each frame.
 pub fn load_earth(ctx: &egui::Context) -> TextureHandle {
-    const W: usize = 2048;
-    const H: usize = 1024;
     let raw: &[u8] = include_bytes!("earth.idx");
     let (pal, idx) = raw.split_at(768);
-    let mut px = Vec::with_capacity(W * H * 4);
-    for &i in &idx[..W * H] {
+    let mut px = Vec::with_capacity(EARTH_W * EARTH_H * 4);
+    for &i in &idx[..EARTH_W * EARTH_H] {
         let k = i as usize * 3;
         px.extend_from_slice(&[pal[k], pal[k + 1], pal[k + 2], 255]);
     }
-    ctx.load_texture("earth", ColorImage::from_rgba_unmultiplied([W, H], &px), TextureOptions::LINEAR)
+    for k in -5i32..=5 {
+        line_into(&mut px, (90.0, k as f64 * 30.0), (-90.0, k as f64 * 30.0), [0, 0, 0], 0.35);
+    }
+    for k in -2i32..=2 {
+        line_into(&mut px, (k as f64 * 30.0, -180.0), (k as f64 * 30.0, 180.0), [0, 0, 0], 0.35);
+    }
+    for line in coastlines() {
+        for w in line.windows(2) {
+            if (w[1].1 - w[0].1).abs() <= 180.0 {
+                line_into(&mut px, w[0], w[1], [235, 240, 235], 0.6);
+            }
+        }
+    }
+    // Mipmaps: smooth when the map is drawn much smaller than the image.
+    let opts = TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR };
+    ctx.load_texture("earth", ColorImage::from_rgba_unmultiplied([EARTH_W, EARTH_H], &px), opts)
 }
 
 impl App {

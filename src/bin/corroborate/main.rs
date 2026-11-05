@@ -227,6 +227,8 @@ struct App {
     mics: Vec<String>,
     /// The Earth image under every map (loaded at the first frame).
     earth: Option<TextureHandle>,
+    /// Areas worked out this frame, by node (see `area_from`).
+    area_cache: std::cell::RefCell<HashMap<NodeId, Result<(Arc<Area>, String), String>>>,
     last_project_save: Instant,
 }
 
@@ -258,6 +260,7 @@ impl App {
             spec_minutes: 0.0,
             mics: Vec::new(),
             earth: None,
+            area_cache: Default::default(),
             last_project_save: Instant::now(),
         };
         if !app.load_project() {
@@ -451,8 +454,18 @@ impl App {
         self.nodes.iter().any(|n| n.state.lock().unwrap().running)
     }
 
-    /// The area a node gives on its location output, and how it was reached.
+    /// The area a node gives on its location output, and how it was reached. Worked out once per
+    /// frame per node (maps, statuses and the record all ask); `graph_view` clears the cache.
     fn area_from(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
+        if let Some(r) = self.area_cache.borrow().get(&from) {
+            return r.clone();
+        }
+        let r = self.area_uncached(from);
+        self.area_cache.borrow_mut().insert(from, r.clone());
+        r
+    }
+
+    fn area_uncached(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
         let n = &self.nodes[from];
         match &n.kind {
             Kind::Enf => enf_node::area_out(&n.state),
@@ -624,21 +637,21 @@ impl App {
         Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom, size * self.zoom)
     }
 
-    /// The part of a node a `NodeLook` draws in: below the ports, above the status line.
-    fn body_rect(&self, rect: Rect, i: NodeId) -> Rect {
+    /// The part of a node a `NodeLook` draws in: below the title, above the status line. The port
+    /// dots and names are drawn over it.
+    fn body_rect(&self, rect: Rect) -> Rect {
         let z = self.zoom;
-        Rect::from_min_max(
-            Pos2::new(rect.left() + 6.0 * z, rect.top() + (HEAD + self.port_rows(i) * ROW + 4.0) * z),
-            Pos2::new(rect.right() - 6.0 * z, rect.bottom() - 22.0 * z),
-        )
+        Rect::from_min_max(Pos2::new(rect.left() + 6.0 * z, rect.top() + (HEAD + 4.0) * z), Pos2::new(rect.right() - 6.0 * z, rect.bottom() - 22.0 * z))
     }
 
+    /// A port dot on the node's left (inputs) or right (outputs) edge: the ports of each side
+    /// spaced one row apart around the middle of the edge.
     fn port_pos(&self, origin: Pos2, i: NodeId, idx: usize, out: bool) -> Pos2 {
         let r = self.node_rect(origin, i);
-        Pos2::new(
-            if out { r.right() } else { r.left() },
-            r.top() + (HEAD + 4.0 + idx as f32 * ROW + ROW / 2.0) * self.zoom,
-        )
+        let spec = &self.graph.nodes()[i].spec;
+        let n = if out { spec.outputs.len() } else { spec.inputs.len() }.max(1) as f32;
+        let y = r.center().y + (idx as f32 - (n - 1.0) / 2.0) * ROW * self.zoom;
+        Pos2::new(if out { r.right() } else { r.left() }, y)
     }
 
     fn add_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
@@ -665,6 +678,7 @@ impl App {
     }
 
     fn graph_view(&mut self, ui: &mut egui::Ui) {
+        self.area_cache.borrow_mut().clear();
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, BG);
@@ -677,17 +691,23 @@ impl App {
                 self.pan = pointer - area.min - world * self.zoom;
             }
         }
-        let step = 22.0 * self.zoom;
+        // Background dots: one mesh of small squares, and never closer than 16 px when zoomed out.
+        let mut step = 22.0 * self.zoom;
+        while step < 16.0 {
+            step *= 2.0;
+        }
         let off = Vec2::new(self.pan.x.rem_euclid(step), self.pan.y.rem_euclid(step));
+        let mut dots = egui::epaint::Mesh::default();
         let mut y = area.top() + off.y;
         while y < area.bottom() {
             let mut x = area.left() + off.x;
             while x < area.right() {
-                painter.circle_filled(Pos2::new(x, y), 1.0, Color32::from_rgb(43, 47, 53));
+                dots.add_colored_rect(Rect::from_center_size(Pos2::new(x, y), Vec2::splat(2.0)), Color32::from_rgb(43, 47, 53));
                 x += step;
             }
             y += step;
         }
+        painter.add(egui::Shape::mesh(dots));
         if bg.dragged() && self.wiring.is_none() {
             self.pan += bg.drag_delta();
         }
@@ -763,7 +783,7 @@ impl App {
             painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
             // The node's own drawing and controls, from its folder's `Look`.
-            let body = self.body_rect(rect, i);
+            let body = self.body_rect(rect);
             if body.width() > 0.0 && body.height() > 0.0 {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", i)));
                 child.set_clip_rect(body.intersect(area));
@@ -1225,4 +1245,53 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod canvas_timing {
+    use super::*;
+
+    /// Time to build and tessellate one canvas frame (no GPU), like the ENF demo: maps, an
+    /// inverted area and the record. Run: cargo test --release --bin corroborate canvas -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn canvas_frame_time() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(None, false);
+        let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
+        let man = app.add(Kind::Manual { rows }, Pos2::new(20.0, 420.0));
+        let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
+        app.wire(man, "place", inv, "location");
+        let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record)).expect("default project has a record");
+        app.wire(man, "place", rec, nodes::RECORD_LOCATIONS[1]);
+        for (k, from, out) in [(0, man, "place"), (1, inv, "location"), (2, rec, "location")] {
+            let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));
+            app.wire(from, out, m, "location");
+        }
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 780.0))),
+            ..Default::default()
+        };
+        let mut frame = |app: &mut App| {
+            let out = ctx.run_ui(input(), |ui| {
+                if app.earth.is_none() {
+                    app.earth = Some(map_node::load_earth(ui.ctx()));
+                }
+                egui::CentralPanel::default().show_inside(ui, |ui| app.graph_view(ui));
+            });
+            let n = ctx.tessellate(out.shapes, out.pixels_per_point).len();
+            std::hint::black_box(n);
+        };
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        let frames = 30;
+        let t = Instant::now();
+        for f in 0..frames {
+            app.zoom = 0.6 + (f % 10) as f32 * 0.08;
+            frame(&mut app);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        println!("canvas frame: {ms:.1} ms ({} nodes)", app.nodes.len());
+    }
 }
