@@ -19,7 +19,7 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2,
 };
 use nodes::Kind;
-use doppler_live::area::{robinson, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
+use doppler_live::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
 use runtime::{EnfJob, Input, Job, PluginJob, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -178,6 +178,8 @@ struct App {
     /// Minutes of spectrogram shown in Planes windows (0 = all).
     spec_minutes: f64,
     mics: Vec<String>,
+    /// The Earth image under every map (loaded at the first frame).
+    earth: Option<TextureHandle>,
     last_project_save: Instant,
 }
 
@@ -208,6 +210,7 @@ impl App {
             follow: true,
             spec_minutes: 0.0,
             mics: Vec::new(),
+            earth: None,
             last_project_save: Instant::now(),
         };
         if !app.load_project() {
@@ -300,6 +303,8 @@ impl App {
                 Kind::Plugin { path } => ("plugin", path.clone()),
                 Kind::Record => ("record", String::new()),
                 Kind::Map => ("map", String::new()),
+                Kind::Combine { any } => ("combine", if *any { "any" } else { "all" }.to_string()),
+                Kind::Invert => ("invert", String::new()),
             };
             text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
@@ -344,6 +349,8 @@ impl App {
                         "plugin" => Kind::Plugin { path: p },
                         "record" => Kind::Record,
                         "map" => Kind::Map,
+                        "combine" => Kind::Combine { any: p == "any" },
+                        "invert" => Kind::Invert,
                         _ => continue,
                     };
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
@@ -413,29 +420,58 @@ impl App {
     }
 
     /// The area a node gives on its location output, and how it was reached.
-    fn area_from(&self, from: NodeId) -> Result<(Arc<WorldMask>, String), String> {
+    fn area_from(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
         let n = &self.nodes[from];
         match &n.kind {
             Kind::Enf => {
                 let s = n.state.lock().unwrap();
                 match &s.enf_area {
-                    Some(a) => Ok((a.clone(), s.enf_area_note.clone())),
+                    Some(a) => Ok((Arc::new(Area::add((**a).clone())), s.enf_area_note.clone())),
                     None if !s.enf_area_note.is_empty() => Err(s.enf_area_note.clone()),
                     None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
                 }
             }
-            Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(a), l)).ok_or("no coordinates typed in".to_string()),
+            Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(Area::add(a)), l)).ok_or("no coordinates typed in".to_string()),
             Kind::Record => {
                 let (m, steps) = self.record_area(from);
-                let n = steps.iter().filter(|s| s.2.is_some()).count();
-                Ok((Arc::new(m), format!("the whole world cut by {n} area(s)")))
+                let k = steps.iter().filter(|s| s.2.is_some()).count();
+                Ok((Arc::new(Area::add(m)), format!("the whole world cut by {k} area(s)")))
+            }
+            Kind::Combine { any } => {
+                let mut acc: Option<WorldMask> = None;
+                let mut used = Vec::new();
+                for inp in nodes::COMBINE_INPUTS {
+                    let Some((f, _)) = self.graph.feeder(from, inp) else { continue };
+                    if let Ok((a, _)) = self.area_from(f) {
+                        let al = a.allowed();
+                        acc = Some(match acc {
+                            None => al,
+                            Some(m) if *any => m.or(&al),
+                            Some(m) => m.and(&al),
+                        });
+                        used.push(self.nodes[f].label.clone());
+                    }
+                }
+                let m = acc.ok_or("no location with an area wired in yet")?;
+                let how = if *any { "any of" } else { "all of" };
+                let note = if m.is_empty() {
+                    format!("CONTRADICTION: nothing is possible under {how} {}", used.join(", "))
+                } else {
+                    format!("possible under {how} {}", used.join(", "))
+                };
+                Ok((Arc::new(Area::add(m)), note))
+            }
+            Kind::Invert => {
+                let (f, _) = self.graph.feeder(from, "location").ok_or("no location wired in")?;
+                let (a, note) = self.area_from(f)?;
+                Ok((Arc::new(a.inverted()), format!("inverted ({}): {note}", if a.add { "adds → subtracts" } else { "subtracts → adds" })))
             }
             _ => Err("this node gives no area".into()),
         }
     }
 
     /// The Record node's location: the whole world, AND each area wired into its location inputs.
-    /// Steps: (node, how its area was reached, its fraction of Earth or None while it has none).
+    /// Steps: (node, how its area was reached, the fraction of Earth it allows or None while it has none).
     fn record_area(&self, rec: NodeId) -> (WorldMask, Vec<(String, String, Option<f64>)>) {
         let mut m = WorldMask::world();
         let mut steps = Vec::new();
@@ -444,8 +480,9 @@ impl App {
             let label = self.nodes[from].label.clone();
             match self.area_from(from) {
                 Ok((a, note)) => {
-                    m = m.and(&a);
-                    steps.push((label, note, Some(a.fraction())));
+                    let al = a.allowed();
+                    m = m.and(&al);
+                    steps.push((label, note, Some(al.fraction())));
                 }
                 Err(e) => steps.push((label, e, None)),
             }
@@ -607,7 +644,7 @@ impl App {
                 Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => {
                     body.push_str(&format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live));
                 }
-                Kind::Map => {}
+                Kind::Map | Kind::Invert | Kind::Combine { .. } => {}
                 Kind::Record => {
                     drop(s);
                     let (m, steps) = self.record_area(i);
@@ -727,6 +764,16 @@ impl App {
         if ui.button("Result record").clicked() {
             pick = Some(Kind::Record);
         }
+        ui.label(egui::RichText::new("LOCATION").small().color(DIM));
+        if ui.button("Combine locations (all)").clicked() {
+            pick = Some(Kind::Combine { any: false });
+        }
+        if ui.button("Combine locations (any)").clicked() {
+            pick = Some(Kind::Combine { any: true });
+        }
+        if ui.button("Invert location").clicked() {
+            pick = Some(Kind::Invert);
+        }
         ui.label(egui::RichText::new("VIEW").small().color(DIM));
         if ui.button("Map").clicked() {
             pick = Some(Kind::Map);
@@ -830,7 +877,7 @@ impl App {
                 let top = rect.top() + HEAD + ROW + 8.0;
                 let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0, top), Vec2::new(rect.width() - 12.0, (rect.width() - 12.0) / ROBINSON_ASPECT as f32));
                 let area = self.graph.feeder(i, "location").and_then(|(f, _)| self.area_from(f).ok()).map(|(a, _)| a);
-                paint_area_map(&painter.with_clip_rect(map), map, area.as_deref(), &self.grid_outlines());
+                paint_area_map(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref(), &self.grid_outlines());
             }
             // Status line at the bottom of the node.
             let (status, running) = {
@@ -842,10 +889,13 @@ impl App {
                     }
                     Kind::Manual { rows } => format!("{} facts", rows.iter().filter(|(_, v)| !v.trim().is_empty()).count()),
                     Kind::Map => match self.graph.feeder(i, "location").map(|(f, _)| self.area_from(f)) {
-                        Some(Ok((a, _))) if a.is_empty() => "nothing kept: contradiction".into(),
-                        Some(Ok((a, _))) => format!("{:.1} % of Earth kept", a.fraction() * 100.0),
+                        Some(Ok((a, _))) => area_status(&a),
                         Some(Err(e)) => e,
                         None => "no location wired".into(),
+                    },
+                    Kind::Combine { .. } | Kind::Invert => match self.area_from(i) {
+                        Ok((a, _)) => area_status(&a),
+                        Err(e) => e,
                     },
                     Kind::Record => {
                         let (m, _) = self.record_area(i);
@@ -1237,23 +1287,56 @@ impl App {
                 ui.colored_label(DIM, format!("program: {path}"));
                 plugin_window(ui, &state);
             }
+            Kind::Combine { any } => {
+                ui.horizontal(|ui| {
+                    ui.radio_value(any, false, "all must hold (AND)");
+                    ui.radio_value(any, true, "any may hold (OR)");
+                });
+                ui.colored_label(DIM, "Takes what each wired location still allows and combines it. The result adds (green).");
+                match self.area_from(i) {
+                    Ok((_, note)) => {
+                        ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { TEXT }, note);
+                    }
+                    Err(e) => {
+                        ui.colored_label(DIM, e);
+                    }
+                }
+            }
+            Kind::Invert => {
+                ui.colored_label(DIM, "Flips a location: a green (adds) area becomes red (subtracts) on the same cells, and the other way round.");
+                match self.area_from(i) {
+                    Ok((_, note)) => {
+                        ui.label(note);
+                    }
+                    Err(e) => {
+                        ui.colored_label(DIM, e);
+                    }
+                }
+            }
             Kind::Map => {
+                let earth = self.earth.as_ref().map(|t| t.id());
                 let outlines = self.grid_outlines();
                 match self.graph.feeder(i, "location") {
                     None => {
-                        ui.colored_label(DIM, "wire a location into this node: ENF, Manual data or the Result record");
-                        draw_area_map(ui, None, &outlines);
+                        ui.colored_label(DIM, "wire a location into this node: ENF, Manual data, Combine, Invert or the Result record");
+                        draw_area_map(ui, earth, None, &outlines);
                     }
                     Some((from, _)) => match self.area_from(from) {
                         Ok((a, note)) => {
                             let lab = &self.nodes[from].label;
-                            ui.label(format!("{lab}: {:.2} % of Earth kept ({:.1} million km²)", a.fraction() * 100.0, a.area_km2() / 1e6));
-                            ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { DIM }, note);
-                            draw_area_map(ui, Some(&a), &outlines);
+                            let al = a.allowed();
+                            ui.label(format!(
+                                "{lab}: {} · {:.2} % of Earth still possible ({:.1} million km²)",
+                                if a.add { "adds (green: here)" } else { "subtracts (red: not here)" },
+                                al.fraction() * 100.0,
+                                al.area_km2() / 1e6
+                            ));
+                            ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { DIM }, note);
+                            draw_area_map(ui, earth, Some(&a), &outlines);
                         }
                         Err(e) => {
                             ui.colored_label(DIM, format!("{}: {e}", self.nodes[from].label));
-                            draw_area_map(ui, None, &outlines);
+                            draw_area_map(ui, earth, None, &outlines);
                         }
                     },
                 }
@@ -1578,6 +1661,9 @@ fn plugin_window(ui: &mut egui::Ui, st: &Shared) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.earth.is_none() {
+            self.earth = Some(load_earth(ui.ctx()));
+        }
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
         });
@@ -1666,7 +1752,7 @@ impl App {
         if steps.is_empty() {
             ui.colored_label(DIM, "wire areas (ENF location, Manual place) into the location inputs to subtract from the world");
         }
-        draw_area_map(ui, Some(&m), &self.grid_outlines());
+        draw_area_map(ui, self.earth.as_ref().map(|t| t.id()), Some(&Area::add(m)), &self.grid_outlines());
     }
 }
 
@@ -1685,16 +1771,16 @@ impl App {
     }
 }
 
-const KEPT: Color32 = Color32::from_rgb(70, 170, 90);
-const CUT: Color32 = Color32::from_rgb(170, 55, 55);
+const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
+const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
 
 /// A world map in the Robinson projection. Green: cells the area keeps (where it adds
 /// possibility). Red: cells it rules out (where it subtracts). Grey: no area yet.
-fn draw_area_map(ui: &mut egui::Ui, area: Option<&WorldMask>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+fn draw_area_map(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option<&Area>, outlines: &[(f64, Vec<(f64, f64)>)]) {
     let w = ui.available_width().clamp(200.0, 1400.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w / ROBINSON_ASPECT as f32), Sense::hover());
     let p = ui.painter_at(rect);
-    paint_area_map(&p, rect, area, outlines);
+    paint_area_map(&p, rect, earth, area, outlines);
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
@@ -1716,7 +1802,7 @@ fn draw_area_map(ui: &mut egui::Ui, area: Option<&WorldMask>, outlines: &[(f64, 
     }
     ui.colored_label(
         DIM,
-        "green: kept (still possible) · red: ruled out · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · coastlines: Natural Earth 1:110m",
+        "green: an area that adds (the place is here) · red: an area that subtracts (not here) · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · image: NASA Blue Marble (public domain) · coastlines: Natural Earth 1:110m",
     );
 }
 
@@ -1739,40 +1825,66 @@ fn coastlines() -> &'static [Vec<(f64, f64)>] {
     })
 }
 
-fn paint_area_map(p: &egui::Painter, rect: Rect, area: Option<&WorldMask>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+fn paint_area_map(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area: Option<&Area>, outlines: &[(f64, Vec<(f64, f64)>)]) {
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
     };
-    // Cells, merged into runs per row: within a row the projection is linear in longitude,
-    // so a run is exactly a trapezoid.
-    let mut mesh = egui::epaint::Mesh::default();
-    for r in 0..ROWS {
-        let (top, bot) = (90.0 - r as f64, 89.0 - r as f64);
-        let mut c = 0;
-        while c < COLS {
-            let state = area.map(|a| a.get(r, c));
-            let a = c;
-            while c + 1 < COLS && area.map(|m| m.get(r, c + 1)) == state {
-                c += 1;
+    // The Earth image, warped from its plate carrée grid onto the Robinson shape in 2° × 4° patches.
+    match earth {
+        Some(tex) => {
+            let mut img = egui::epaint::Mesh::with_texture(tex);
+            for r in 0..90 {
+                let (t, b) = (90.0 - 2.0 * r as f64, 88.0 - 2.0 * r as f64);
+                for c in 0..90 {
+                    let (l, rt) = (-180.0 + 4.0 * c as f64, -176.0 + 4.0 * c as f64);
+                    let i = img.vertices.len() as u32;
+                    for (lat, lon) in [(t, l), (t, rt), (b, rt), (b, l)] {
+                        let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
+                        img.vertices.push(egui::epaint::Vertex { pos: at(lat, lon), uv, color: Color32::WHITE });
+                    }
+                    img.add_triangle(i, i + 1, i + 2);
+                    img.add_triangle(i, i + 2, i + 3);
+                }
             }
-            let (l, rt) = (a as f64 - 180.0, c as f64 - 179.0);
-            let col = match state {
-                Some(true) => KEPT,
-                Some(false) => CUT,
-                None => Color32::from_rgb(44, 48, 54),
-            };
-            let i = mesh.vertices.len() as u32;
-            for q in [at(top, l), at(top, rt), at(bot, rt), at(bot, l)] {
-                mesh.colored_vertex(q, col);
-            }
-            mesh.add_triangle(i, i + 1, i + 2);
-            mesh.add_triangle(i, i + 2, i + 3);
-            c += 1;
+            p.add(egui::Shape::mesh(img));
+        }
+        None => {
+            let pts: Vec<Pos2> = (0..=36).map(|j| at(90.0 - j as f64 * 5.0, 180.0)).chain((0..=36).map(|j| at(-90.0 + j as f64 * 5.0, -180.0))).collect();
+            p.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(44, 48, 54), Stroke::NONE));
         }
     }
-    p.add(egui::Shape::mesh(mesh));
-    let coast = Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 240, 235, 200));
+    // The area's cells, tinted over the image: green when it adds, red when it subtracts.
+    // Merged into runs per row: within a row the projection is linear in longitude, so a run is
+    // exactly a trapezoid.
+    if let Some(area) = area {
+        let tint = if area.add { KEPT } else { CUT };
+        let mut mesh = egui::epaint::Mesh::default();
+        for r in 0..ROWS {
+            let (top, bot) = (90.0 - r as f64, 89.0 - r as f64);
+            let mut c = 0;
+            while c < COLS {
+                if !area.cells.get(r, c) {
+                    c += 1;
+                    continue;
+                }
+                let a = c;
+                while c + 1 < COLS && area.cells.get(r, c + 1) {
+                    c += 1;
+                }
+                let (l, rt) = (a as f64 - 180.0, c as f64 - 179.0);
+                let i = mesh.vertices.len() as u32;
+                for q in [at(top, l), at(top, rt), at(bot, rt), at(bot, l)] {
+                    mesh.colored_vertex(q, tint);
+                }
+                mesh.add_triangle(i, i + 1, i + 2);
+                mesh.add_triangle(i, i + 2, i + 3);
+                c += 1;
+            }
+        }
+        p.add(egui::Shape::mesh(mesh));
+    }
+    let coast = Stroke::new(0.8, Color32::from_rgba_unmultiplied(235, 240, 235, 110));
     for line in coastlines() {
         let mut seg: Vec<Pos2> = Vec::new();
         for w in line.windows(2) {
@@ -1809,5 +1921,29 @@ fn paint_area_map(p: &egui::Painter, rect: Rect, area: Option<&WorldMask>, outli
         }
         let c = if *hz > 55.0 { Color32::from_rgb(255, 200, 120) } else { Color32::from_rgb(150, 200, 255) };
         p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, alpha(c, 0.8))));
+    }
+}
+
+/// NASA Blue Marble (public domain), 2048 × 1024 plate carrée, stored as a 256-colour palette
+/// followed by one palette index per pixel.
+fn load_earth(ctx: &egui::Context) -> TextureHandle {
+    const W: usize = 2048;
+    const H: usize = 1024;
+    let raw: &[u8] = include_bytes!("earth.idx");
+    let (pal, idx) = raw.split_at(768);
+    let mut px = Vec::with_capacity(W * H * 4);
+    for &i in &idx[..W * H] {
+        let k = i as usize * 3;
+        px.extend_from_slice(&[pal[k], pal[k + 1], pal[k + 2], 255]);
+    }
+    ctx.load_texture("earth", ColorImage::from_rgba_unmultiplied([W, H], &px), TextureOptions::LINEAR)
+}
+
+fn area_status(a: &Area) -> String {
+    let al = a.allowed();
+    if al.is_empty() {
+        "nothing possible: contradiction".into()
+    } else {
+        format!("{} · {:.1} % of Earth possible", if a.add { "adds" } else { "subtracts" }, al.fraction() * 100.0)
     }
 }

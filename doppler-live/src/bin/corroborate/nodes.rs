@@ -21,6 +21,10 @@ pub enum Kind {
     Record,
     /// Shows an area on a world map (Robinson projection).
     Map,
+    /// Several locations into one: all must hold (AND) or any may (OR).
+    Combine { any: bool },
+    /// Flips a location: what it added it now subtracts, and the other way round.
+    Invert,
 }
 
 pub const MANUAL_KEYS: [&str; 5] = ["date", "time", "place", "coordinates", "notes"];
@@ -28,6 +32,7 @@ pub const MANUAL_KEYS: [&str; 5] = ["date", "time", "place", "coordinates", "not
 /// Record inputs: findings from up to six nodes and facts from up to three.
 pub const RECORD_EVENTS: [&str; 6] = ["findings 1", "findings 2", "findings 3", "findings 4", "findings 5", "findings 6"];
 pub const RECORD_FACTS: [&str; 3] = ["facts 1", "facts 2", "facts 3"];
+pub const COMBINE_INPUTS: [&str; 4] = ["location 1", "location 2", "location 3", "location 4"];
 pub const RECORD_LOCATIONS: [&str; 3] = ["location 1", "location 2", "location 3"];
 
 impl Kind {
@@ -47,6 +52,9 @@ impl Kind {
             Kind::Plugin { path } => plugin_label(path),
             Kind::Record => "Result record".into(),
             Kind::Map => "Map".into(),
+            Kind::Combine { any: false } => "Combine locations (all)".into(),
+            Kind::Combine { any: true } => "Combine locations (any)".into(),
+            Kind::Invert => "Invert location".into(),
         }
     }
 
@@ -101,6 +109,18 @@ impl Kind {
                     .chain(RECORD_FACTS.iter().map(|n| Port::opt(n, Json)))
                     .chain(RECORD_LOCATIONS.iter().map(|n| Port::opt(n, Location)))
                     .collect(),
+                outputs: vec![Port::req("location", Location)],
+            },
+            Kind::Combine { .. } => NodeSpec {
+                name: "combine",
+                role: Role::Transform,
+                inputs: COMBINE_INPUTS.iter().map(|n| Port::opt(n, Location)).collect(),
+                outputs: vec![Port::req("location", Location)],
+            },
+            Kind::Invert => NodeSpec {
+                name: "invert",
+                role: Role::Transform,
+                inputs: vec![Port::req("location", Location)],
                 outputs: vec![Port::req("location", Location)],
             },
             Kind::Map => NodeSpec { name: "map", role: Role::View, inputs: vec![Port::req("location", Location)], outputs: vec![] },

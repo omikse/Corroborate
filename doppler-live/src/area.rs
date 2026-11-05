@@ -66,6 +66,14 @@ impl WorldMask {
         WorldMask { cells: self.cells.iter().zip(&o.cells).map(|(a, b)| *a && *b).collect() }
     }
 
+    pub fn or(&self, o: &WorldMask) -> WorldMask {
+        WorldMask { cells: self.cells.iter().zip(&o.cells).map(|(a, b)| *a || *b).collect() }
+    }
+
+    pub fn not(&self) -> WorldMask {
+        WorldMask { cells: self.cells.iter().map(|a| !a).collect() }
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.cells.iter().any(|&x| x)
     }
@@ -100,6 +108,34 @@ impl WorldMask {
             }
         }
         format!("[{}]", v.join(","))
+    }
+}
+
+/// A location signal: the cells it marks, and whether it adds them (the place is here: drawn
+/// green) or subtracts them (the place is not here: drawn red). Subtract(X) allows the same as
+/// Add(not X); inverting flips add and subtract and keeps the cells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Area {
+    pub cells: WorldMask,
+    pub add: bool,
+}
+
+impl Area {
+    pub fn add(cells: WorldMask) -> Self {
+        Self { cells, add: true }
+    }
+
+    /// The cells still possible under this signal alone.
+    pub fn allowed(&self) -> WorldMask {
+        if self.add {
+            self.cells.clone()
+        } else {
+            self.cells.not()
+        }
+    }
+
+    pub fn inverted(&self) -> Area {
+        Area { cells: self.cells.clone(), add: !self.add }
     }
 }
 
@@ -206,6 +242,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn invert_flips_what_is_allowed() {
+        let c = WorldMask::circle(50.0, 10.0, 500.0);
+        let a = Area::add(c.clone());
+        assert_eq!(a.allowed(), c);
+        assert_eq!(a.inverted().allowed(), c.not());
+        assert_eq!(a.inverted().inverted(), a);
+        assert!(a.allowed().and(&a.inverted().allowed()).is_empty());
+    }
 
     #[test]
     fn world_is_whole_earth() {

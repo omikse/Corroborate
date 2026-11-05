@@ -41,9 +41,15 @@ the Planes node: [docs/doppler-view.md](docs/doppler-view.md).
 
 A location is a mask of 1° cells (`doppler-live/src/area.rs`). The Result record starts with the
 whole world and keeps only the cells every area wired into its `location` inputs allows. An empty
-result is shown as a contradiction, not hidden. The **Map** node draws any location in the Robinson
-projection: green where it is still possible, red where it is ruled out, with Natural Earth 1:110m
-coastlines (public domain) built into the program.
+result is shown as a contradiction, not hidden.
+
+Every location signal either **adds** its cells (the place is here: green) or **subtracts** them
+(the place is not here: red). Location nodes:
+- **Combine locations**: what several locations still allow, all of them (AND) or any (OR).
+- **Invert location**: flips adds and subtracts on the same cells.
+- **Map**: draws a location over the Earth in the Robinson projection, in the node and in its
+  window. Image: NASA Blue Marble (public domain, 2048 × 1024, stored as `earth.idx`, a 256-colour
+  palette and one byte per pixel); coastlines: Natural Earth 1:110m (public domain).
 
 ## Other code
 
