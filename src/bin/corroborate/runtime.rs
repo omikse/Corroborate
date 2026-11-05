@@ -31,6 +31,7 @@ pub struct NodeState {
     pub planes: PlanesState,
     pub enf: EnfState,
     pub plugin: PluginState,
+    pub source: source_node::SourceState,
 }
 
 impl NodeState {
@@ -115,6 +116,11 @@ fn run(job: Job) {
         }
     };
 
+    // Metadata and pictures for the SOURCER's own view and outputs (not for microphones).
+    if !matches!(job.input, Input::Mic(_)) {
+        source_node::start_side(ff_input.clone(), key.clone(), live, job.source.clone(), job.stop.clone());
+    }
+
     // UTC anchor: file metadata or our recording sidecar for files; for live sources the PC
     // clock at first audio, upgraded to the stream's own capture times when it has them.
     let anchor: SharedAnchor = Default::default();
@@ -173,6 +179,7 @@ fn run(job: Job) {
         let mut s = job.source.lock().unwrap();
         s.anchor = an;
         s.audio_s = audio_s;
+        s.source.push_audio(&x);
         s.status = if live { "live".into() } else { "decoding…".into() };
     }
     let _ = child.wait();

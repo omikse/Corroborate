@@ -114,6 +114,29 @@ impl Graph {
         self.wires.len() != before
     }
 
+    /// Give node `id` new outputs (a source whose outputs follow what it opens). Wires keep their
+    /// output by name; wires from an output that is gone are removed.
+    pub fn set_outputs(&mut self, id: NodeId, outputs: Vec<crate::core::Port>) {
+        let Some(node) = self.nodes.get_mut(id) else { return };
+        if node.spec.outputs == outputs {
+            return;
+        }
+        let old = std::mem::replace(&mut node.spec.outputs, outputs);
+        let new = &node.spec.outputs;
+        self.wires.retain_mut(|w| {
+            if w.from != id {
+                return true;
+            }
+            match new.iter().position(|p| p.name == old[w.from_port].name && p.kind == old[w.from_port].kind) {
+                Some(k) => {
+                    w.from_port = k;
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+
     /// Names of the inputs of `id` that have a wire.
     pub fn connected_inputs(&self, id: NodeId) -> Vec<&'static str> {
         let Some(node) = self.nodes.get(id) else { return Vec::new() };

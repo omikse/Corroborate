@@ -51,7 +51,7 @@ impl Kind {
 
     pub fn spec(&self) -> NodeSpec {
         match self {
-            Kind::Source { .. } => source::spec(),
+            Kind::Source { input } => source::spec_for(input),
             Kind::Manual { .. } => manual::spec(),
             Kind::Planes => planes::spec(),
             Kind::Enf { .. } => enf::spec(),

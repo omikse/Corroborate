@@ -559,7 +559,7 @@ impl App {
                 Kind::GridFrequencies { path } => grid_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
                 Kind::Manual { rows } => manual_node::json(rows),
-                Kind::Source { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
+                Kind::Source { .. } => source_node::json(&s),
                 Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
                 Kind::Record => {
                     drop(s);
@@ -702,6 +702,9 @@ impl App {
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));
 
         let trail = self.selected.and_then(|s| self.graph.trail(s).ok()).unwrap_or_default();
+        // Wires out of a node fed by a running live stream pulse in the direction of flow.
+        let live: Vec<bool> = self.nodes.iter().map(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false)).collect();
+        let now = ui.input(|i| i.time);
         for w in self.graph.wires() {
             let kind = self.graph.nodes()[w.from].spec.outputs[w.from_port].kind;
             let a = self.port_pos(origin, w.from, w.from_port, true);
@@ -709,12 +712,13 @@ impl App {
             let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
             let lit = trail.contains(&w.from) && trail.contains(&w.to);
             let col = if self.selected.is_some() && !lit { alpha(kind_color(kind), 0.2) } else { kind_color(kind) };
-            painter.add(CubicBezierShape::from_points_stroke(
-                [a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b],
-                false,
-                Color32::TRANSPARENT,
-                Stroke::new(if lit { 2.6 } else { 1.7 }, col),
-            ));
+            let pts = [a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b];
+            let width = if lit { 2.6 } else { 1.7 };
+            if live[w.from] {
+                vein(&painter, pts, col, width * self.zoom, now, self.zoom);
+            } else {
+                painter.add(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(width, col)));
+            }
         }
 
         let mut clicked = None;
@@ -1064,6 +1068,30 @@ fn describe(e: &GraphError) -> String {
     }
 }
 
+/// A wire carrying a live signal: a thin line with swellings that travel from output to input,
+/// like a pulse in a vein.
+fn vein(painter: &egui::Painter, pts: [Pos2; 4], col: Color32, width: f32, now: f64, zoom: f32) {
+    const N: usize = 64;
+    let at = |t: f32| {
+        let u = 1.0 - t;
+        (pts[0].to_vec2() * u * u * u + pts[1].to_vec2() * 3.0 * u * u * t + pts[2].to_vec2() * 3.0 * u * t * t + pts[3].to_vec2() * t * t * t).to_pos2()
+    };
+    let line: Vec<Pos2> = (0..=N).map(|k| at(k as f32 / N as f32)).collect();
+    let mut along = 0.0f32;
+    let spacing = 70.0 * zoom;
+    for s in line.windows(2) {
+        let (p, q) = (s[0], s[1]);
+        let len = p.distance(q);
+        let mid = along + len * 0.5;
+        along += len;
+        // Phase falls behind with time, so each crest moves towards the input.
+        let phase = (mid / spacing) as f64 - now * 1.6;
+        let v = (0.5 + 0.5 * (phase * std::f64::consts::TAU).cos()).powi(6) as f32;
+        painter.line_segment([p, q], Stroke::new(width * (2.5 + 5.0 * v), alpha(col, 0.10 * v)));
+        painter.line_segment([p, q], Stroke::new(width * (0.8 + 1.6 * v), alpha(col, 0.45 + 0.55 * v)));
+    }
+}
+
 /// What a source node shows under its controls: status, audio so far, and its UTC clock.
 fn source_info(ui: &mut egui::Ui, st: &Shared) {
     let s = st.lock().unwrap();
@@ -1148,7 +1176,9 @@ impl eframe::App for App {
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();
         }
-        ctx.request_repaint_after(Duration::from_millis(if running { 200 } else { 1000 }));
+        // Live wires pulse: redraw smoothly while a live stream runs.
+        let live = self.nodes.iter().any(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false));
+        ctx.request_repaint_after(Duration::from_millis(if live { 33 } else if running { 200 } else { 1000 }));
     }
 }
 
