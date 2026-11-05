@@ -281,6 +281,7 @@ impl App {
                 Kind::Manual { .. } => ("manual", String::new()),
                 Kind::Planes => ("planes", String::new()),
                 Kind::Enf => ("enf", String::new()),
+                Kind::GridFrequencies => ("grid-frequencies", String::new()),
                 Kind::Plugin { path } => ("plugin", path.clone()),
                 Kind::Record => ("record", String::new()),
             };
@@ -323,6 +324,7 @@ impl App {
                         "manual" => Kind::Manual { rows: Vec::new() },
                         "planes" => Kind::Planes,
                         "enf" => Kind::Enf,
+                        "grid-frequencies" => Kind::GridFrequencies,
                         "plugin" => Kind::Plugin { path: p },
                         "record" => Kind::Record,
                         _ => continue,
@@ -593,6 +595,10 @@ impl App {
         }
         if ui.button("Power hum (ENF)").clicked() {
             pick = Some(Kind::Enf);
+        }
+        ui.label(egui::RichText::new("DATA").small().color(DIM));
+        if ui.button("Grid frequencies").clicked() {
+            pick = Some(Kind::GridFrequencies);
         }
         ui.label(egui::RichText::new("PLUGINS").small().color(DIM));
         for p in nodes::bundled_plugins() {

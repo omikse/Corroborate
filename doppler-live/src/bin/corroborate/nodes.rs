@@ -14,6 +14,8 @@ pub enum Kind {
     Manual { rows: Vec<(String, String)> },
     Planes,
     Enf,
+    /// Grid frequency map (50/60 Hz zones by region) for ENF geolocation.
+    GridFrequencies,
     /// A separate program speaking the plugin protocol (meta-plugin, adsb-check, …).
     Plugin { path: String },
     Record,
@@ -38,6 +40,7 @@ impl Kind {
             Kind::Manual { .. } => "Manual data".into(),
             Kind::Planes => "Planes (Doppler)".into(),
             Kind::Enf => "Power hum (ENF)".into(),
+            Kind::GridFrequencies => "Grid frequencies (50/60 Hz)".into(),
             Kind::Plugin { path } => plugin_label(path),
             Kind::Record => "Result record".into(),
         }
@@ -65,8 +68,19 @@ impl Kind {
             Kind::Enf => NodeSpec {
                 name: "enf",
                 role: Role::Detector,
-                inputs: vec![Port::req("audio", Audio), Port::opt("time", Time)],
-                outputs: vec![Port::req("hum", Event)],
+                inputs: vec![
+                    Port::req("audio", Audio),
+                    Port::req("grid", Json),
+                    Port::opt("time", Time),
+                    Port::opt("location", Location),
+                ],
+                outputs: vec![Port::req("hum", Event), Port::req("location", Location)],
+            },
+            Kind::GridFrequencies => NodeSpec {
+                name: "grid-frequencies",
+                role: Role::Source(SourceKind::Reference),
+                inputs: vec![],
+                outputs: vec![Port::req("data", Json)],
             },
             Kind::Plugin { .. } => NodeSpec {
                 name: "plugin",

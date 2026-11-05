@@ -1,0 +1,117 @@
+{
+  "version": "1.0",
+  "source": "IEC 50001 and regional power grid standards",
+  "generated": "2026-11-05",
+  "regions": [
+    {
+      "id": "Europe",
+      "frequency_hz": 50.0,
+      "coverage": "continental",
+      "bounds": [
+        [35.0, -10.0],
+        [35.0, 40.0],
+        [71.0, 40.0],
+        [71.0, -10.0]
+      ]
+    },
+    {
+      "id": "Africa",
+      "frequency_hz": 50.0,
+      "coverage": "continental",
+      "bounds": [
+        [-35.0, -20.0],
+        [-35.0, 55.0],
+        [37.0, 55.0],
+        [37.0, -20.0]
+      ]
+    },
+    {
+      "id": "Asia-50Hz",
+      "frequency_hz": 50.0,
+      "coverage": "regional",
+      "bounds": [
+        [5.0, 40.0],
+        [5.0, 180.0],
+        [60.0, 180.0],
+        [60.0, 40.0]
+      ]
+    },
+    {
+      "id": "Japan-West",
+      "frequency_hz": 50.0,
+      "coverage": "country_region",
+      "bounds": [
+        [30.0, 130.0],
+        [41.0, 130.0],
+        [41.0, 137.0],
+        [30.0, 137.0]
+      ]
+    },
+    {
+      "id": "Japan-East",
+      "frequency_hz": 60.0,
+      "coverage": "country_region",
+      "bounds": [
+        [30.0, 137.0],
+        [41.0, 137.0],
+        [41.0, 145.0],
+        [30.0, 145.0]
+      ]
+    },
+    {
+      "id": "USA-and-Canada",
+      "frequency_hz": 60.0,
+      "coverage": "continental",
+      "bounds": [
+        [15.0, -170.0],
+        [15.0, -50.0],
+        [85.0, -50.0],
+        [85.0, -170.0]
+      ]
+    },
+    {
+      "id": "Central-America-and-Caribbean",
+      "frequency_hz": 60.0,
+      "coverage": "regional",
+      "bounds": [
+        [10.0, -95.0],
+        [10.0, -60.0],
+        [25.0, -60.0],
+        [25.0, -95.0]
+      ]
+    },
+    {
+      "id": "South-America",
+      "frequency_hz": 60.0,
+      "coverage": "continental",
+      "bounds": [
+        [-56.0, -82.0],
+        [-56.0, -35.0],
+        [13.0, -35.0],
+        [13.0, -82.0]
+      ]
+    },
+    {
+      "id": "Australia",
+      "frequency_hz": 50.0,
+      "coverage": "continental",
+      "bounds": [
+        [-44.0, 113.0],
+        [-44.0, 154.0],
+        [-10.0, 154.0],
+        [-10.0, 113.0]
+      ]
+    },
+    {
+      "id": "New-Zealand",
+      "frequency_hz": 50.0,
+      "coverage": "country",
+      "bounds": [
+        [-47.0, 166.0],
+        [-47.0, 179.0],
+        [-34.0, 179.0],
+        [-34.0, 166.0]
+      ]
+    }
+  ]
+}
