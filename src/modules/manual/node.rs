@@ -25,7 +25,7 @@ pub fn status(rows: &[(String, String)]) -> String {
 }
 
 pub fn window(ui: &mut egui::Ui, i: NodeId, rows: &mut Vec<(String, String)>) {
-    ui.colored_label(DIM, "Facts you know. Wired into a plugin, they are passed to it at Run (coordinates as lat, lon; elevation in m).");
+    ui.colored_label(DIM, "Facts you know. Wired into a plugin, they are passed to it when it starts (coordinates as lat, lon; elevation in m).");
     let mut remove = None;
     egui::Grid::new(("manual", i)).num_columns(3).show(ui, |ui| {
         for (r, (k, v)) in rows.iter_mut().enumerate() {

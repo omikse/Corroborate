@@ -137,6 +137,25 @@ impl Graph {
         });
     }
 
+    /// Give node `id` open inputs that take any kind (the Result record): its wired inputs first,
+    /// packed in order, then one free input, as many as `names` holds.
+    pub fn pack_any_inputs(&mut self, id: NodeId, names: &[&'static str]) {
+        let Some(node) = self.nodes.get_mut(id) else { return };
+        let mut mine: Vec<usize> = self.wires.iter().enumerate().filter(|(_, w)| w.to == id).map(|(k, _)| k).collect();
+        mine.sort_by_key(|&k| self.wires[k].to_port);
+        mine.truncate(names.len());
+        for (slot, &k) in mine.iter().enumerate() {
+            self.wires[k].to_port = slot;
+        }
+        let n = (mine.len() + 1).min(names.len());
+        let inputs: Vec<crate::core::Port> = names[..n].iter().map(|s| crate::core::Port::opt(s, crate::core::PortKind::Any)).collect();
+        if node.spec.inputs != inputs {
+            node.spec.inputs = inputs;
+        }
+        let keep = node.spec.inputs.len();
+        self.wires.retain(|w| w.to != id || w.to_port < keep);
+    }
+
     /// Names of the inputs of `id` that have a wire.
     pub fn connected_inputs(&self, id: NodeId) -> Vec<&'static str> {
         let Some(node) = self.nodes.get(id) else { return Vec::new() };

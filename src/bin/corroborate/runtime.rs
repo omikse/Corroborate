@@ -69,6 +69,8 @@ pub struct Job {
     pub stop: Arc<AtomicBool>,
     /// Working folder for plugins (adsb-check writes its flight log there).
     pub work_dir: std::path::PathBuf,
+    /// WAV files recording this source's audio (Result record nodes add and remove them).
+    pub taps: crate::record_node::Taps,
 }
 
 pub fn start(job: Job) {
@@ -180,6 +182,9 @@ fn run(job: Job) {
         s.anchor = an;
         s.audio_s = audio_s;
         s.source.push_audio(&x);
+        for (_, w) in job.taps.lock().unwrap().iter_mut() {
+            w.push(&x);
+        }
         s.status = if live { "live".into() } else { "decoding…".into() };
     }
     let _ = child.wait();

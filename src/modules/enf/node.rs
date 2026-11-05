@@ -200,7 +200,7 @@ fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)], ran: b
         }
     }
     if t0 >= t1 || y0 > y1 {
-        let note = if ran { "listening: no hum reading yet" } else { "no hum yet: press Run" };
+        let note = if ran { "listening: no hum reading yet" } else { "no hum yet: waiting for audio" };
         p.text(rect.center(), Align2::CENTER_CENTER, note, font, DIM);
         return;
     }

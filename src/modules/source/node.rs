@@ -409,7 +409,7 @@ fn video(app: &mut App, ui: &mut egui::Ui, i: NodeId, st: &Shared, cursor: Optio
 }
 
 /// Seconds as H:MM:SS (or M:SS under an hour).
-fn fmt_secs(t: f64) -> String {
+pub fn fmt_secs(t: f64) -> String {
     let t = t.max(0.0) as u64;
     if t >= 3600 {
         format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)

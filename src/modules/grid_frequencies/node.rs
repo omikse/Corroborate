@@ -55,7 +55,7 @@ pub fn window(ui: &mut egui::Ui, path: &mut String) {
     if path.trim().is_empty() {
         ui.colored_label(DIM, format!("bundled file: {}", bundled_file()));
     }
-    ui.colored_label(DIM, "Swap the file to use other grid data. Read at each Run.");
+    ui.colored_label(DIM, "Swap the file to use other grid data. Read when the graph (re)starts.");
 }
 
 pub fn json(path: &str) -> String {

@@ -1,5 +1,5 @@
 //! Corroborate: the workbench. Sources, detectors and plugins are nodes in a graph; wires
-//! decide what feeds what. Run starts every source; each node's window shows its raw data;
+//! decide what feeds what. the graph runs always (a change restarts it); each node's window shows its raw data;
 //! the timeline shows every finding on one clock with its time error; the Record node keeps
 //! a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
 //!
@@ -175,6 +175,8 @@ struct NodeData {
     state: Shared,
     /// Deleted from the workspace (ids stay stable; a deleted node has no wires).
     hidden: bool,
+    /// WAV files this source's audio is being recorded into (by Result record nodes).
+    taps: record_node::Taps,
 }
 
 fn project_file() -> Option<PathBuf> {
@@ -210,9 +212,12 @@ struct App {
     wiring: Option<(NodeId, usize)>,
     msg: String,
     stop: Option<Arc<AtomicBool>>,
-    result_file: Option<PathBuf>,
-    last_save: Instant,
-    saved_note: String,
+    /// Recordings in progress, by record node, and each record's last note.
+    recordings: HashMap<NodeId, record_node::Recording>,
+    record_notes: HashMap<NodeId, String>,
+    /// What the running graph was started from; a change (held for a moment) restarts it.
+    run_sig: Option<String>,
+    sig_seen: (String, Instant),
     textures: HashMap<NodeId, (u64, f64, TextureHandle)>,
     lut: [[u8; 4]; 256],
     /// Timeline view (UTC seconds when anchored, else source seconds), and whether it follows the end.
@@ -245,9 +250,10 @@ impl App {
             wiring: None,
             msg: String::new(),
             stop: None,
-            result_file: None,
-            last_save: Instant::now(),
-            saved_note: String::new(),
+            recordings: HashMap::new(),
+            record_notes: HashMap::new(),
+            run_sig: None,
+            sig_seen: (String::new(), Instant::now()),
             textures: HashMap::new(),
             lut: colormap(),
             tl: (0.0, 600.0),
@@ -283,7 +289,7 @@ impl App {
 
     fn add(&mut self, kind: Kind, pos: Pos2) -> NodeId {
         let id = self.graph.add(kind.default_label(), kind.spec());
-        self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false });
+        self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default() });
         id
     }
 
@@ -306,12 +312,12 @@ impl App {
         let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(240.0, 140.0));
         let inv = self.add(Kind::Invert, Pos2::new(810.0, 20.0));
         let map_inv = self.add(Kind::Map, Pos2::new(1060.0, 20.0));
-        let rec = self.add(Kind::Record, Pos2::new(810.0, 300.0));
+        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(810.0, 300.0));
         let map_rec = self.add(Kind::Map, Pos2::new(1060.0, 330.0));
         self.wire(src, "audio", enf, "audio");
         self.wire(enf, "location", inv, "location");
         self.wire(inv, "location", map_inv, "location");
-        self.wire(enf, "location", rec, nodes::RECORD_LOCATIONS[0]);
+        self.wire_record(enf, "location", rec);
         self.wire(rec, "location", map_rec, "location");
         self.save_project();
         self.run();
@@ -359,14 +365,14 @@ impl App {
         self.nodes[man].label = "Stream site".into();
         let planes = self.add(Kind::Planes, Pos2::new(480.0, 40.0));
         let a = self.add(Kind::Plugin { path: adsb }, Pos2::new(480.0, 560.0));
-        let rec = self.add(Kind::Record, Pos2::new(1100.0, 560.0));
+        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(1100.0, 560.0));
         self.wire(src, "audio", planes, "audio");
         self.wire(src, "audio", a, "audio");
         self.wire(src, "time", a, "time");
         self.wire(man, "place", a, "place");
-        self.wire(planes, "aircrafts", rec, nodes::RECORD_EVENTS[0]);
-        self.wire(a, "findings", rec, nodes::RECORD_EVENTS[2]);
-        self.wire(man, "facts", rec, nodes::RECORD_FACTS[0]);
+        self.wire_record(planes, "aircrafts", rec);
+        self.wire_record(a, "findings", rec);
+        self.wire_record(man, "facts", rec);
         self.save_project();
         self.run();
         self.msg = format!(
@@ -382,18 +388,18 @@ impl App {
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 300.0));
         let planes = self.add(Kind::Planes, Pos2::new(300.0, 30.0));
         let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(300.0, 140.0));
-        let rec = self.add(Kind::Record, Pos2::new(880.0, 60.0));
+        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(880.0, 60.0));
 
         // Wire Planes
         self.wire(src, "audio", planes, "audio");
-        self.wire(planes, "aircrafts", rec, nodes::RECORD_EVENTS[0]);
+        self.wire_record(planes, "aircrafts", rec);
 
         // Wire ENF
         self.wire(src, "audio", enf, "audio");
-        self.wire(enf, "location", rec, nodes::RECORD_LOCATIONS[0]);
+        self.wire_record(enf, "location", rec);
 
         // Wire Manual data
-        self.wire(man, "facts", rec, nodes::RECORD_FACTS[0]);
+        self.wire_record(man, "facts", rec);
 
         // ADS-B check if available
         let bundled = plugin_node::bundled();
@@ -402,7 +408,7 @@ impl App {
             self.wire(src, "audio", a, "audio");
             self.wire(src, "time", a, "time");
             self.wire(man, "place", a, "place");
-            self.wire(a, "findings", rec, nodes::RECORD_EVENTS[2]);
+            self.wire_record(a, "findings", rec);
         }
     }
 
@@ -469,9 +475,15 @@ impl App {
         }
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                let _ = self.graph.connect(a, &o, b, &i);
+                if matches!(self.nodes[b].kind, Kind::Record { .. }) {
+                    // Old projects named the record's inputs by kind: any name takes the free input.
+                    self.wire_record(a, &o, b);
+                } else {
+                    let _ = self.graph.connect(a, &o, b, &i);
+                }
             }
         }
+        self.sync_record_ports();
         // Graph labels follow the node labels.
         true
     }
@@ -498,7 +510,7 @@ impl App {
         match &n.kind {
             Kind::Enf { .. } => enf_node::area_out(&n.state),
             Kind::Manual { rows } => manual_node::area_out(rows),
-            Kind::Record => self.record_area_out(from),
+            Kind::Record { .. } => self.record_area_out(from),
             Kind::Combine { any } => self.combine_area_out(from, *any),
             Kind::Invert => self.invert_area_out(from),
             _ => Err("this node gives no area".into()),
@@ -537,6 +549,7 @@ impl App {
                 plugins: Vec::new(),
                 stop: stop.clone(),
                 work_dir: dir.clone(),
+                taps: n.taps.clone(),
             };
             for (t, _) in self.graph.targets(i, "audio") {
                 let tn = &self.nodes[t];
@@ -553,15 +566,54 @@ impl App {
             runtime::start(job);
             started += 1;
         }
+        self.run_sig = Some(self.run_signature());
         if started == 0 {
-            self.msg = "no source to run: set a file, URL or microphone in a source node".into();
             return;
         }
         self.stop = Some(stop);
-        self.result_file = Some(dir.join(format!("corroborate-{}.json", timebase::utc_stamp(timebase::now_unix()))));
-        self.last_save = Instant::now();
         self.follow = true;
-        self.msg = format!("running {started} source(s); results kept in {}", dir.display());
+        self.msg = format!("running {started} source(s)");
+    }
+
+    /// What a run is made of: each source's input and what its audio feeds. The graph runs
+    /// always; when this changes (and stays changed for a moment, while typing) it restarts.
+    fn run_signature(&self) -> String {
+        let mut s = String::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.hidden {
+                continue;
+            }
+            if let Kind::Source { input } = &n.kind {
+                s.push_str(&format!("{i}:{input}|"));
+                for (t, _) in self.graph.targets(i, "audio") {
+                    s.push_str(&format!("{t}:{}:{};", self.nodes[t].kind.spec().name, self.nodes[t].kind.saved_param()));
+                }
+            }
+            if let Kind::Manual { rows } = &n.kind {
+                // Plugins read the place when they start.
+                if self.graph.targets(i, "place").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
+                    s.push_str(&format!("{i}:{rows:?}|"));
+                }
+            }
+        }
+        s
+    }
+
+    /// Start or restart the graph when what it runs from has changed.
+    fn keep_running(&mut self) {
+        let sig = self.run_signature();
+        if self.run_sig.as_ref() == Some(&sig) {
+            return;
+        }
+        if self.sig_seen.0 != sig {
+            self.sig_seen = (sig, Instant::now());
+            if self.run_sig.is_some() {
+                return;
+            }
+        }
+        if self.run_sig.is_none() || self.sig_seen.1.elapsed() > Duration::from_millis(1200) {
+            self.run();
+        }
     }
 
     fn stop_all(&mut self) {
@@ -572,10 +624,11 @@ impl App {
 
     // ---------------- result record
 
-    fn result_json(&self) -> String {
+    /// The result JSON of nodes `ids`: each with its results, and the wires between them.
+    fn result_json(&self, ids: &[NodeId]) -> String {
         let mut nodes_j = Vec::new();
         for (i, n) in self.nodes.iter().enumerate() {
-            if n.hidden {
+            if n.hidden || !ids.contains(&i) {
                 continue;
             }
             let s = n.state.lock().unwrap();
@@ -604,7 +657,7 @@ impl App {
                 Kind::Manual { rows } => manual_node::json(rows),
                 Kind::Source { .. } => source_node::json(&s),
                 Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
-                Kind::Record => {
+                Kind::Record { .. } => {
                     drop(s);
                     self.record_json(i)
                 }
@@ -616,6 +669,7 @@ impl App {
             .graph
             .wires()
             .iter()
+            .filter(|w| ids.contains(&w.from) && ids.contains(&w.to))
             .map(|w| {
                 format!(
                     "{{\"from\":{},\"out\":\"{}\",\"to\":{},\"in\":\"{}\"}}",
@@ -632,21 +686,6 @@ impl App {
             nodes_j.join(",\n"),
             wires.join(",")
         )
-    }
-
-    fn save_result(&mut self) {
-        if !self.nodes.iter().any(|n| !n.hidden && matches!(n.kind, Kind::Record)) {
-            return;
-        }
-        let Some(path) = self.result_file.clone() else { return };
-        let tmp = path.with_extension("json.tmp");
-        let text = self.result_json();
-        let r = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path));
-        self.saved_note = match r {
-            Ok(()) => format!("saved {} UTC", fmt_clock(timebase::now_unix())),
-            Err(e) => format!("could not save: {e}"),
-        };
-        self.last_save = Instant::now();
     }
 
     // ---------------- graph
@@ -829,7 +868,7 @@ impl App {
                             Ok((a, _)) => map_node::area_status(&a),
                             Err(e) => e,
                         },
-                        Kind::Record => self.record_status(i),
+                        Kind::Record { .. } => self.record_status(i),
                         _ => s.status.clone(),
                     };
                     (st, s.running)
@@ -846,15 +885,30 @@ impl App {
             let missing = self.graph.missing(i);
             for (k, p) in spec.inputs.iter().enumerate() {
                 let c = self.port_pos(origin, i, k, false);
-                let col = kind_color(p.kind);
-                if p.required {
+                // An input that takes anything: grey and open until wired, then the wired kind's colour and name.
+                let fed = (p.kind == PortKind::Any).then(|| self.graph.feeder(i, p.name)).flatten();
+                let fed_kind = fed.and_then(|(f, o)| self.graph.nodes()[f].spec.outputs.iter().find(|x| x.name == o).map(|x| x.kind));
+                let col = match fed_kind {
+                    Some(fk) => kind_color(fk),
+                    None if p.kind == PortKind::Any => Color32::from_rgb(110, 116, 124),
+                    None => kind_color(p.kind),
+                };
+                let name: String = match (fed, fed_kind) {
+                    (Some((_, o)), Some(fk)) => format!("{o} · {}", corroborate::modules::record::kind_name(fk)),
+                    _ if p.kind == PortKind::Any => "+".into(),
+                    _ => p.name.into(),
+                };
+                if fed_kind.is_some() {
+                    painter.circle_filled(c, 5.0 * self.zoom, col);
+                } else if p.required {
                     painter.circle_filled(c, 5.0 * self.zoom, col);
                 } else {
                     painter.circle_filled(c, 5.0 * self.zoom, NODE);
                     painter.circle_stroke(c, 4.5 * self.zoom, Stroke::new(1.6 * self.zoom, col));
                 }
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
-                painter.text(c + Vec2::new(10.0 * self.zoom, 0.0), Align2::LEFT_CENTER, p.name, FontId::proportional(11.5 * self.zoom), nc);
+                let nc = if fed_kind.is_some() { tc } else { nc };
+                painter.text(c + Vec2::new(10.0 * self.zoom, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(11.5 * self.zoom), nc);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click());
                 if pr.secondary_clicked() {
                     unwire = Some((i, p.name));
@@ -894,6 +948,7 @@ impl App {
                     match self.graph.connect(n, out, t, inp) {
                         Ok(()) => {
                             self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[n].label, self.nodes[t].label);
+                            self.sync_record_ports();
                             self.save_project();
                         }
                         Err(e) => self.msg = describe(&e),
@@ -905,12 +960,17 @@ impl App {
         if let Some((i, name)) = unwire {
             if self.graph.disconnect(i, name) {
                 self.msg = format!("unwired {}.{name}", self.nodes[i].label);
+                self.sync_record_ports();
                 self.save_project();
             }
         }
         if let Some(i) = delete {
+            if self.recordings.contains_key(&i) {
+                self.record_end(i);
+            }
             self.graph.isolate(i);
             self.nodes[i].hidden = true;
+            self.sync_record_ports();
             self.selected = None;
             self.save_project();
         }
@@ -1056,12 +1116,8 @@ impl App {
             ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
             ui.separator();
             if self.mode == Mode::Work {
-                let running = self.running();
-                if running {
-                    if ui.button(egui::RichText::new("■ Stop").color(LIVE)).clicked() {
-                        self.stop_all();
-                    }
-                } else if ui.button(egui::RichText::new("▶ Run").color(GOOD)).clicked() {
+                // The graph runs always: changes restart it. Recording is in the Result record node.
+                if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
                     self.run();
                 }
                 ui.menu_button("Add node", |ui| {
@@ -1212,14 +1268,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         let running = self.running();
-        if self.result_file.is_some() && self.last_save.elapsed() > Duration::from_secs(if running { 30 } else { 3600 * 24 }) {
-            self.save_result();
-        }
-        // Save once more right after the run ends.
-        if !running && self.stop.is_some() {
-            self.stop = None;
-            self.save_result();
-        }
+        self.keep_running();
+        self.record_tick();
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();
         }
@@ -1269,8 +1319,8 @@ mod canvas_timing {
         let man = app.add(Kind::Manual { rows }, Pos2::new(20.0, 420.0));
         let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
         app.wire(man, "place", inv, "location");
-        let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record)).expect("default project has a record");
-        app.wire(man, "place", rec, nodes::RECORD_LOCATIONS[1]);
+        let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record { .. })).expect("default project has a record");
+        app.wire_record(man, "place", rec);
         for (k, from, out) in [(0, man, "place"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));
             app.wire(from, out, m, "location");

@@ -17,7 +17,8 @@ pub enum Kind {
     GridFrequencies { path: String },
     /// A separate program speaking the plugin protocol (meta-plugin, adsb-check, …).
     Plugin { path: String },
-    Record,
+    /// The folder results are saved in (empty: results next to the program).
+    Record { folder: String },
     /// Shows an area on a world map (Robinson projection).
     Map,
     /// Several locations into one: all must hold (AND) or any may (OR).
@@ -27,7 +28,7 @@ pub enum Kind {
 }
 
 pub use combine::INPUTS as COMBINE_INPUTS;
-pub use record::{EVENTS as RECORD_EVENTS, FACTS as RECORD_FACTS, LOCATIONS as RECORD_LOCATIONS};
+pub use record::INPUTS as RECORD_INPUTS;
 
 impl Kind {
     pub fn is_source(&self) -> bool {
@@ -42,7 +43,7 @@ impl Kind {
             Kind::Enf { .. } => enf::LABEL.into(),
             Kind::GridFrequencies { .. } => grid_frequencies::LABEL.into(),
             Kind::Plugin { path } => plugin::label(path),
-            Kind::Record => record::LABEL.into(),
+            Kind::Record { .. } => record::LABEL.into(),
             Kind::Map => map::LABEL.into(),
             Kind::Combine { any } => combine::label(*any),
             Kind::Invert => invert::LABEL.into(),
@@ -57,7 +58,7 @@ impl Kind {
             Kind::Enf { .. } => enf::spec(),
             Kind::GridFrequencies { .. } => grid_frequencies::spec(),
             Kind::Plugin { .. } => plugin::spec(),
-            Kind::Record => record::spec(),
+            Kind::Record { .. } => record::spec(),
             Kind::Combine { .. } => combine::spec(),
             Kind::Invert => invert::spec(),
             Kind::Map => map::spec(),
@@ -68,10 +69,10 @@ impl Kind {
     /// The node's name in the file is `spec().name`.
     pub fn saved_param(&self) -> String {
         match self {
-            Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } => path.clone(),
+            Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } | Kind::Record { folder: path } => path.clone(),
             Kind::Source { input } => input.clone(),
             Kind::Combine { any } => combine::mode(*any).into(),
-            Kind::Manual { .. } | Kind::Planes | Kind::Record | Kind::Map | Kind::Invert => String::new(),
+            Kind::Manual { .. } | Kind::Planes | Kind::Map | Kind::Invert => String::new(),
         }
     }
 
@@ -85,7 +86,7 @@ impl Kind {
             enf::NAME => Kind::Enf { grid: param },
             grid_frequencies::NAME => Kind::GridFrequencies { path: param },
             plugin::NAME => Kind::Plugin { path: param },
-            record::NAME => Kind::Record,
+            record::NAME => Kind::Record { folder: param },
             map::NAME => Kind::Map,
             combine::NAME => Kind::Combine { any: combine::is_any(&param) },
             invert::NAME => Kind::Invert,
@@ -109,7 +110,7 @@ pub fn menu() -> Vec<(&'static str, Vec<Kind>)> {
         ("DETECTORS", vec![Kind::Planes, Kind::Enf { grid: String::new() }]),
         ("DATA", vec![Kind::GridFrequencies { path: String::new() }]),
         (PLUGINS, crate::plugin_node::bundled().into_iter().map(|path| Kind::Plugin { path }).collect()),
-        ("OUTPUT", vec![Kind::Record]),
+        ("OUTPUT", vec![Kind::Record { folder: String::new() }]),
         ("LOCATION", vec![Kind::Combine { any: false }, Kind::Combine { any: true }, Kind::Invert]),
         ("VIEW", vec![Kind::Map]),
     ]

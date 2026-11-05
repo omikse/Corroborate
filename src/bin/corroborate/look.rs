@@ -39,7 +39,7 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Enf { .. } => &enf_node::Look,
         Kind::GridFrequencies { .. } => &grid_node::Look,
         Kind::Plugin { .. } => &plugin_node::Look,
-        Kind::Record => &record_node::Look,
+        Kind::Record { .. } => &record_node::Look,
         Kind::Map => &map_node::Look,
         Kind::Combine { .. } => &combine_node::Look,
         Kind::Invert => &invert_node::Look,
@@ -62,7 +62,8 @@ pub fn scale(ui: &mut egui::Ui, z: f32) {
 
 /// Width a port name takes beside its dot, unzoomed (11.5 px text, about 6.3 px a character).
 fn names_w(ports: &[corroborate::core::Port]) -> f32 {
-    ports.iter().map(|p| p.name.chars().count()).max().map_or(0.0, |n| n as f32 * 6.3 + 16.0)
+    // An input that takes anything shows what is wired into it: room for about 16 characters.
+    ports.iter().map(|p| if p.kind == corroborate::core::PortKind::Any { 16 } else { p.name.chars().count() }).max().map_or(0.0, |n| n as f32 * 6.3 + 16.0)
 }
 
 /// The body area clear of the port names on the left (inputs) and right (outputs).

@@ -202,7 +202,7 @@ impl crate::look::NodeLook for Look {
         let tbar = Rect::from_min_max(Pos2::new(plot_r.left(), left.bottom() - 18.0 * z), Pos2::new(plot_r.right() - 90.0 * z, left.bottom() - 2.0 * z));
         let fbtn = Rect::from_min_max(Pos2::new(tbar.right() + 8.0 * z, tbar.top()), Pos2::new(plot_r.right(), tbar.bottom()));
         if !have {
-            ui.painter().text(plot_r.center(), Align2::CENTER_CENTER, "no audio yet: press Run", font, DIM);
+            ui.painter().text(plot_r.center(), Align2::CENTER_CENTER, "no audio yet: wire a source", font, DIM);
             drop(s);
             ui.data_mut(|d| d.insert_temp(id, v));
             return;

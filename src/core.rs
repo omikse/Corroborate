@@ -120,6 +120,8 @@ pub enum PortKind {
     File,
     Text,
     Json,
+    /// An input that takes any kind (the Result record's inputs); it shows the kind wired into it.
+    Any,
 }
 
 /// One input or output of a node.
@@ -180,7 +182,7 @@ pub struct NodeSpec {
 impl NodeSpec {
     /// True when `from` (an output of one node) may feed `to` (an input of another).
     pub fn can_connect(from: &Port, to: &Port) -> bool {
-        from.kind == to.kind
+        from.kind == to.kind || to.kind == PortKind::Any
     }
 
     /// True when every required input of the node is among the connected inputs.
