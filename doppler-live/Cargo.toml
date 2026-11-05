@@ -8,7 +8,7 @@ default-run = "doppler-live"
 hound = "3.5.1"
 realfft = "3.5.1"
 # Viewer only (`--features gui`); the detector binary does not link it.
-eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "clipboard", "wayland", "x11"] }
+eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 cpal = { version = "0.18.2", optional = true }
 rfd = { version = "0.17.2", optional = true }
 

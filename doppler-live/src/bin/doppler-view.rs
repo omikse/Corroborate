@@ -2301,7 +2301,7 @@ Time is the PC clock when the audio arrives.")
             let fb_y = |f: f64| fbar_rect.bottom() - fbar_u(f) as f32 * fbar_rect.height();
             let fb_f = |y: f32| fbar_f(((fbar_rect.bottom() - y) / fbar_rect.height()) as f64);
             let fb_u = |y: f32| ((fbar_rect.bottom() - y) / fbar_rect.height()) as f64;
-            let fb = ui.interact(fbar_rect, Id::unique("fbar"), Sense::click_and_drag());
+            let fb = ui.interact(fbar_rect, Id::new("fbar"), Sense::click_and_drag());
             let (box_top, box_bot) = (fb_y(f_hi), fb_y(f_lo));
             // Edge grips: 5 px outside the box, up to a third of the box inside it.
             let zone = ((box_bot - box_top) / 3.0).min(5.0);
@@ -2407,7 +2407,7 @@ Time is the PC clock when the audio arrives.")
             // Wheel over the plot or the bar: wheel = frequency zoom (at the pointer), Alt+wheel =
             // frequency up/down, Ctrl+wheel = time span, Shift+wheel or sideways = time scroll.
             // Click (files) sets the playhead.
-            let spec_resp = ui.interact(spec_rect, Id::unique("spec"), Sense::click());
+            let spec_resp = ui.interact(spec_rect, Id::new("spec"), Sense::click());
             if spec_resp.hovered() || fb_hover {
                 let (d, zoom, alt, ptr) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt, i.pointer.hover_pos()));
                 let over_spec = spec_resp.hovered();
@@ -2586,7 +2586,7 @@ Time is the PC clock when the audio arrives.")
                     let tri = vec![pos2(*x, tip), pos2(*x - 6.0, base), pos2(*x + 6.0, base)];
                     clip.add(Shape::convex_polygon(tri, *col, Stroke::new(1.0, Color32::BLACK)));
                     let hit = Rect::from_center_size(pos2(*x, (tip + base) / 2.0), vec2(16.0, 14.0));
-                    let r = ui.interact(hit, Id::unique(("edge", i)), Sense::click());
+                    let r = ui.interact(hit, Id::new(("edge", i)), Sense::click());
                     let what = match act {
                         ViewAct::Planes => "plane pass".to_string(),
                         ViewAct::Plugin(k) => format!("{} finding", s.plugins.get(*k).map_or("plugin", |pv| pv.name.as_str())),
@@ -2666,7 +2666,7 @@ Time is the PC clock when the audio arrives.")
                     p.rect_stroke(frame, 0.0, Stroke::new(1.5, HEAD), egui::StrokeKind::Inside);
                     p.rect_stroke(mini, 2.0, Stroke::new(1.0, GRID), egui::StrokeKind::Outside);
                     p.text(mini.left_bottom() + vec2(3.0, -2.0), Align2::LEFT_BOTTOM, "0–8 kHz", mono(9.5), DIM);
-                    let r = ui.interact(mini, Id::unique("minimap"), Sense::click_and_drag());
+                    let r = ui.interact(mini, Id::new("minimap"), Sense::click_and_drag());
                     if let Some(pp) = r.interact_pointer_pos() {
                         if r.clicked() || r.dragged() {
                             fcenter = ((mini.bottom() - pp.y) / mini.height()) as f64 * FULL_MAX;
@@ -2710,7 +2710,7 @@ Time is the PC clock when the audio arrives.")
             // Timeline bar: everything kept; the thumb is the visible window. Click or drag to move.
             let total = (s.now - t_first).max(span);
             let bx = |t: f64| bar_rect.left() + ((t - t_first) / total) as f32 * bar_rect.width();
-            let bar = ui.interact(bar_rect, Id::unique("timeline"), Sense::click_and_drag());
+            let bar = ui.interact(bar_rect, Id::new("timeline"), Sense::click_and_drag());
             p.rect_filled(bar_rect, 2.0, FIELD);
             for pv in s.plugins.iter().filter(|pv| !hidden_plugins.contains(&pv.path)) {
                 for f in &pv.findings {
@@ -2742,7 +2742,7 @@ Time is the PC clock when the audio arrives.")
             p.text(pos2(bar_rect.left() - 6.0, bar_rect.center().y), Align2::RIGHT_CENTER, "time", mono(10.0), DIM);
 
             // LIVE / FOLLOW button.
-            let live_btn = ui.interact(live_rect, Id::unique("live"), Sense::click());
+            let live_btn = ui.interact(live_rect, Id::new("live"), Sense::click());
             let lc = if self.follow { HIGH } else if live_btn.hovered() { text() } else { MED };
             p.rect_stroke(live_rect, 2.0, Stroke::new(1.0, lc), egui::StrokeKind::Inside);
             let lbl = match (is_file, self.follow) {
@@ -2974,7 +2974,7 @@ fn module_box(
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter().clone();
     let head = Rect::from_min_size(rect.min, vec2(rect.width(), 34.0));
-    let hr = ui.interact(head, Id::unique(("module_head", title)), Sense::click());
+    let hr = ui.interact(head, Id::new(("module_head", title)), Sense::click());
     // Boxes without an eye (manual data) have no view to show.
     let hover = hr.hovered() && eye.is_some();
     p.rect_filled(rect, 3.0, bg());
@@ -2988,7 +2988,7 @@ fn module_box(
     let eye_clicked = match eye {
         Some(visible) => {
             let eye_rect = Rect::from_center_size(pos2(head.right() - 16.0, head.center().y), vec2(22.0, 16.0));
-            let er = ui.interact(eye_rect, Id::unique(("module_eye", title)), Sense::click());
+            let er = ui.interact(eye_rect, Id::new(("module_eye", title)), Sense::click());
             let eye_col = if !visible { DIM } else if er.hovered() { text() } else { col };
             eye_icon(&p, eye_rect.center(), visible, eye_col);
             er.on_hover_text(if visible { format!("Hide {title} on the graph") } else { format!("Show {title} on the graph") })
