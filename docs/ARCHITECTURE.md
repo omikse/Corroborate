@@ -41,3 +41,28 @@ adds typed ports and `Value` fields to these messages.
 - egui/eframe is 0.36 on this branch (0.37 had no node editor crates yet). Main stays on 0.37.
 - Node editor: wait for egui-snarl or egui_node_editor to support egui 0.36, or patch snarl.
 - Keep the plugin protocol working during the rewrite, so existing plugins still run.
+
+## Node hierarchy
+
+- **Sources** (no inputs): *live* (stream URL, microphone, webcam) and *file* (replayed as a stream).
+  Also *reference* data (flight history, grid frequency, weather), which is timed but not a stream.
+- **Detectors** (audio or video in, timed events or tracks out): aircraft Doppler, hum, bang, flash.
+- **Transforms** (convert kinds): text to location, track to location, flight match.
+- **Solver** (timed events from several streams in, offsets and locations out).
+- **Records** (the result JSON and the evidence trail).
+
+## Timeline rule
+
+Anything with a time can be shown. An absolute time (UTC) sits at its real place with its error as a
+margin. A relative time (unknown offset) sits on its own clock, with a wide, faded margin until the
+solver places it.
+
+## Locations always carry a radius
+
+`Location` is a point, a radius in metres and the method that set the radius (GPS, IP, Doppler, shared
+sound, metadata, manual). Two locations that overlap agree; ones that do not overlap contradict each other.
+
+## Implemented so far
+
+`doppler-live/src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
+`Port` (required or optional), `Role` and `NodeSpec` (connection and readiness checks). Covered by tests.

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Corroborate: workspace mockup (non-functional)</title>
+<style>
+  :root {
+    --bg: #17191c; --panel: #1f2226; --node: #2a2e33; --line: #3a3f46;
+    --text: #d8dce2; --dim: #8a929c; --accent: #5fb3a1;
+    --audio: #e0a458; --time: #7aa7e0; --loc: #c785c9; --track: #8fd16b; --event: #e07a6a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  .bar { height: 34px; background: var(--panel); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 12px; }
+  .bar b { letter-spacing: .04em; }
+  .bar .tag { color: var(--dim); }
+  .bar .mock { margin-left: auto; color: #e0a458; font-size: 12px; }
+  .main { flex: 1; display: grid; grid-template-columns: 1fr 260px; min-height: 0; }
+  .graph { position: relative; overflow: auto; min-width: 0; background-image: radial-gradient(#2b2f35 1px, transparent 1px); background-size: 22px 22px; }
+  svg.wires { position: absolute; left: 0; top: 0; width: 1000px; height: 620px; pointer-events: none; }
+  .node { position: absolute; width: 190px; background: var(--node); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 2px 6px #0006; }
+  .node header { padding: 6px 9px; border-bottom: 1px solid var(--line); font-weight: 600; display: flex; justify-content: space-between; }
+  .node header span { color: var(--dim); font-weight: 400; font-size: 11px; }
+  .node .ports { display: flex; justify-content: space-between; padding: 5px 0; }
+  .port { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; }
+  .port.out { justify-content: flex-end; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid; display: inline-block; }
+  .req .dot { background: currentColor; }
+  .opt .dot { background: transparent; }
+  .opt { color: var(--dim); }
+  .opt .name { font-style: italic; }
+  .k-audio { color: var(--audio); } .k-time { color: var(--time); } .k-loc { color: var(--loc); }
+  .k-track { color: var(--track); } .k-event { color: var(--event); }
+  .node.transform { border-style: dashed; }
+  .side { background: var(--panel); border-left: 1px solid var(--line); padding: 12px; overflow: auto; }
+  .side h3 { margin: 4px 0 8px; font-size: 12px; text-transform: uppercase; color: var(--dim); letter-spacing: .06em; }
+  .field { display: flex; justify-content: space-between; border-bottom: 1px solid #2a2e33; padding: 5px 0; font-size: 12px; }
+  .field em { color: var(--dim); font-style: normal; }
+  .unc { color: #e0a458; }
+  .timeline { height: 230px; background: var(--panel); border-top: 1px solid var(--line); display: grid; grid-template-columns: 170px 1fr; }
+  .lanes { border-right: 1px solid var(--line); }
+  .lane { height: 40px; display: flex; align-items: center; padding: 0 10px; border-bottom: 1px solid #2a2e33; font-size: 12px; }
+  .ruler { height: 24px; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 11px; position: relative; }
+  .track { position: relative; overflow: hidden; }
+  .ruler span { position: absolute; top: 4px; border-left: 1px solid var(--line); padding-left: 3px; }
+  .blk { position: absolute; height: 26px; top: 7px; border-radius: 4px; padding: 4px 7px; font-size: 11px; color: #111; white-space: nowrap; overflow: hidden; }
+  .blk.fuzzy { opacity: .75; background-image: repeating-linear-gradient(90deg, transparent 0 6px, #0002 6px 8px); }
+  .cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: #fff; }
+  .band { position: absolute; top: 0; bottom: 0; background: #e0a45822; border-left: 1px dashed #e0a458; border-right: 1px dashed #e0a458; }
+  .lane-row { position: relative; height: 40px; border-bottom: 1px solid #2a2e33; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <b>CORROBORATE</b>
+  <span class="tag">Project: protest_0412</span>
+  <span class="tag">View: Graph + Timeline</span>
+  <span class="mock">Non-functional mockup. Nothing here runs; the data is made up.</span>
+</div>
+
+<div class="main">
+  <div class="graph" id="graph">
+    <svg class="wires" id="wires"></svg>
+  </div>
+  <div class="side">
+    <h3>Selected: Flight match</h3>
+    <div class="field"><span>Kind</span><em>transform, optional inputs</em></div>
+    <div class="field"><span>Expected passes</span><em>7</em></div>
+    <div class="field"><span>Heard passes</span><em>3</em></div>
+    <div class="field"><span>Closest match</span><em>N824FM, 10.1 km</em></div>
+    <div class="field"><span>Time offset</span><em class="unc">+3.2 s ± 2.0 s</em></div>
+    <div class="field"><span>Source</span><em>adsb.lol archive 2026-04-12</em></div>
+    <h3 style="margin-top:14px">Evidence trail</h3>
+    <div class="field"><span>1. Audio file</span><em>sha256 9f2c…</em></div>
+    <div class="field"><span>2. Aircraft (Doppler)</span><em>3 passes</em></div>
+    <div class="field"><span>3. Flight match</span><em>2 of 3 matched</em></div>
+    <h3 style="margin-top:14px">Legend</h3>
+    <div class="field"><span><span class="dot req k-audio" style="color:var(--audio)"></span> required input</span><em></em></div>
+    <div class="field"><span><span class="dot opt" style="color:var(--dim)"></span> optional input</span><em></em></div>
+    <div class="field"><span>dashed node</span><em>transform</em></div>
+    <div class="field"><span>hatched block</span><em>uncertain time</em></div>
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="lanes">
+    <div class="ruler"></div>
+    <div class="lane">Aircraft (Doppler)</div>
+    <div class="lane">Flight data (expected)</div>
+    <div class="lane">Power hum (ENF)</div>
+    <div class="lane">Bang (shared sound)</div>
+  </div>
+  <div class="track" id="tl">
+    <div class="ruler" id="ruler"></div>
+    <div class="lane-row" data-lane="0"></div>
+    <div class="lane-row" data-lane="1"></div>
+    <div class="lane-row" data-lane="2"></div>
+    <div class="lane-row" data-lane="3"></div>
+    <div class="cursor" id="cursor" style="left:38%"></div>
+  </div>
+</div>
+
+<script>
+  // Node layout (x, y in graph pixels) and ports.
+  const nodes = [
+    { id: 'file',  x: 30,  y: 40,  title: 'Audio file', sub: 'source', ins: [], outs: [['audio','Audio','req']] },
+    { id: 'meta',  x: 30,  y: 230, title: 'Metadata', sub: 'source', ins: [['file','File','req']], outs: [['loc','Location','req'],['time','Time','req']] },
+    { id: 'coord', x: 270, y: 230, title: 'Coords text → Location', sub: 'transform', cls: 'transform', ins: [['text','Text','req']], outs: [['loc','Location','req']] },
+    { id: 'air',   x: 270, y: 40,  title: 'Aircraft (Doppler)', sub: 'detector', ins: [['audio','Audio','req'],['time','Time','opt']], outs: [['track','Track','req']] },
+    { id: 'adsb',  x: 510, y: 40,  title: 'Flight data (ADS-B)', sub: 'source', ins: [['loc','Location','req'],['time','Time','req']], outs: [['track','Track','req']] },
+    { id: 'match', x: 510, y: 230, title: 'Flight match', sub: 'transform', cls: 'transform', ins: [['track','Track','req'],['track2','Track','opt']], outs: [['event','Event','req']] },
+    { id: 'enf',   x: 270, y: 380, title: 'Power hum (ENF)', sub: 'detector', ins: [['audio','Audio','req'],['time','Time','opt']], outs: [['event','Event','req']] },
+    { id: 'sync',  x: 750, y: 140, title: 'Sync solver', sub: 'planned', ins: [['event','Event','req'],['event2','Event','opt']], outs: [['time','Time','req']] },
+  ];
+  const links = [
+    ['file','audio','air','audio'], ['file','audio','enf','audio'],
+    ['meta','loc','coord','text'], ['coord','loc','adsb','loc'],
+    ['meta','time','adsb','time'], ['air','track','match','track'],
+    ['adsb','track','match','track2'], ['match','event','sync','event'],
+    ['enf','event','sync','event2'], ['air','time','match','track2']
+  ];
+  const colors = { audio: '#e0a458', time: '#7aa7e0', loc: '#c785c9', track: '#8fd16b', event: '#e07a6a', file: '#9aa3ad', text: '#9aa3ad' };
+  const graph = document.getElementById('graph');
+  const W = 190, HEAD = 28, ROW = 24;
+
+  function nodeEl(n) {
+    const el = document.createElement('div');
+    el.className = 'node' + (n.cls ? ' ' + n.cls : '');
+    el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
+    el.innerHTML = `<header>${n.title}<span>${n.sub}</span></header>`;
+    const rows = Math.max(n.ins.length, n.outs.length);
+    for (let i = 0; i < rows; i++) {
+      const row = document.createElement('div');
+      row.className = 'ports';
+      const a = n.ins[i], b = n.outs[i];
+      row.innerHTML = `<div>${a ? portHTML(a, 'in') : ''}</div><div>${b ? portHTML(b, 'out') : ''}</div>`;
+      el.appendChild(row);
+    }
+    graph.appendChild(el);
+    el.style.height = (HEAD + rows * ROW + 8) + 'px';
+    return el;
+  }
+  function portHTML([kind, name, req], dir) {
+    const c = colors[kind] || '#999';
+    const cls = (req === 'req' ? 'req' : 'opt') + (dir === 'out' ? ' out' : '');
+    const inner = dir === 'out' ? `<span class="name">${name}</span><span class="dot" style="color:${c};border-color:${c}"></span>`
+                                : `<span class="dot" style="color:${c};border-color:${c}"></span><span class="name">${name}</span>`;
+    return `<div class="port ${cls}">${inner}</div>`;
+  }
+
+  nodes.forEach(nodeEl);
+
+  // Wires: draw after layout so port positions are known.
+  function draw() {
+    const svg = document.getElementById('wires');
+    svg.innerHTML = '';
+    const gb = graph.getBoundingClientRect();
+    const pos = (id, side, idx, dir) => {
+      const el = [...graph.querySelectorAll('.node')][nodes.findIndex(n => n.id === id)];
+      const r = el.getBoundingClientRect();
+      const y = r.top - gb.top + HEAD + idx * ROW + ROW / 2 + 4;
+      const x = dir === 'out' ? r.right - gb.left - 9 : r.left - gb.left + 9;
+      return [x, y];
+    };
+    links.forEach(([fa, fk, ta, tk]) => {
+      const fn = nodes.find(n => n.id === fa), tn = nodes.find(n => n.id === ta);
+      const oi = fn.outs.findIndex(p => p[0] === fk);
+      const ii = tn.ins.findIndex(p => p[0] === tk);
+      if (oi < 0 || ii < 0) return;
+      const [x1, y1] = pos(fa, 'out', oi, 'out');
+      const [x2, y2] = pos(ta, 'in', ii, 'in');
+      const opt = tn.ins[ii][2] !== 'req';
+      const dx = Math.max(40, Math.abs(x2 - x1) / 2);
+      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', colors[fk] || '#999');
+      p.setAttribute('stroke-width', '2');
+      if (opt) p.setAttribute('stroke-dasharray', '6 5');
+      p.setAttribute('opacity', '.85');
+      svg.appendChild(p);
+    });
+  }
+  window.addEventListener('resize', draw);
+  draw();
+
+  // Timeline: fake time axis, 0 to 60 minutes.
+  const tl = document.getElementById('tl');
+  const ruler = document.getElementById('ruler');
+  const span = 60; // minutes
+  for (let m = 0; m <= span; m += 5) {
+    const s = document.createElement('span');
+    s.style.left = (m / span * 100) + '%';
+    s.textContent = m + ' min';
+    ruler.appendChild(s);
+  }
+  function blk(lane, startMin, lenMin, label, color, fuzzy, pad = 0) {
+    const el = document.createElement('div');
+    el.className = 'blk' + (fuzzy ? ' fuzzy' : '');
+    el.style.background = color;
+    el.style.left = `calc(${startMin / span * 100}% - ${pad}px)`;
+    el.style.width = `calc(${lenMin / span * 100}% + ${pad * 2}px)`;
+    el.style.minWidth = '24px';
+    el.title = label;
+    el.textContent = label;
+    tl.querySelector(`[data-lane="${lane}"]`).appendChild(el);
+  }
+  blk(0, 12.5, 1.2, 'pass 1 · 218 m/s', '#8fd16b', false);
+  blk(0, 31.0, 0.9, 'pass 2 · 167 m/s', '#8fd16b', false);
+  blk(0, 44.2, 1.4, 'pass 3 · ? m/s', '#8fd16b', true);
+  blk(1, 12.0, 2.0, 'EJA519 expected', '#7aa7e0', true);
+  blk(1, 30.4, 2.0, 'N824FM expected', '#7aa7e0', true);
+  blk(1, 44.0, 2.4, 'AAL2602 expected', '#7aa7e0', true);
+  blk(2, 0, 60, 'hum 60.00 Hz ± 0.04 Hz (grid drift, not yet matched)', '#e07a6a', false);
+  blk(3, 19.8, 0.6, 'bang?', '#e07a6a', true);
+  // Uncertainty band around the bang and the cursor.
+  const band = document.createElement('div');
+  band.className = 'band';
+  band.style.left = `calc(${19.5 / span * 100}%)`;
+  band.style.width = `calc(${1.2 / span * 100}%)`;
+  tl.appendChild(band);
+</script>
+</body>
+</html>
