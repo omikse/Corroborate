@@ -29,13 +29,9 @@ pub fn spec() -> NodeSpec {
     NodeSpec {
         name: NAME,
         role: Role::Detector,
-        inputs: vec![
-            Port::req("audio", PortKind::Audio),
-            Port::req("grid", PortKind::Json),
-            Port::opt("time", PortKind::Time),
-            Port::opt("location", PortKind::Location),
-        ],
-        outputs: vec![Port::req("hum", PortKind::Event), Port::req("location", PortKind::Location)],
+        // The grid data is chosen inside the node; the hum runs go to the timeline and result file.
+        inputs: vec![Port::req("audio", PortKind::Audio)],
+        outputs: vec![Port::req("location", PortKind::Location)],
     }
 }
 

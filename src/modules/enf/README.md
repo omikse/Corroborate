@@ -3,11 +3,16 @@
 ENF (Electrical Network Frequency): the mains hum and its drift, and from it, where the recording
 can have been made.
 
-Node: `audio` (required), `grid` (required: a Grid frequencies node), `time` and `location`
-(optional) in; `hum` (runs of clear hum) and `location` (an area) out.
+Node: `audio` in, `location` (an area) out. The runs of clear hum go to the timeline and the result
+file.
+
+On the canvas the node shows everything itself (no separate window): the Earth map of where its grid
+frequency is used (green), the hum frequency over time under it, the **grid data** file chosen right
+in the node (empty: the bundled file), and a status column (state, grid frequency, hum runs, audio,
+area).
 
 Files: `mod.rs` (the detector: name, label, ports), `node.rs` (the node in the workbench: state while
-running, the area its grid frequency allows, window, timeline marks, result file), `plugin.rs` (the same
+running, the area its grid frequency allows, its look on the canvas, timeline marks, result file), `plugin.rs` (the same
 detector as a plugin for the old viewer, `enf-plugin.exe`). The default grid map is in its own module:
 [grid_frequencies](../grid_frequencies/README.md).
 
@@ -22,18 +27,18 @@ and tracks the drift within about ±40 mHz.
 ## From hum to area
 
 Once the nominal frequency is decided, the node's area is every 1° cell (see `src/area.rs`) whose
-centre lies in a grid region of that frequency. If a location is wired in (a Manual node's
-`coordinates`, within its `radius_km` row, or the 1° cell holding the point when there is none),
-the area is cut to it. An empty area is kept and labelled CONTRADICTION: the hum is not used
-anywhere in the given place, so one of them is wrong. Nothing is hidden or smoothed over.
+centre lies in a grid region of that frequency. To combine it with a known place, wire both into a
+Combine locations node or the Result record: an empty result is kept and labelled CONTRADICTION
+(the hum is not used anywhere in that place, so one of them is wrong). Nothing is hidden or smoothed
+over.
 
 Tested live on the Cornell Lab stream (Ithaca, New York) with no location given: 60 Hz found, the
 world cut to 17.85 % of Earth.
 
-## Grid frequencies node and file
+## Grid data file
 
-The node holds the path to a JSON file and shows its regions; swap the file to use other data.
-It is read at each Run. Format:
+Chosen in the node (the same format the Grid frequencies node reads); swap the file to use other
+data. It is read at each Run. Format:
 
 ```json
 {

@@ -143,14 +143,174 @@ pub fn json(s: &NodeState) -> String {
 }
 
 impl App {
-    /// What an ENF node needs for a run: the grid map and the location wired into it.
+    /// What an ENF node needs for a run: the grid map chosen in the node.
     pub(crate) fn enf_job(&self, i: NodeId) -> EnfJob {
-        EnfJob { state: self.nodes[i].state.clone(), grid: self.grid_into(i), prior: self.manual_area_into(i, "location") }
+        let path = match &self.nodes[i].kind {
+            Kind::Enf { grid } => grid.clone(),
+            _ => String::new(),
+        };
+        EnfJob { state: self.nodes[i].state.clone(), grid: grid_node::load(&path).map(Arc::new), prior: None }
     }
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
+// ---------------------------------------------------------------- on the canvas
+//
+//  ┌ ENF · Electric grid hum ───────────────────────────┐
+//  │        ┌──────── Earth map ────────┐  STATUS        │
+//  ● audio  │  (where the grid is used) │  …             │ location ●
+//  │        ├──── hum frequency trace ──┤                │
+//  │        grid data [file……] [Browse]                  │
+//  └─────────────────────────────────────────────────────┘
+
+/// Size on the canvas (unzoomed).
+const NODE_W: f32 = 520.0;
+const NODE_H: f32 = 340.0;
+/// Room left at the sides for the port names, and the status column's width.
+const LEFT: f32 = 42.0;
+const RIGHT: f32 = 60.0;
+const STATUS_W: f32 = 128.0;
+const TRACE_H: f32 = 58.0;
+const HUM: Color32 = Color32::from_rgb(110, 170, 255);
+
+/// The grid file's summary (regions and source), read once per path: drawing must not read the
+/// file every frame. The run reads the file itself at each Run.
+fn grid_summary(path: &str) -> Result<String, String> {
+    static CACHE: std::sync::Mutex<Option<HashMap<String, Result<String, String>>>> = std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().unwrap();
+    c.get_or_insert_with(HashMap::new)
+        .entry(path.to_string())
+        .or_insert_with(|| grid_node::load(path).map(|g| format!("{} regions · {}", g.regions.len(), g.source)))
+        .clone()
+}
+
+/// The hum frequency over source time (folded to the fundamental); faded where unclear.
+fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)]) {
+    p.rect_filled(rect, 4.0 * z, BG);
+    let font = FontId::proportional(10.0 * z);
+    p.text(rect.left_top() + Vec2::new(6.0, 4.0) * z, Align2::LEFT_TOP, "hum frequency", font.clone(), DIM);
+    let (mut t0, mut t1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for &(t, y, ok) in pts {
+        t0 = t0.min(t);
+        t1 = t1.max(t);
+        if ok {
+            y0 = y0.min(y);
+            y1 = y1.max(y);
+        }
+    }
+    if t0 >= t1 || y0 > y1 {
+        p.text(rect.center(), Align2::CENTER_CENTER, "no hum yet: press Run", font, DIM);
+        return;
+    }
+    if y1 - y0 < 0.02 {
+        let m = (y0 + y1) / 2.0;
+        (y0, y1) = (m - 0.01, m + 0.01);
+    }
+    let plot = Rect::from_min_max(rect.min + Vec2::new(6.0, 16.0) * z, rect.max - Vec2::new(6.0, 4.0) * z);
+    let x = |t: f64| plot.left() + ((t - t0) / (t1 - t0)) as f32 * plot.width();
+    let y = |v: f64| plot.bottom() - ((v - y0) / (y1 - y0)).clamp(0.0, 1.0) as f32 * plot.height();
+    let line: Vec<Pos2> = pts.iter().filter(|q| q.2).map(|&(t, v, _)| Pos2::new(x(t), y(v))).collect();
+    p.add(egui::Shape::line(line, Stroke::new(1.3 * z, HUM)));
+    for &(t, v, ok) in pts {
+        if !ok {
+            p.circle_filled(Pos2::new(x(t), y(v)), 1.2 * z, alpha(HUM, 0.25));
+        }
+    }
+    let last = pts.iter().rev().find(|q| q.2).map_or(String::new(), |q| format!("{:.3} Hz", q.1));
+    p.text(rect.right_top() + Vec2::new(-6.0, 4.0) * z, Align2::RIGHT_TOP, last, font, TEXT);
+}
+
+/// The ENF node as sketched: the map of where its grid frequency is used, the hum trace under
+/// it, the grid data chosen right here, and a status column. No separate window.
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, _standard: Vec2) -> Vec2 {
+        Vec2::new(NODE_W, NODE_H)
+    }
+
+    fn fill(&self, _app: &App, _i: NodeId) -> Color32 {
+        Color32::from_rgb(34, 40, 50)
+    }
+
+    fn status(&self) -> bool {
+        false
+    }
+
+    fn window(&self) -> bool {
+        false
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let z = app.zoom;
+        {
+            let st = ui.style_mut();
+            for f in st.text_styles.values_mut() {
+                f.size *= z;
+            }
+            st.spacing.item_spacing *= z;
+            st.spacing.button_padding *= z;
+            st.spacing.interact_size *= z;
+        }
+        let r = ui.max_rect();
+        let content = Rect::from_min_max(Pos2::new(r.left() + LEFT * z, r.top()), Pos2::new(r.right() - RIGHT * z, r.bottom()));
+        let status = Rect::from_min_max(Pos2::new(content.right() - STATUS_W * z, content.top()), content.max);
+        let main_w = status.left() - 8.0 * z - content.left();
+        let map = Rect::from_min_size(content.min, Vec2::new(main_w, main_w / ROBINSON_ASPECT as f32));
+        let band = Rect::from_min_size(map.left_bottom() + Vec2::new(0.0, 6.0 * z), Vec2::new(main_w, TRACE_H * z));
+        let grid_row = Rect::from_min_max(band.left_bottom() + Vec2::new(0.0, 8.0 * z), Pos2::new(map.right(), content.bottom()));
+
+        let st = app.nodes[i].state.clone();
+        let p = ui.painter().clone();
+
+        // Earth map: where the measured grid frequency is used.
+        let area = area_out(&st).ok().map(|(a, _)| a);
+        map_node::paint(&p.with_clip_rect(map), map, app.earth.as_ref().map(|t| t.id()), area.as_deref());
+        p.rect_stroke(map, 6.0 * z, Stroke::new(1.0 * z, LINE), StrokeKind::Outside);
+
+        // Hum frequency over time: the last 10 minutes of readings.
+        let pts: Vec<(f64, f64, bool)> = {
+            let s = st.lock().unwrap();
+            let from = s.enf.points.len().saturating_sub(600);
+            s.enf.points[from..].iter().map(|q| (q.t, q.hz / q.harmonic as f64, q.ok)).collect()
+        };
+        trace(&p, band, z, &pts);
+
+        // Grid data, changed here.
+        if let Kind::Enf { grid } = &mut app.nodes[i].kind {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(grid_row), |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(DIM, "grid data");
+                    ui.add(egui::TextEdit::singleline(grid).hint_text("bundled file").desired_width(main_w - 150.0 * z));
+                    if ui.button("Browse…").clicked() {
+                        if let Some(f) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                            *grid = f.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                match grid_summary(grid) {
+                    Ok(t) => ui.add(egui::Label::new(egui::RichText::new(t).small().color(DIM)).truncate()),
+                    Err(e) => ui.add(egui::Label::new(egui::RichText::new(e).small().color(WARN)).truncate()),
+                };
+            });
+        }
+
+        // Status data.
+        p.line_segment([status.left_top() - Vec2::new(4.0 * z, 0.0), status.left_bottom() - Vec2::new(4.0 * z, 0.0)], Stroke::new(1.0 * z, LINE));
+        let s = st.lock().unwrap();
+        let lines: Vec<(String, Color32)> = vec![
+            (if s.running { "● running".into() } else { s.status.clone() }, if s.running { LIVE } else { TEXT }),
+            (s.enf.nominal.map_or("grid: deciding".into(), |f| format!("grid: {f:.0} Hz")), TEXT),
+            (format!("hum runs: {}", s.enf.segments.len()), TEXT),
+            (format!("audio: {:.0} s", s.audio_s), DIM),
+            (s.enf.area.as_ref().map_or("area: none yet".into(), |a| format!("area: {:.1} % of Earth", a.fraction() * 100.0)), TEXT),
+            (s.enf.area_note.clone(), if s.enf.area_note.starts_with("CONTRADICTION") { WARN } else { DIM }),
+        ];
+        drop(s);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+            ui.label(egui::RichText::new("STATUS").small().color(DIM));
+            for (t, c) in lines.into_iter().filter(|(t, _)| !t.is_empty()) {
+                ui.add(egui::Label::new(egui::RichText::new(t).small().color(c)).wrap());
+            }
+        });
+    }
+}

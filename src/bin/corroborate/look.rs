@@ -41,7 +41,7 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Mic { .. } => &mic_node::Look,
         Kind::Manual { .. } => &manual_node::Look,
         Kind::Planes => &planes_node::Look,
-        Kind::Enf => &enf_node::Look,
+        Kind::Enf { .. } => &enf_node::Look,
         Kind::GridFrequencies { .. } => &grid_node::Look,
         Kind::Plugin { .. } => &plugin_node::Look,
         Kind::Record => &record_node::Look,

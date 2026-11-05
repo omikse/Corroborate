@@ -298,10 +298,9 @@ impl App {
         }
     }
 
-    /// Stream → Planes and ENF with GridFrequencies; Manual data; all into Record with location constraints.
     /// Demo: a live stream whose place is unknown; ENF hears the mains hum and the world is cut
-    /// to where that grid frequency is used. Maps show it adding (green), inverted (red) and
-    /// stacked in the Result record. The current project is kept as project-before-demo.txt.
+    /// to where that grid frequency is used (its own map shows it adding, green). Maps show it
+    /// inverted (red) and stacked in the Result record. The current project is kept as project-before-demo.txt.
     fn enf_demo(&mut self) {
         self.stop_all();
         self.save_project();
@@ -316,22 +315,16 @@ impl App {
         self.textures.clear();
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
-        let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 200.0));
+        let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 240.0));
         self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
-        let grid = self.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(20.0, 300.0));
-        let enf = self.add(Kind::Enf, Pos2::new(250.0, 200.0));
-        let inv = self.add(Kind::Invert, Pos2::new(250.0, 40.0));
-        let map_add = self.add(Kind::Map, Pos2::new(500.0, 330.0));
-        let map_inv = self.add(Kind::Map, Pos2::new(500.0, 20.0));
-        let rec = self.add(Kind::Record, Pos2::new(870.0, 20.0));
-        let map_rec = self.add(Kind::Map, Pos2::new(870.0, 330.0));
+        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(240.0, 140.0));
+        let inv = self.add(Kind::Invert, Pos2::new(810.0, 20.0));
+        let map_inv = self.add(Kind::Map, Pos2::new(1060.0, 20.0));
+        let rec = self.add(Kind::Record, Pos2::new(810.0, 300.0));
+        let map_rec = self.add(Kind::Map, Pos2::new(1060.0, 330.0));
         self.wire(src, "audio", enf, "audio");
-        self.wire(src, "time", enf, "time");
-        self.wire(grid, "data", enf, "grid");
-        self.wire(enf, "location", map_add, "location");
         self.wire(enf, "location", inv, "location");
         self.wire(inv, "location", map_inv, "location");
-        self.wire(enf, "hum", rec, nodes::RECORD_EVENTS[0]);
         self.wire(enf, "location", rec, nodes::RECORD_LOCATIONS[0]);
         self.wire(rec, "location", map_rec, "location");
         self.save_project();
@@ -346,11 +339,10 @@ impl App {
         let src = self.add(Kind::Stream { url: String::new() }, Pos2::new(30.0, 40.0));
         let mut rows = corroborate::modules::manual::defaults();
         rows.push(("elevation".into(), String::new()));
-        let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 280.0));
-        let planes = self.add(Kind::Planes, Pos2::new(330.0, 30.0));
-        let grid = self.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(330.0, 130.0));
-        let enf = self.add(Kind::Enf, Pos2::new(330.0, 190.0));
-        let rec = self.add(Kind::Record, Pos2::new(660.0, 60.0));
+        let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 300.0));
+        let planes = self.add(Kind::Planes, Pos2::new(300.0, 30.0));
+        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(300.0, 140.0));
+        let rec = self.add(Kind::Record, Pos2::new(880.0, 60.0));
 
         // Wire Planes
         self.wire(src, "audio", planes, "audio");
@@ -359,9 +351,6 @@ impl App {
 
         // Wire ENF
         self.wire(src, "audio", enf, "audio");
-        self.wire(src, "time", enf, "time");
-        self.wire(grid, "data", enf, "grid");
-        self.wire(enf, "hum", rec, nodes::RECORD_EVENTS[1]);
         self.wire(enf, "location", rec, nodes::RECORD_LOCATIONS[0]);
 
         // Wire Manual data
@@ -370,7 +359,7 @@ impl App {
         // ADS-B check if available
         let bundled = plugin_node::bundled();
         if let Some(adsb) = bundled.iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) {
-            let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(330.0, 260.0));
+            let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(300.0, 510.0));
             self.wire(src, "audio", a, "audio");
             self.wire(src, "time", a, "time");
             self.wire(man, "place", a, "place");
@@ -468,7 +457,7 @@ impl App {
     fn area_uncached(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
         let n = &self.nodes[from];
         match &n.kind {
-            Kind::Enf => enf_node::area_out(&n.state),
+            Kind::Enf { .. } => enf_node::area_out(&n.state),
             Kind::Manual { rows } => manual_node::area_out(rows),
             Kind::Record => self.record_area_out(from),
             Kind::Combine { any } => self.combine_area_out(from, *any),
@@ -519,7 +508,7 @@ impl App {
                 }
                 match &tn.kind {
                     Kind::Planes => job.planes.push(tn.state.clone()),
-                    Kind::Enf => job.enfs.push(self.enf_job(t)),
+                    Kind::Enf { .. } => job.enfs.push(self.enf_job(t)),
                     Kind::Plugin { path } => job.plugins.push(self.plugin_job(t, path)),
                     _ => {}
                 }
@@ -572,7 +561,7 @@ impl App {
             );
             let own = match &n.kind {
                 Kind::Planes => planes_node::json(&s),
-                Kind::Enf => enf_node::json(&s),
+                Kind::Enf { .. } => enf_node::json(&s),
                 Kind::GridFrequencies { path } => grid_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
                 Kind::Manual { rows } => manual_node::json(rows),
@@ -921,7 +910,7 @@ impl App {
             let (to, err) = clock(&a);
             let marks = match &n.kind {
                 Kind::Planes => planes_node::marks(&s),
-                Kind::Enf => enf_node::marks(&s),
+                Kind::Enf { .. } => enf_node::marks(&s),
                 Kind::Plugin { .. } => plugin_node::marks(&s),
                 _ => continue,
             };
@@ -1057,7 +1046,7 @@ impl App {
             Kind::Mic { .. } => self.mic_window(ui, i),
             Kind::Manual { rows } => manual_node::window(ui, i, rows),
             Kind::Planes => self.planes_window(ui, i),
-            Kind::Enf => enf_node::window(ui, &state),
+            Kind::Enf { .. } => enf_node::window(ui, &state),
             Kind::GridFrequencies { path } => grid_node::window(ui, path),
             Kind::Plugin { path } => plugin_node::window(ui, path, &state),
             Kind::Combine { .. } => self.combine_window(ui, i),

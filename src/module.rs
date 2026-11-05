@@ -93,17 +93,16 @@ mod tests {
     use crate::core::{PortKind, Role};
 
     #[test]
-    fn built_in_modules_take_required_audio_and_give_events() {
+    fn built_in_modules_take_required_audio_and_give_results() {
         for m in build(&["planes", "enf"]).unwrap() {
             let spec = m.spec();
             assert_eq!(spec.name, m.name());
             assert_eq!(spec.role, Role::Detector);
             assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Audio && p.required));
-            assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Time && !p.required));
-            assert!(spec.outputs.iter().any(|p| p.kind == PortKind::Event));
+            assert!(!spec.outputs.is_empty());
             let required: Vec<&str> = spec.inputs.iter().filter(|p| p.required).map(|p| p.name).collect();
             assert!(spec.ready(&required));
-            assert!(!spec.ready(&["time"]));
+            assert!(!spec.ready(&[]));
         }
     }
 }

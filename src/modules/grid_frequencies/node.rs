@@ -66,17 +66,6 @@ pub fn json(path: &str) -> String {
     format!(",\"file\":\"{}\",{r}", json_escape(path))
 }
 
-impl App {
-    /// The grid map from the Grid frequencies node wired into `id`'s "grid" input.
-    pub(crate) fn grid_into(&self, id: NodeId) -> Result<Arc<GridMap>, String> {
-        let Some((from, _)) = self.graph.feeder(id, "grid") else { return Err("no grid data wired".into()) };
-        match &self.nodes[from].kind {
-            Kind::GridFrequencies { path } => load(path).map(Arc::new),
-            _ => Err("grid input is not a Grid frequencies node".into()),
-        }
-    }
-}
-
 /// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
 /// change it (see `src/bin/corroborate/look.rs`).
 pub struct Look;

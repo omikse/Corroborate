@@ -55,13 +55,6 @@ pub fn json(rows: &[(String, String)]) -> String {
 }
 
 impl App {
-    /// A Manual node's coordinates wired into `id`'s input, as an area.
-    pub(crate) fn manual_area_into(&self, id: NodeId, inp: &str) -> Option<(WorldMask, String)> {
-        let (from, _) = self.graph.feeder(id, inp)?;
-        let Kind::Manual { rows } = &self.nodes[from].kind else { return None };
-        area(rows)
-    }
-
     /// The rows of Manual nodes wired into `id`'s place and time inputs, each key once.
     pub(crate) fn manual_rows_into(&self, id: NodeId) -> Vec<(String, String)> {
         let mut rows = Vec::new();

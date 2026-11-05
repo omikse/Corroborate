@@ -13,7 +13,8 @@ pub enum Kind {
     /// Facts typed in by a person: date, time, place, coordinates, notes, own fields.
     Manual { rows: Vec<(String, String)> },
     Planes,
-    Enf,
+    /// The grid-frequency file it reads (empty: the bundled file).
+    Enf { grid: String },
     /// Grid frequency map (50/60 Hz zones by region) for ENF: a JSON file, swappable.
     GridFrequencies { path: String },
     /// A separate program speaking the plugin protocol (meta-plugin, adsb-check, …).
@@ -42,7 +43,7 @@ impl Kind {
             Kind::Mic { .. } => mic::LABEL.into(),
             Kind::Manual { .. } => manual::LABEL.into(),
             Kind::Planes => planes::LABEL.into(),
-            Kind::Enf => enf::LABEL.into(),
+            Kind::Enf { .. } => enf::LABEL.into(),
             Kind::GridFrequencies { .. } => grid_frequencies::LABEL.into(),
             Kind::Plugin { path } => plugin::label(path),
             Kind::Record => record::LABEL.into(),
@@ -59,7 +60,7 @@ impl Kind {
             Kind::Mic { .. } => mic::spec(),
             Kind::Manual { .. } => manual::spec(),
             Kind::Planes => planes::spec(),
-            Kind::Enf => enf::spec(),
+            Kind::Enf { .. } => enf::spec(),
             Kind::GridFrequencies { .. } => grid_frequencies::spec(),
             Kind::Plugin { .. } => plugin::spec(),
             Kind::Record => record::spec(),
@@ -73,11 +74,11 @@ impl Kind {
     /// The node's name in the file is `spec().name`.
     pub fn saved_param(&self) -> String {
         match self {
-            Kind::File { path } | Kind::GridFrequencies { path } | Kind::Plugin { path } => path.clone(),
+            Kind::File { path } | Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } => path.clone(),
             Kind::Stream { url } => url.clone(),
             Kind::Mic { device } => device.clone(),
             Kind::Combine { any } => combine::mode(*any).into(),
-            Kind::Manual { .. } | Kind::Planes | Kind::Enf | Kind::Record | Kind::Map | Kind::Invert => String::new(),
+            Kind::Manual { .. } | Kind::Planes | Kind::Record | Kind::Map | Kind::Invert => String::new(),
         }
     }
 
@@ -89,7 +90,7 @@ impl Kind {
             mic::NAME => Kind::Mic { device: param },
             manual::NAME => Kind::Manual { rows: Vec::new() },
             planes::NAME => Kind::Planes,
-            enf::NAME => Kind::Enf,
+            enf::NAME => Kind::Enf { grid: param },
             grid_frequencies::NAME => Kind::GridFrequencies { path: param },
             plugin::NAME => Kind::Plugin { path: param },
             record::NAME => Kind::Record,
@@ -115,7 +116,7 @@ pub fn menu() -> Vec<(&'static str, Vec<Kind>)> {
                 Kind::Manual { rows: manual::defaults() },
             ],
         ),
-        ("DETECTORS", vec![Kind::Planes, Kind::Enf]),
+        ("DETECTORS", vec![Kind::Planes, Kind::Enf { grid: String::new() }]),
         ("DATA", vec![Kind::GridFrequencies { path: String::new() }]),
         (PLUGINS, crate::plugin_node::bundled().into_iter().map(|path| Kind::Plugin { path }).collect()),
         ("OUTPUT", vec![Kind::Record]),
