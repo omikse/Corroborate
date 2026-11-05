@@ -267,3 +267,9 @@ impl App {
         PluginJob { path: path.to_string(), state: self.nodes[i].state.clone(), manual: self.manual_rows_into(i) }
     }
 }
+
+/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
+/// change it (see `src/bin/corroborate/look.rs`).
+pub struct Look;
+
+impl crate::look::NodeLook for Look {}

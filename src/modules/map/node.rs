@@ -5,14 +5,25 @@
 use super::*;
 
 /// Width of the Map node on the canvas; its map is drawn below its port.
-pub const NODE_W: f32 = 320.0;
+const NODE_W: f32 = 320.0;
 
 const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
 const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
 
-/// Extra height the map takes on the canvas, below the ports.
-pub fn canvas_extra() -> f32 {
-    NODE_W / ROBINSON_ASPECT as f32 + 8.0
+/// The Map node on the canvas: wider, with the map drawn inside it, below its port.
+pub struct Look;
+
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
+        Vec2::new(NODE_W, standard.y + NODE_W / ROBINSON_ASPECT as f32 + 8.0)
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = ui.max_rect();
+        let map = Rect::from_min_size(r.min, Vec2::new(r.width(), r.width() / ROBINSON_ASPECT as f32));
+        let area = app.map_input(i).and_then(|r| r.ok()).map(|(a, _)| a);
+        paint(&ui.painter().with_clip_rect(map), map, app.earth.as_ref().map(|t| t.id()), area.as_deref());
+    }
 }
 
 /// One line about an area: whether it adds or subtracts, and how much of Earth it leaves.
@@ -189,15 +200,6 @@ impl App {
             Some(Err(e)) => e,
             None => "no location wired".into(),
         }
-    }
-
-    /// The map drawn inside the node on the canvas, below its port.
-    pub(crate) fn map_on_canvas(&self, painter: &egui::Painter, rect: Rect, i: NodeId) {
-        let top = rect.top() + (HEAD + ROW + 8.0) * self.zoom;
-        let w = rect.width() - 12.0 * self.zoom;
-        let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0 * self.zoom, top), Vec2::new(w, w / ROBINSON_ASPECT as f32));
-        let area = self.map_input(i).and_then(|r| r.ok()).map(|(a, _)| a);
-        paint(&painter.with_clip_rect(map), map, self.earth.as_ref().map(|t| t.id()), area.as_deref());
     }
 
     pub(crate) fn map_window(&mut self, ui: &mut egui::Ui, i: NodeId) {

@@ -148,3 +148,9 @@ impl App {
         EnfJob { state: self.nodes[i].state.clone(), grid: self.grid_into(i), prior: self.manual_area_into(i, "location") }
     }
 }
+
+/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
+/// change it (see `src/bin/corroborate/look.rs`).
+pub struct Look;
+
+impl crate::look::NodeLook for Look {}

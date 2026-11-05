@@ -226,3 +226,9 @@ impl App {
         ui.colored_label(DIM, "green/orange/grey: passes by grade · white: candidates · dots: plugin tracks (adsb-check: predicted curves from flight data)");
     }
 }
+
+/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
+/// change it (see `src/bin/corroborate/look.rs`).
+pub struct Look;
+
+impl crate::look::NodeLook for Look {}

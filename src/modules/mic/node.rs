@@ -31,3 +31,9 @@ impl App {
         source_info(ui, &self.nodes[i].state.clone());
     }
 }
+
+/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
+/// change it (see `src/bin/corroborate/look.rs`).
+pub struct Look;
+
+impl crate::look::NodeLook for Look {}

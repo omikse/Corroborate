@@ -32,6 +32,14 @@ holds the node's name, label and ports, written only there; `node.rs` holds ever
 workbench (state while running, window, canvas status, timeline marks, result file). The app
 (`src/bin/corroborate/`) only draws the graph and calls into the modules.
 
+To change one node, edit only its folder:
+- **Ports:** `spec()` in `mod.rs`. Built-in projects skip wires to ports a node no longer has.
+- **Look on the canvas:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
+  `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls
+  such as buttons or a file picker), `status` (false) hides the status line, and `window` (false) turns off
+  the double-click window. The Map node is the example: its map is drawn by `body`. Any node can
+  draw a map with `map_node::paint`.
+
 | Node | Folder | What it gives |
 |---|---|---|
 | File | [file](src/modules/file/README.md) | audio and time from a recording on disk |

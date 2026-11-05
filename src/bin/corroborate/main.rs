@@ -11,6 +11,7 @@
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
 mod demo;
+mod look;
 mod nodes;
 mod runtime;
 
@@ -285,9 +286,12 @@ impl App {
         id
     }
 
+    /// A wire in a built-in project (default, demo). A port the node no longer has is skipped
+    /// quietly, so a node folder can change its ports without touching these projects.
     fn wire(&mut self, a: NodeId, out: &str, b: NodeId, inp: &str) {
-        if let Err(e) = self.graph.connect(a, out, b, inp) {
-            self.msg = describe(&e);
+        match self.graph.connect(a, out, b, inp) {
+            Ok(()) | Err(GraphError::NoOutput { .. } | GraphError::NoInput { .. }) => {}
+            Err(e) => self.msg = describe(&e),
         }
     }
 
@@ -608,14 +612,24 @@ impl App {
 
     // ---------------- graph
 
-    fn node_rect(&self, origin: Pos2, i: NodeId) -> Rect {
+    /// Port rows of a node: the longer of its input and output lists.
+    fn port_rows(&self, i: NodeId) -> f32 {
         let spec = &self.graph.nodes()[i].spec;
-        let rows = spec.inputs.len().max(spec.outputs.len()).max(1) as f32;
-        // The Map node shows its map on the canvas, below its port.
-        let (w, extra) = if matches!(self.nodes[i].kind, Kind::Map) { (map_node::NODE_W, map_node::canvas_extra()) } else { (NODE_W, 0.0) };
-        Rect::from_min_size(
-            origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom,
-            Vec2::new(w, HEAD + rows * ROW + 26.0 + extra) * self.zoom,
+        spec.inputs.len().max(spec.outputs.len()).max(1) as f32
+    }
+
+    fn node_rect(&self, origin: Pos2, i: NodeId) -> Rect {
+        let standard = Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 26.0);
+        let size = look::of(&self.nodes[i].kind).size(self, i, standard);
+        Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom, size * self.zoom)
+    }
+
+    /// The part of a node a `NodeLook` draws in: below the ports, above the status line.
+    fn body_rect(&self, rect: Rect, i: NodeId) -> Rect {
+        let z = self.zoom;
+        Rect::from_min_max(
+            Pos2::new(rect.left() + 6.0 * z, rect.top() + (HEAD + self.port_rows(i) * ROW + 4.0) * z),
+            Pos2::new(rect.right() - 6.0 * z, rect.bottom() - 22.0 * z),
         )
     }
 
@@ -711,6 +725,7 @@ impl App {
             if self.nodes[i].hidden {
                 continue;
             }
+            let nl = look::of(&self.nodes[i].kind);
             let rect = self.node_rect(origin, i);
             let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD * self.zoom));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
@@ -720,11 +735,11 @@ impl App {
             if resp.clicked() {
                 clicked = Some(i);
             }
-            if resp.double_clicked() {
+            if resp.double_clicked() && nl.window() {
                 opened = Some(i);
             }
             resp.context_menu(|ui| {
-                if ui.button("Open window").clicked() {
+                if nl.window() && ui.button("Open window").clicked() {
                     opened = Some(i);
                     ui.close();
                 }
@@ -737,7 +752,8 @@ impl App {
             let is_sel = self.selected == Some(i);
             let in_trail = trail.contains(&i);
             let fade = self.selected.is_some() && !in_trail;
-            painter.rect_filled(rect, 6.0 * self.zoom, if fade { alpha(NODE, 0.6) } else { NODE });
+            let fill = nl.fill(self, i);
+            painter.rect_filled(rect, 6.0 * self.zoom, if fade { alpha(fill, 0.6) } else { fill });
             let border = if is_sel { SEL } else if in_trail { alpha(SEL, 0.6) } else { LINE };
             painter.rect_stroke(rect, 6.0 * self.zoom, Stroke::new((if is_sel { 2.0 } else { 1.0 }) * self.zoom, border), StrokeKind::Inside);
             painter.line_segment([Pos2::new(rect.left(), head.bottom()), Pos2::new(rect.right(), head.bottom())], Stroke::new(self.zoom, LINE));
@@ -746,32 +762,38 @@ impl App {
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
             painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
-            if matches!(self.nodes[i].kind, Kind::Map) {
-                self.map_on_canvas(&painter, rect, i);
+            // The node's own drawing and controls, from its folder's `Look`.
+            let body = self.body_rect(rect, i);
+            if body.width() > 0.0 && body.height() > 0.0 {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", i)));
+                child.set_clip_rect(body.intersect(area));
+                nl.body(self, &mut child, i);
             }
             // Status line at the bottom of the node.
-            let (status, running) = {
-                let s = self.nodes[i].state.lock().unwrap();
-                let st = match &self.nodes[i].kind {
-                    Kind::Plugin { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
-                    Kind::Manual { rows } => manual_node::status(rows),
-                    Kind::Map => self.map_status(i),
-                    Kind::Combine { .. } | Kind::Invert => match self.area_from(i) {
-                        Ok((a, _)) => map_node::area_status(&a),
-                        Err(e) => e,
-                    },
-                    Kind::Record => self.record_status(i),
-                    _ => s.status.clone(),
+            if nl.status() {
+                let (status, running) = {
+                    let s = self.nodes[i].state.lock().unwrap();
+                    let st = match &self.nodes[i].kind {
+                        Kind::Plugin { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
+                        Kind::Manual { rows } => manual_node::status(rows),
+                        Kind::Map => self.map_status(i),
+                        Kind::Combine { .. } | Kind::Invert => match self.area_from(i) {
+                            Ok((a, _)) => map_node::area_status(&a),
+                            Err(e) => e,
+                        },
+                        Kind::Record => self.record_status(i),
+                        _ => s.status.clone(),
+                    };
+                    (st, s.running)
                 };
-                (st, s.running)
-            };
-            let status = if status.chars().count() > 34 { format!("{}…", status.chars().take(33).collect::<String>()) } else { status };
-            let sy = rect.bottom() - 12.0 * self.zoom;
-            if running {
-                let on = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-                painter.circle_filled(Pos2::new(rect.left() + 12.0 * self.zoom, sy), 3.5 * self.zoom, if on { LIVE } else { alpha(LIVE, 0.3) });
+                let status = if status.chars().count() > 34 { format!("{}…", status.chars().take(33).collect::<String>()) } else { status };
+                let sy = rect.bottom() - 12.0 * self.zoom;
+                if running {
+                    let on = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
+                    painter.circle_filled(Pos2::new(rect.left() + 12.0 * self.zoom, sy), 3.5 * self.zoom, if on { LIVE } else { alpha(LIVE, 0.3) });
+                }
+                painter.text(Pos2::new(rect.left() + 22.0 * self.zoom, sy), Align2::LEFT_CENTER, status, FontId::proportional(10.5 * self.zoom), DIM);
             }
-            painter.text(Pos2::new(rect.left() + 22.0 * self.zoom, sy), Align2::LEFT_CENTER, status, FontId::proportional(10.5 * self.zoom), DIM);
 
             let missing = self.graph.missing(i);
             for (k, p) in spec.inputs.iter().enumerate() {
@@ -988,7 +1010,7 @@ impl App {
 
     fn windows(&mut self, ctx: &egui::Context) {
         for i in 0..self.nodes.len() {
-            if !self.open[i] || self.nodes[i].hidden {
+            if !self.open[i] || self.nodes[i].hidden || !look::of(&self.nodes[i].kind).window() {
                 continue;
             }
             let mut open = true;

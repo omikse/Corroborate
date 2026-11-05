@@ -20,3 +20,9 @@ pub fn window(ui: &mut egui::Ui, path: &mut String, st: &Shared) {
     });
     source_info(ui, st);
 }
+
+/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
+/// change it (see `src/bin/corroborate/look.rs`).
+pub struct Look;
+
+impl crate::look::NodeLook for Look {}
