@@ -622,9 +622,6 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring, p
         desc.extend(plugins.iter().map(|p| format!("plugin {p}: separate program, fed the same 16 kHz audio through a pipe")));
         sh.lock().unwrap().module_desc = desc;
     }
-    // Plugins: started now, fed every chunk below; None once a plugin has gone.
-    let mut feeds: Vec<Option<std::sync::mpsc::SyncSender<Vec<f32>>>> =
-        plugins.iter().enumerate().map(|(i, p)| spawn_plugin(p, i, sh.clone(), &source_key(&src), src.is_live())).collect();
     let mut n: u64 = 0;
     let live = src.is_live();
     let t0 = Instant::now();
@@ -643,6 +640,18 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring, p
                 timebase::file_anchor(p).map(|a| Anchor { utc0: a.utc0 + start, source: a.source });
         }
     }
+
+    // Plugins: started now with the source, its UTC (Coordinated Universal Time) anchor when already
+    // known (files) and the manual data as arguments; fed every chunk below; None once one has gone.
+    let mut plugin_args = vec!["--source".to_string(), source_key(&src), if live { "--live" } else { "--file" }.to_string()];
+    if let Some(a) = anchor.lock().unwrap().as_ref() {
+        plugin_args.extend(["--utc0".to_string(), format!("{:.3}", a.utc0), "--utc-source".to_string(), a.source.clone()]);
+    }
+    for (k, v) in sh.lock().unwrap().manual.iter().filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty()) {
+        plugin_args.extend(["--manual".to_string(), format!("{}={}", k.trim(), v.trim())]);
+    }
+    let mut feeds: Vec<Option<std::sync::mpsc::SyncSender<Vec<f32>>>> =
+        plugins.iter().enumerate().map(|(i, p)| spawn_plugin(p, i, sh.clone(), &plugin_args)).collect();
 
     let mut handle = |x: &[f32]| {
         if live && n == 0 {
@@ -1004,13 +1013,12 @@ fn spawn_plugin(
     path: &str,
     idx: usize,
     sh: Arc<Mutex<Shared>>,
-    source: &str,
-    live: bool,
+    args: &[String],
 ) -> Option<std::sync::mpsc::SyncSender<Vec<f32>>> {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
     let started = doppler_live::no_window(&mut Command::new(path))
-        .args(["--source", source, if live { "--live" } else { "--file" }])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1382,7 +1390,7 @@ impl App {
         if !self.current.as_ref().is_some_and(|(c, _)| source_key(c) == source_key(&src)) {
             self.manual = load_manual(&src);
         }
-        self.sess = Session::open(src.clone(), label.clone(), self.settings.enabled_plugins());
+        self.sess = Session::open(src.clone(), label.clone(), self.settings.enabled_plugins(), self.manual.clone());
         self.sess.sh.lock().unwrap().manual = self.manual.clone();
         self.current = Some((src, label));
         self.result_key = 0;
@@ -1400,8 +1408,13 @@ impl App {
     }
 
     fn open_file_dialog(&mut self) {
-        let pick = rfd::FileDialog::new()
-            .set_title("Open recording")
+        // Start where recordings are saved (each in its own doppler-<UTC> folder); else wherever
+        // the system dialog last was.
+        let mut dialog = rfd::FileDialog::new().set_title("Open recording");
+        if std::path::Path::new(&self.settings.rec.folder).is_dir() {
+            dialog = dialog.set_directory(&self.settings.rec.folder);
+        }
+        let pick = dialog
             .add_filter("audio / video", &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "mka", "mkv", "webm", "mp4", "mov"])
             .add_filter("all files", &["*"])
             .pick_file();
@@ -3121,7 +3134,7 @@ fn main() -> Result<(), String> {
         input.map(|i| (source_for(&i, start), short_label(&i)))
     };
     let session = match &current {
-        Some((src, label)) => Session::open(src.clone(), label.clone(), Settings::load().enabled_plugins()),
+        Some((src, label)) => Session::open(src.clone(), label.clone(), Settings::load().enabled_plugins(), load_manual(src)),
         None => Session::idle(),
     };
 
@@ -3216,7 +3229,7 @@ impl Session {
         Self { sh: Arc::new(Mutex::new(s)), ctl: Self::controls(), ring: Default::default(), file: None }
     }
 
-    fn open(src: Source, label: String, plugins: Vec<String>) -> Self {
+    fn open(src: Source, label: String, plugins: Vec<String>, manual: Vec<(String, String)>) -> Self {
         let live = src.is_live();
         let offset = if let Source::Ffmpeg(_, Some(s)) = &src { *s } else { 0.0 };
         let file = match &src {
@@ -3225,6 +3238,8 @@ impl Session {
         };
         let mut shared = Self::shared(label, live, offset);
         shared.plugins = plugins.iter().map(|p| PluginView::new(p)).collect();
+        // Before the worker starts: plugins get the manual data when they start.
+        shared.manual = manual;
         let sh = Arc::new(Mutex::new(shared));
         let ctl = Self::controls();
         let ring: Ring = Default::default();

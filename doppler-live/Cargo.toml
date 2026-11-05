@@ -28,5 +28,9 @@ path = "src/bin/enf-plugin.rs"
 name = "meta-plugin"
 path = "src/bin/meta-plugin.rs"
 
+[[bin]]
+name = "adsb-check"
+path = "src/bin/adsb-check.rs"
+
 [profile.release]
 lto = "thin"

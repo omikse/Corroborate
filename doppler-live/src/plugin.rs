@@ -4,7 +4,9 @@
 //! pipes, so a plugin can be written in any language and a crash cannot take the viewer down.
 //!
 //! - **arguments**: `--source <path or URL>` and `--file` or `--live`, so a plugin can read the
-//!   source's own metadata. Plugins that only need audio can ignore them.
+//!   source's own metadata; `--utc0 <unix s> --utc-source <text>` when the UTC of the first sample
+//!   is already known (files); and `--manual key=value` for each filled MANUAL DATA field, as it
+//!   was when the plugin started. Plugins that only need audio can ignore them all.
 //! - **stdin**: the audio, raw f32 little-endian, mono, 16 000 Hz, from the first sample of the
 //!   source. End of input means the source ended: report what is still held, then exit.
 //! - **stdout**: one JSON object per line. Times are seconds from the first sample; frequencies Hz.
@@ -194,6 +196,110 @@ impl Parser<'_> {
     }
 }
 
+/// A whole JSON document, for plugins that read nested data (such as ADS-B API responses).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// Field `k` of an object.
+    pub fn get(&self, k: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(v) => v.iter().find(|(n, _)| n == k).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    pub fn num(&self) -> Option<f64> {
+        match self {
+            Json::Num(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn str(&self) -> Option<&str> {
+        match self {
+            Json::Str(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    /// The items of an array (empty for anything else).
+    pub fn arr(&self) -> &[Json] {
+        match self {
+            Json::Arr(v) => v,
+            _ => &[],
+        }
+    }
+}
+
+impl Parser<'_> {
+    fn json(&mut self) -> Option<Json> {
+        self.ws();
+        match *self.c.peek()? {
+            '{' => {
+                self.c.next();
+                let mut v = Vec::new();
+                self.ws();
+                if self.c.peek() == Some(&'}') {
+                    self.c.next();
+                    return Some(Json::Obj(v));
+                }
+                loop {
+                    self.ws();
+                    let k = self.string()?;
+                    self.ws();
+                    if self.c.next()? != ':' {
+                        return None;
+                    }
+                    v.push((k, self.json()?));
+                    self.ws();
+                    match self.c.next()? {
+                        ',' => continue,
+                        '}' => return Some(Json::Obj(v)),
+                        _ => return None,
+                    }
+                }
+            }
+            '[' => {
+                self.c.next();
+                let mut v = Vec::new();
+                self.ws();
+                if self.c.peek() == Some(&']') {
+                    self.c.next();
+                    return Some(Json::Arr(v));
+                }
+                loop {
+                    v.push(self.json()?);
+                    self.ws();
+                    match self.c.next()? {
+                        ',' => continue,
+                        ']' => return Some(Json::Arr(v)),
+                        _ => return None,
+                    }
+                }
+            }
+            _ => Some(match self.value()? {
+                Value::Str(s) => Json::Str(s),
+                Value::Num(x) => Json::Num(x),
+                Value::Bool(b) => Json::Bool(b),
+                Value::Null => Json::Null,
+            }),
+        }
+    }
+}
+
+/// Parse a whole JSON document.
+pub fn parse_json(doc: &str) -> Option<Json> {
+    Parser { c: doc.chars().peekable() }.json()
+}
+
 /// Parse one JSON object into its top-level fields; None if it is not a well-formed object.
 pub fn parse_object(line: &str) -> Option<Vec<(String, Value)>> {
     Parser { c: line.chars().peekable() }.object(None)
@@ -302,6 +408,22 @@ pub fn source_args() -> (Option<String>, bool) {
     (source, args.iter().any(|a| a == "--live"))
 }
 
+/// `--manual key=value` arguments: the MANUAL DATA fields filled when the plugin started.
+pub fn manual_args() -> Vec<(String, String)> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .filter(|w| w[0] == "--manual")
+        .filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+        .collect()
+}
+
+/// `--utc0` and `--utc-source`: the UTC (Unix seconds) of the first sample and where it came from.
+pub fn utc0_args() -> Option<(f64, String)> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    Some((at("--utc0")?.parse().ok()?, at("--utc-source").unwrap_or_default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +449,19 @@ mod tests {
         assert_eq!(parse_line(&track("h1", 12.0, 59.993, false)), Some(Msg::Track { id: "h1".into(), t: 12.0, hz: 59.993, ok: false }));
         assert_eq!(parse_line(&meta("place", "Oyster Bay, \"NY\"")), Some(Msg::Meta { key: "place".into(), value: "Oyster Bay, \"NY\"".into() }));
         assert_eq!(parse_line(r#"{"type":"meta","key":"n","value":3}"#), Some(Msg::Meta { key: "n".into(), value: "3".into() }));
+    }
+
+    #[test]
+    fn whole_documents() {
+        let d = parse_json(r#"{"now": 1.5e3, "ac": [{"hex": "ab4040", "alt_baro": "ground"}, {"hex": "x", "gs": 120.5}], "ok": true}"#).unwrap();
+        assert_eq!(d.get("now").and_then(Json::num), Some(1500.0));
+        let ac = d.get("ac").map(Json::arr).unwrap();
+        assert_eq!(ac.len(), 2);
+        assert_eq!(ac[0].get("alt_baro").and_then(Json::str), Some("ground"));
+        assert_eq!(ac[1].get("gs").and_then(Json::num), Some(120.5));
+        assert_eq!(d.get("ok"), Some(&Json::Bool(true)));
+        assert_eq!(parse_json("[1, 2,]"), None);
+        assert_eq!(parse_json("[]"), Some(Json::Arr(vec![])));
     }
 
     #[test]
