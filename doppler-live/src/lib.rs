@@ -4,6 +4,7 @@
 //! - `modules::planes`: aircraft Doppler curves. Whitened low-band STFT (`spectro`) →
 //!   Viterbi ridge (`ridge`) → straight-pass Doppler fit (`fit`) → gates (`detect`).
 //! - `modules::enf`: ENF (Electrical Network Frequency), the mains hum and its drift.
+//! - `plugin`: the protocol for plugins, separate programs fed the same audio through a pipe.
 //! - `ingest` reads WAV files and ffmpeg/stdin streams; `timebase` handles UTC
 //!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
@@ -12,6 +13,7 @@ pub mod fit;
 pub mod ingest;
 pub mod module;
 pub mod modules;
+pub mod plugin;
 pub mod ridge;
 pub mod spectro;
 pub mod synth;

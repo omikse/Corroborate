@@ -6,13 +6,15 @@ geolocation run (matching against ADS-B tracks)? Geolocation itself is not part 
 
 ## doppler-live
 
-A Rust crate with two binaries:
+A Rust crate with four binaries:
 
 - `doppler-live`: the lean headless detector (dependencies: `realfft`, `hound`). It prints passes as
   JSON lines.
 - `doppler-view`: an optional live viewer (egui) showing the waveform, the scrolling whitened
   spectrogram, a live spectrum slice, raw ridges, held candidates and detected passes as fitted
   curves. It is built only with `--features gui`, so the detector stays small.
+- `enf-plugin`: the ENF module as a viewer plugin (see Plugins below).
+- `meta-plugin`: a viewer plugin that records what a source says about itself (tags, coordinates, file times).
 
 ffmpeg must be on `PATH` for anything other than WAV input.
 
@@ -66,6 +68,8 @@ For YouTube live streams, get a direct stream URL with `yt-dlp -g -f "ba/b" <vid
   - **Ctrl+wheel**: zoom time, from 10 s up to the whole timeline (the box on the timeline bar scales with it)
   - **Shift+wheel** or sideways scroll: scroll time
   - **Page Up / Page Down**: move the frequency view by most of its height
+  - **Space**: play or pause the audio (the audio switch)
+  - **Left / Right arrows**: move the playhead (files) or the view (streams) by 5 s; **Shift** for 30 s
   - **Home** or **0**: go to the start of the timeline
   - **End**: go to the live edge (or the end of a file); the LIVE / FOLLOW button does the same
 - Zoomed out past 2048 frames, each column of the spectrogram shows the maximum of the frames it
@@ -98,9 +102,13 @@ output how it processed it. Each module lives in its own file under `src/modules
   are flagged as outliers, kept but not used. Runs of clear hum of 30 s or more are reported. On the reference
   recording it identifies a 60 Hz grid (US) and tracks the drift within about ±40 mHz.
 
-The CLI picks modules with `--modules planes,enf` (the default). The viewer shows both:
+The CLI picks modules with `--modules planes,enf` (the default). In the viewer, planes is built in and
+ENF comes as a plugin (`enf-plugin.exe`), imported with **Plugins ▸ Import plugin…**:
+- Each module has an eye icon in its header (like the eye in Blender or Photoshop): click it to hide that
+  module on the graph, its markers, the frequency bar and the minimap. Its list stays, and the eye opens it again.
 - Each module has its own box in the right panel. Click a finding to jump to it. Click the coloured
   header of a box (green for planes, blue for ENF) to show that module's view.
+  A plugin's box also shows its status, how its process stands, and any audio it could not keep up with.
 - **View ▸ Full spectrogram** shows the whole 0–8 kHz band. **View ▸ Waveform** and **View ▸ Spectrum slice**
   show or hide the waveform above the spectrogram and the spectrum slice to its right, giving the spectrogram more room.
 - The **frequency bar** on the left shows the whole
@@ -108,9 +116,49 @@ The CLI picks modules with `--modules planes,enf` (the default). The viewer show
   move it, drag its top or bottom edge to zoom, or click outside it to centre there.
 - Findings outside the visible band show as ▲/▼ arrows on the edge.
 - The **minimap** (toggle in the top bar) shows the whole 0–8 kHz band while zoomed in.
-- The **ENF** view shows the spectrogram around the hum with the measured hum frequency dashed over it, and a
-  drift strip underneath in mHz (millihertz) against the nominal frequency. The drift (tens of mHz) is far
-  smaller than one spectrogram bin (0.49 Hz), so it only shows in the strip.
+- **ENF** is the same spectrogram, zoomed in on the hum: the **ENF** header opens it at a 1 Hz span. Zoom
+  further (down to 0.2 Hz) to see the drift. The measured hum is always drawn as dashed lines over the
+  spectrogram, so the drift shows even where one spectrogram bin (0.49 Hz) is wider than the drift. The
+  drift itself is 40 mHz (millihertz) or less, so at the planes zoom it is about a pixel wide.
+
+### Plugins
+
+A plugin is a separate program, written in any language. The viewer starts each plugin that is switched
+on when a source opens, sends it the same audio the built-in modules get, and shows what it reports. A
+plugin that crashes stops on its own; the viewer carries on and says so in the plugin's box.
+
+- **Plugins ▸ Import plugin…** adds a program; the list there switches plugins on or off and removes them.
+  Changes restart the current source so the plugins see it from the first sample (not while recording).
+- **Arguments**: `--source <path or URL>` and `--file` or `--live`, so a plugin can read the source's own
+  metadata.
+- **Audio in** (stdin): raw f32 little-endian, mono, 16 000 Hz, from the first sample. End of input is the
+  end of the source. Files wait for every plugin; live streams never do, and audio a plugin could not keep
+  up with is counted in its box. A plugin must read stdin to the end, even if it ignores the audio.
+- **Messages out** (stdout): one JSON object per line, times in seconds from the first sample:
+  `hello` (name, about, colour), `status` (text for its box), `view` (the band its header shows),
+  `track` (a point of a measured frequency line, drawn dashed over the spectrogram) and `finding`
+  (start, end, band, label, detail: listed in its box, marked on the bars, written to the result JSON) and
+  `meta` (a key and value: a fact about the source for the result JSON, listed in its box).
+- **stderr**: free text; the last line is shown in its box.
+
+The protocol, with a reader and writers for Rust plugins, is in `src/plugin.rs`. Two complete examples:
+- `enf-plugin`: tracks and findings from the audio. On the reference hour it runs in about 5 s on its own.
+- `meta-plugin`: no audio analysis, only facts: ffprobe's container, duration, size, codec, every tag
+  (title, artist, creation_time…), coordinates from ISO 6709 location tags (phones and cameras write these),
+  other streams such as cover art, and the file system's created and modified times. Each value is labelled
+  with where it came from. Note that file system times are when the file arrived on this disk, which is
+  often not when the audio was recorded.
+
+### Manual data and the result JSON
+
+- **MANUAL DATA**, a box in the right panel, holds what you know about the source: date, time, place,
+  coordinates and notes, plus fields of your own (**+ field**). It is part of the viewer, always on.
+- Everything about a source ends up in one JSON: what was analysed and how, the manual data, the passes, and
+  each plugin with its state, facts (`meta`) and findings.
+  - **Files**: `<file>.doppler.json` next to the file, written when the analysis ends and again whenever a
+    plugin or the manual data adds to it (the bottom bar says where it went). Opening the file again loads
+    its manual data back.
+  - **Recordings** (REC on a live source): the recording's own `.json`, in its `doppler-<UTC>/` folder.
 
 ### Event fields
 

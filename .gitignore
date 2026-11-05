@@ -10,3 +10,4 @@ events.jsonl
 recordings/
 # per-recording folders: doppler-YYYYMMDD-HHMMSS/
 doppler-2*/
+*.doppler.json

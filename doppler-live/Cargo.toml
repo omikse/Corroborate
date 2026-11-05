@@ -20,5 +20,13 @@ name = "doppler-view"
 path = "src/bin/doppler-view.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "enf-plugin"
+path = "src/bin/enf-plugin.rs"
+
+[[bin]]
+name = "meta-plugin"
+path = "src/bin/meta-plugin.rs"
+
 [profile.release]
 lto = "thin"

@@ -146,7 +146,7 @@ pub fn spawn_ffmpeg_from(input: &str, sr: u32, start_s: Option<f64>) -> Result<(
         cmd.args(["-ss", &format!("{s:.3}")]);
     }
     let mut child = cmd
-        .args(["-i", input])
+        .args(input_args(input))
         .args(["-vn", "-ac", "1", "-ar", &sr.to_string(), "-f", "f32le", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -180,6 +180,40 @@ fn watch_ffmpeg_log(stderr: std::process::ChildStderr, first: FirstSegment) {
     });
 }
 
+/// ffmpeg input options: a file or URL as is; `dshow:<device>` captures a Windows microphone.
+fn input_args(input: &str) -> Vec<String> {
+    match input.strip_prefix("dshow:") {
+        Some(dev) => vec!["-f".into(), "dshow".into(), "-i".into(), format!("audio={dev}")],
+        None => vec!["-i".into(), input.into()],
+    }
+}
+
+/// Names of the Windows audio capture devices (microphones) that ffmpeg can open via DirectShow.
+pub fn list_microphones() -> Result<Vec<String>, String> {
+    let out = crate::no_window(&mut Command::new("ffmpeg"))
+        .args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+        .output()
+        .map_err(|e| format!("could not start ffmpeg (is it on PATH?): {e}"))?;
+    // ffmpeg writes the device list to stderr and exits with an error by design.
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    let mut names = Vec::new();
+    for line in text.lines() {
+        if line.contains("Alternative name") || !line.trim_end().ends_with("(audio)") {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (line.find('"'), line.rfind('"')) {
+            if b > a {
+                names.push(line[a + 1..b].to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        Err("ffmpeg found no microphones (DirectShow audio devices)".into())
+    } else {
+        Ok(names)
+    }
+}
+
 /// As `spawn_ffmpeg_from`, also reporting the first HLS segment opened, so the decoded
 /// audio can be tied to the playlist's PROGRAM-DATE-TIME.
 pub fn spawn_ffmpeg_logged(
@@ -194,7 +228,7 @@ pub fn spawn_ffmpeg_logged(
         cmd.args(["-ss", &format!("{s:.3}")]);
     }
     let mut child = cmd
-        .args(["-i", input])
+        .args(input_args(input))
         .args(["-vn", "-ac", "1", "-ar", &sr.to_string(), "-f", "f32le", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
