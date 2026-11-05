@@ -12,22 +12,18 @@
 
 pub mod area;
 pub mod core;
-pub mod detect;
-pub mod fit;
 pub mod ingest;
 pub mod locate;
 pub mod module;
 pub mod modules;
 pub mod plugin;
-pub mod ridge;
-pub mod spectro;
 pub mod graph;
 pub mod sync;
 pub mod synth;
 pub mod timebase;
 pub mod timeline;
 
-pub use detect::{Config, Detector, Event};
+pub use modules::planes::detect::{Config, Detector, Event};
 pub use module::{Finding, Module, INPUT_SR};
 
 /// Run helper tools (ffmpeg, ffprobe, curl, yt-dlp) without opening a console window of

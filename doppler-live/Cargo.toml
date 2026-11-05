@@ -27,15 +27,15 @@ required-features = ["gui"]
 
 [[bin]]
 name = "enf-plugin"
-path = "src/bin/enf-plugin.rs"
+path = "src/modules/enf/plugin.rs"
 
 [[bin]]
 name = "meta-plugin"
-path = "src/bin/meta-plugin.rs"
+path = "src/modules/meta/main.rs"
 
 [[bin]]
 name = "adsb-check"
-path = "src/bin/adsb-check.rs"
+path = "src/modules/adsb-check/main.rs"
 
 [profile.release]
 lto = "thin"

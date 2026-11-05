@@ -48,6 +48,7 @@ fn role_text(r: Role) -> &'static str {
         Role::Transform => "transform",
         Role::Solver => "solver",
         Role::Record => "record",
+        Role::View => "view",
     }
 }
 

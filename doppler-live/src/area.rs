@@ -172,8 +172,39 @@ impl GridMap {
     }
 }
 
+/// Robinson projection (the published table, 5 degree steps, linear in between): (lat, lon) in
+/// degrees to (x, y) in 0..1 across and down the map. The map is `ROBINSON_ASPECT` times wider than high.
+pub fn robinson(lat: f64, lon: f64) -> (f64, f64) {
+    const X: [f64; 19] = [
+        1.0, 0.9986, 0.9954, 0.9900, 0.9822, 0.9730, 0.9600, 0.9427, 0.9216, 0.8962, 0.8679, 0.8350, 0.7986, 0.7597, 0.7186, 0.6732,
+        0.6213, 0.5722, 0.5322,
+    ];
+    const Y: [f64; 19] = [
+        0.0, 0.0620, 0.1240, 0.1860, 0.2480, 0.3100, 0.3720, 0.4340, 0.4958, 0.5571, 0.6176, 0.6769, 0.7346, 0.7903, 0.8435, 0.8936,
+        0.9394, 0.9761, 1.0,
+    ];
+    let a = lat.abs().min(90.0) / 5.0;
+    let i = (a.floor() as usize).min(17);
+    let f = a - i as f64;
+    let (xf, yf) = (X[i] + (X[i + 1] - X[i]) * f, Y[i] + (Y[i + 1] - Y[i]) * f);
+    let x = 0.8487 * xf * lon.clamp(-180.0, 180.0).to_radians();
+    let y = 1.3523 * yf * lat.signum();
+    (0.5 + x / (2.0 * 0.8487 * std::f64::consts::PI), 0.5 - y / (2.0 * 1.3523))
+}
+
+pub const ROBINSON_ASPECT: f64 = 0.8487 * std::f64::consts::PI / 1.3523;
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn robinson_corners() {
+        let (x, y) = robinson(0.0, 0.0);
+        assert!((x - 0.5).abs() < 1e-9 && (y - 0.5).abs() < 1e-9);
+        assert!((robinson(0.0, 180.0).0 - 1.0).abs() < 1e-9);
+        assert!(robinson(90.0, 0.0).1.abs() < 1e-9);
+        assert!((robinson(90.0, 180.0).0 - (0.5 + 0.5 * 0.5322)).abs() < 1e-9);
+    }
+
     use super::*;
 
     #[test]

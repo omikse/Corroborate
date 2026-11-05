@@ -19,7 +19,7 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2,
 };
 use nodes::Kind;
-use doppler_live::area::{GridMap, WorldMask, COLS, ROWS};
+use doppler_live::area::{robinson, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
 use runtime::{EnfJob, Input, Job, PluginJob, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +61,7 @@ fn role_text(r: Role) -> &'static str {
         Role::Transform => "transform",
         Role::Solver => "solver",
         Role::Record => "record",
+        Role::View => "view",
     }
 }
 
@@ -181,6 +182,7 @@ struct App {
 }
 
 const NODE_W: f32 = 210.0;
+const MAP_NODE_W: f32 = 320.0;
 const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
@@ -297,6 +299,7 @@ impl App {
                 Kind::GridFrequencies { path } => ("grid-frequencies", path.clone()),
                 Kind::Plugin { path } => ("plugin", path.clone()),
                 Kind::Record => ("record", String::new()),
+                Kind::Map => ("map", String::new()),
             };
             text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
@@ -340,6 +343,7 @@ impl App {
                         "grid-frequencies" => Kind::GridFrequencies { path: p.clone() },
                         "plugin" => Kind::Plugin { path: p },
                         "record" => Kind::Record,
+                        "map" => Kind::Map,
                         _ => continue,
                     };
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
@@ -408,6 +412,28 @@ impl App {
         manual_area(rows)
     }
 
+    /// The area a node gives on its location output, and how it was reached.
+    fn area_from(&self, from: NodeId) -> Result<(Arc<WorldMask>, String), String> {
+        let n = &self.nodes[from];
+        match &n.kind {
+            Kind::Enf => {
+                let s = n.state.lock().unwrap();
+                match &s.enf_area {
+                    Some(a) => Ok((a.clone(), s.enf_area_note.clone())),
+                    None if !s.enf_area_note.is_empty() => Err(s.enf_area_note.clone()),
+                    None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
+                }
+            }
+            Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(a), l)).ok_or("no coordinates typed in".to_string()),
+            Kind::Record => {
+                let (m, steps) = self.record_area(from);
+                let n = steps.iter().filter(|s| s.2.is_some()).count();
+                Ok((Arc::new(m), format!("the whole world cut by {n} area(s)")))
+            }
+            _ => Err("this node gives no area".into()),
+        }
+    }
+
     /// The Record node's location: the whole world, AND each area wired into its location inputs.
     /// Steps: (node, how its area was reached, its fraction of Earth or None while it has none).
     fn record_area(&self, rec: NodeId) -> (WorldMask, Vec<(String, String, Option<f64>)>) {
@@ -415,25 +441,13 @@ impl App {
         let mut steps = Vec::new();
         for inp in nodes::RECORD_LOCATIONS {
             let Some((from, _)) = self.graph.feeder(rec, inp) else { continue };
-            let n = &self.nodes[from];
-            let area: Result<(Arc<WorldMask>, String), String> = match &n.kind {
-                Kind::Enf => {
-                    let s = n.state.lock().unwrap();
-                    match &s.enf_area {
-                        Some(a) => Ok((a.clone(), s.enf_area_note.clone())),
-                        None if !s.enf_area_note.is_empty() => Err(s.enf_area_note.clone()),
-                        None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
-                    }
-                }
-                Kind::Manual { rows } => manual_area(rows).map(|(a, l)| (Arc::new(a), l)).ok_or("no coordinates typed in".to_string()),
-                _ => Err("this node gives no area".into()),
-            };
-            match area {
+            let label = self.nodes[from].label.clone();
+            match self.area_from(from) {
                 Ok((a, note)) => {
                     m = m.and(&a);
-                    steps.push((n.label.clone(), note, Some(a.fraction())));
+                    steps.push((label, note, Some(a.fraction())));
                 }
-                Err(e) => steps.push((n.label.clone(), e, None)),
+                Err(e) => steps.push((label, e, None)),
             }
         }
         (m, steps)
@@ -593,6 +607,7 @@ impl App {
                 Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => {
                     body.push_str(&format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live));
                 }
+                Kind::Map => {}
                 Kind::Record => {
                     drop(s);
                     let (m, steps) = self.record_area(i);
@@ -661,7 +676,9 @@ impl App {
     fn node_rect(&self, origin: Pos2, i: NodeId) -> Rect {
         let spec = &self.graph.nodes()[i].spec;
         let rows = spec.inputs.len().max(spec.outputs.len()).max(1) as f32;
-        Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2(), Vec2::new(NODE_W, HEAD + rows * ROW + 26.0))
+        // The Map node shows its map on the canvas, below its port.
+        let (w, extra) = if matches!(self.nodes[i].kind, Kind::Map) { (MAP_NODE_W, MAP_NODE_W / ROBINSON_ASPECT as f32 + 8.0) } else { (NODE_W, 0.0) };
+        Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2(), Vec2::new(w, HEAD + rows * ROW + 26.0 + extra))
     }
 
     fn port_pos(&self, origin: Pos2, i: NodeId, idx: usize, out: bool) -> Pos2 {
@@ -709,6 +726,10 @@ impl App {
         ui.label(egui::RichText::new("OUTPUT").small().color(DIM));
         if ui.button("Result record").clicked() {
             pick = Some(Kind::Record);
+        }
+        ui.label(egui::RichText::new("VIEW").small().color(DIM));
+        if ui.button("Map").clicked() {
+            pick = Some(Kind::Map);
         }
         if let Some(k) = pick {
             let id = self.add(k, at);
@@ -771,7 +792,7 @@ impl App {
                 continue;
             }
             let rect = self.node_rect(origin, i);
-            let head = Rect::from_min_size(rect.min, Vec2::new(NODE_W, HEAD));
+            let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
             if resp.dragged() && self.wiring.is_none() {
                 self.nodes[i].pos += resp.drag_delta();
@@ -805,6 +826,12 @@ impl App {
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
             painter.text(head.left_center() + Vec2::new(9.0, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0), tc);
             painter.text(head.right_center() - Vec2::new(9.0, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0), DIM);
+            if matches!(self.nodes[i].kind, Kind::Map) {
+                let top = rect.top() + HEAD + ROW + 8.0;
+                let map = Rect::from_min_size(Pos2::new(rect.left() + 6.0, top), Vec2::new(rect.width() - 12.0, (rect.width() - 12.0) / ROBINSON_ASPECT as f32));
+                let area = self.graph.feeder(i, "location").and_then(|(f, _)| self.area_from(f).ok()).map(|(a, _)| a);
+                paint_area_map(&painter.with_clip_rect(map), map, area.as_deref(), &self.grid_outlines());
+            }
             // Status line at the bottom of the node.
             let (status, running) = {
                 let s = self.nodes[i].state.lock().unwrap();
@@ -814,6 +841,12 @@ impl App {
                         if first.is_empty() { s.plugin.state.clone() } else { first.to_string() }
                     }
                     Kind::Manual { rows } => format!("{} facts", rows.iter().filter(|(_, v)| !v.trim().is_empty()).count()),
+                    Kind::Map => match self.graph.feeder(i, "location").map(|(f, _)| self.area_from(f)) {
+                        Some(Ok((a, _))) if a.is_empty() => "nothing kept: contradiction".into(),
+                        Some(Ok((a, _))) => format!("{:.1} % of Earth kept", a.fraction() * 100.0),
+                        Some(Err(e)) => e,
+                        None => "no location wired".into(),
+                    },
                     Kind::Record => {
                         let (m, _) = self.record_area(i);
                         let left = if m.is_empty() { "nothing left: contradiction".to_string() } else { format!("{:.1} % of Earth left", m.fraction() * 100.0) };
@@ -1203,6 +1236,27 @@ impl App {
             Kind::Plugin { path } => {
                 ui.colored_label(DIM, format!("program: {path}"));
                 plugin_window(ui, &state);
+            }
+            Kind::Map => {
+                let outlines = self.grid_outlines();
+                match self.graph.feeder(i, "location") {
+                    None => {
+                        ui.colored_label(DIM, "wire a location into this node: ENF, Manual data or the Result record");
+                        draw_area_map(ui, None, &outlines);
+                    }
+                    Some((from, _)) => match self.area_from(from) {
+                        Ok((a, note)) => {
+                            let lab = &self.nodes[from].label;
+                            ui.label(format!("{lab}: {:.2} % of Earth kept ({:.1} million km²)", a.fraction() * 100.0, a.area_km2() / 1e6));
+                            ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { DIM }, note);
+                            draw_area_map(ui, Some(&a), &outlines);
+                        }
+                        Err(e) => {
+                            ui.colored_label(DIM, format!("{}: {e}", self.nodes[from].label));
+                            draw_area_map(ui, None, &outlines);
+                        }
+                    },
+                }
             }
             Kind::Record => {
                 self.record_map(ui, i);
@@ -1612,46 +1666,114 @@ impl App {
         if steps.is_empty() {
             ui.colored_label(DIM, "wire areas (ENF location, Manual place) into the location inputs to subtract from the world");
         }
-        let n = m.cells.iter().filter(|&&c| c).count() as u64;
-        let stamp = (n, m.fraction());
-        if self.textures.get(&i).is_none_or(|(a, b, _)| (*a, *b) != stamp) {
-            let mut px = Vec::with_capacity(ROWS * COLS * 4);
-            for r in 0..ROWS {
-                for c in 0..COLS {
-                    px.extend_from_slice(&if m.get(r, c) { [70, 150, 130, 255] } else { [28, 30, 34, 255] });
-                }
-            }
-            let img = ColorImage::from_rgba_unmultiplied([COLS, ROWS], &px);
-            let tex = ui.ctx().load_texture(format!("area{i}"), img, TextureOptions::NEAREST);
-            self.textures.insert(i, (stamp.0, stamp.1, tex));
-        }
-        let w = ui.available_width().min(720.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / 2.0), Sense::hover());
-        let p = ui.painter_at(rect);
-        p.image(self.textures[&i].2.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        let at = |lat: f64, lon: f64| {
-            Pos2::new(rect.left() + ((lon + 180.0) / 360.0) as f32 * rect.width(), rect.top() + ((90.0 - lat) / 180.0) as f32 * rect.height())
-        };
-        for k in -5..=5 {
-            let lon = k as f64 * 30.0;
-            p.line_segment([at(90.0, lon), at(-90.0, lon)], Stroke::new(1.0, alpha(LINE, 0.6)));
-        }
-        for k in -2..=2 {
-            let lat = k as f64 * 30.0;
-            p.line_segment([at(lat, -180.0), at(lat, 180.0)], Stroke::new(1.0, alpha(LINE, 0.6)));
-        }
-        // The grid regions are the only geography drawn: there are no coastlines.
+        draw_area_map(ui, Some(&m), &self.grid_outlines());
+    }
+}
+
+impl App {
+    /// Outlines of the regions of every Grid frequencies node: the only geography drawn.
+    fn grid_outlines(&self) -> Vec<(f64, Vec<(f64, f64)>)> {
+        let mut v = Vec::new();
         for n in self.nodes.iter().filter(|n| !n.hidden) {
             if let Kind::GridFrequencies { path } = &n.kind {
                 if let Ok(g) = load_grid(path) {
-                    for r in &g.regions {
-                        let pts: Vec<Pos2> = r.polygon.iter().map(|&(a, b)| at(a, b)).collect();
-                        let c = if r.hz > 55.0 { Color32::from_rgb(224, 164, 88) } else { Color32::from_rgb(110, 170, 255) };
-                        p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, alpha(c, 0.7))));
-                    }
+                    v.extend(g.regions.into_iter().map(|r| (r.hz, r.polygon)));
                 }
             }
         }
-        ui.colored_label(DIM, "teal: still possible · outlines: grid regions (blue 50 Hz, orange 60 Hz) · lines every 30° · no coastlines drawn");
+        v
+    }
+}
+
+const KEPT: Color32 = Color32::from_rgb(70, 170, 90);
+const CUT: Color32 = Color32::from_rgb(170, 55, 55);
+
+/// A world map in the Robinson projection. Green: cells the area keeps (where it adds
+/// possibility). Red: cells it rules out (where it subtracts). Grey: no area yet.
+fn draw_area_map(ui: &mut egui::Ui, area: Option<&WorldMask>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+    let w = ui.available_width().clamp(200.0, 1400.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w / ROBINSON_ASPECT as f32), Sense::hover());
+    let p = ui.painter_at(rect);
+    paint_area_map(&p, rect, area, outlines);
+    let at = |lat: f64, lon: f64| {
+        let (x, y) = robinson(lat, lon);
+        Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
+    };
+    if let Some(h) = resp.hover_pos() {
+        // The nearest cell centre under the pointer.
+        let mut best = (f32::MAX, 0.0, 0.0);
+        for r in 0..ROWS {
+            for c in (0..COLS).step_by(2) {
+                let (lat, lon) = (89.5 - r as f64, c as f64 - 179.5);
+                let d = at(lat, lon).distance_sq(h);
+                if d < best.0 {
+                    best = (d, lat, lon);
+                }
+            }
+        }
+        let txt = format!("{:.1}°, {:.1}°", best.1, best.2);
+        p.text(rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, txt, FontId::proportional(11.0), TEXT);
+    }
+    ui.colored_label(
+        DIM,
+        "green: kept (still possible) · red: ruled out · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · no coastlines",
+    );
+}
+
+fn paint_area_map(p: &egui::Painter, rect: Rect, area: Option<&WorldMask>, outlines: &[(f64, Vec<(f64, f64)>)]) {
+    let at = |lat: f64, lon: f64| {
+        let (x, y) = robinson(lat, lon);
+        Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
+    };
+    // Cells, merged into runs per row: within a row the projection is linear in longitude,
+    // so a run is exactly a trapezoid.
+    let mut mesh = egui::epaint::Mesh::default();
+    for r in 0..ROWS {
+        let (top, bot) = (90.0 - r as f64, 89.0 - r as f64);
+        let mut c = 0;
+        while c < COLS {
+            let state = area.map(|a| a.get(r, c));
+            let a = c;
+            while c + 1 < COLS && area.map(|m| m.get(r, c + 1)) == state {
+                c += 1;
+            }
+            let (l, rt) = (a as f64 - 180.0, c as f64 - 179.0);
+            let col = match state {
+                Some(true) => KEPT,
+                Some(false) => CUT,
+                None => Color32::from_rgb(44, 48, 54),
+            };
+            let i = mesh.vertices.len() as u32;
+            for q in [at(top, l), at(top, rt), at(bot, rt), at(bot, l)] {
+                mesh.colored_vertex(q, col);
+            }
+            mesh.add_triangle(i, i + 1, i + 2);
+            mesh.add_triangle(i, i + 2, i + 3);
+            c += 1;
+        }
+    }
+    p.add(egui::Shape::mesh(mesh));
+    let grat = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90));
+    for k in -6i32..=6 {
+        let lon = k as f64 * 30.0;
+        let pts: Vec<Pos2> = (0..=36).map(|j| at(90.0 - j as f64 * 5.0, lon)).collect();
+        p.add(egui::Shape::line(pts, if k.abs() == 6 { Stroke::new(1.0, LINE) } else { grat }));
+    }
+    for k in -2..=2 {
+        let lat = k as f64 * 30.0;
+        p.line_segment([at(lat, -180.0), at(lat, 180.0)], grat);
+    }
+    for (hz, poly) in outlines {
+        let mut pts = Vec::new();
+        for j in 0..poly.len() {
+            let (a, b) = (poly[j], poly[(j + 1) % poly.len()]);
+            let steps = ((a.0 - b.0).abs().max((a.1 - b.1).abs()) / 2.0).ceil().max(1.0) as usize;
+            for s in 0..steps {
+                let f = s as f64 / steps as f64;
+                pts.push(at(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f));
+            }
+        }
+        let c = if *hz > 55.0 { Color32::from_rgb(255, 200, 120) } else { Color32::from_rgb(150, 200, 255) };
+        p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, alpha(c, 0.8))));
     }
 }

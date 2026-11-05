@@ -4,7 +4,7 @@
 //! `describe`, so every number in the output can be traced to how it was made.
 
 use crate::core::NodeSpec;
-use crate::detect::Event;
+use crate::modules::planes::detect::Event;
 use crate::modules::enf::EnfSegment;
 use crate::timebase::Anchor;
 

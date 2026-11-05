@@ -1,9 +1,14 @@
 //! Planes module: aircraft Doppler curves (propeller blade-pass tones).
 //!
 //! Takes the shared 16 kHz stream, downsamples it to the detector's 4 kHz, and runs the
-//! detector (`crate::detect`): whitened STFT, Viterbi ridges, straight-pass Doppler fit, gates.
+//! detector (`detect.rs` here): whitened STFT, Viterbi ridges, straight-pass Doppler fit, gates.
 
-use crate::detect::{Config, Detector, Event};
+pub mod detect;
+pub mod fit;
+pub mod ridge;
+pub mod spectro;
+
+use detect::{Config, Detector, Event};
 use crate::ingest::Resampler;
 use crate::core::{NodeSpec, Port, PortKind, Role};
 use crate::module::{Finding, Module, INPUT_SR};

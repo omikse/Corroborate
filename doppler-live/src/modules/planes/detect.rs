@@ -6,9 +6,9 @@
 //! kept only if the fit is good and physical. The same pass found again in a later window, or
 //! on one of its harmonics, is reported once.
 
-use crate::fit::{self, model};
-use crate::ridge::{subbin, Viterbi};
-use crate::spectro::Frontend;
+use crate::modules::planes::fit::{self, model};
+use crate::modules::planes::ridge::{subbin, Viterbi};
+use crate::modules::planes::spectro::Frontend;
 
 #[derive(Clone, Debug)]
 pub struct Config {

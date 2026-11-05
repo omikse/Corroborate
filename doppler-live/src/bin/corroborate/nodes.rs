@@ -19,6 +19,8 @@ pub enum Kind {
     /// A separate program speaking the plugin protocol (meta-plugin, adsb-check, …).
     Plugin { path: String },
     Record,
+    /// Shows an area on a world map (Robinson projection).
+    Map,
 }
 
 pub const MANUAL_KEYS: [&str; 5] = ["date", "time", "place", "coordinates", "notes"];
@@ -44,6 +46,7 @@ impl Kind {
             Kind::GridFrequencies { .. } => "Grid frequencies (50/60 Hz)".into(),
             Kind::Plugin { path } => plugin_label(path),
             Kind::Record => "Result record".into(),
+            Kind::Map => "Map".into(),
         }
     }
 
@@ -98,8 +101,9 @@ impl Kind {
                     .chain(RECORD_FACTS.iter().map(|n| Port::opt(n, Json)))
                     .chain(RECORD_LOCATIONS.iter().map(|n| Port::opt(n, Location)))
                     .collect(),
-                outputs: vec![],
+                outputs: vec![Port::req("location", Location)],
             },
+            Kind::Map => NodeSpec { name: "map", role: Role::View, inputs: vec![Port::req("location", Location)], outputs: vec![] },
         }
     }
 }
@@ -133,7 +137,7 @@ pub fn bundled_plugins() -> Vec<String> {
 pub fn bundled_grid_file() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    [dir.join("grid-frequencies.json"), dir.join("data").join("grid-frequencies.json"), dir.join("../../data/grid-frequencies.json")]
+    [dir.join("grid-frequencies.json"), dir.join("data").join("grid-frequencies.json"), dir.join("../../src/modules/enf/grid-frequencies.json")]
         .into_iter()
         .find(|p| p.exists())
         .map_or(String::new(), |p| p.canonicalize().unwrap_or(p).to_string_lossy().trim_start_matches(r"\?\").to_string())

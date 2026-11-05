@@ -1,6 +1,6 @@
 //! Synthetic test audio: Doppler passes with harmonics, optional steady hum, white noise.
 
-use crate::fit::{model, C_SOUND};
+use crate::modules::planes::fit::{model, C_SOUND};
 
 #[derive(Clone, Debug)]
 pub struct Pass {

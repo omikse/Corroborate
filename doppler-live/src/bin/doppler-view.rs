@@ -16,11 +16,11 @@
 //! Audio is decoded at 16 kHz; the detector gets a 4 kHz copy. The window only reads shared
 //! state written by the worker thread.
 
-use doppler_live::fit::model;
+use doppler_live::modules::planes::fit::model;
 use doppler_live::timebase::{self, Anchor, SharedAnchor};
 use doppler_live::plugin::{self, PluginFinding};
 use doppler_live::modules::planes::Planes;
-use doppler_live::spectro::Frontend;
+use doppler_live::modules::planes::spectro::Frontend;
 use doppler_live::{ingest, Config, Detector, Event, Module};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Id, Key, Pos2, Rect, Sense, Shape, Stroke,

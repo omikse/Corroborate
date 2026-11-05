@@ -3,7 +3,7 @@
 //! plugins are separate programs fed through a pipe, as in the old viewer. Every node's
 //! results land in its own shared state, which the GUI reads.
 
-use doppler_live::detect::{Config, Event};
+use doppler_live::modules::planes::detect::{Config, Event};
 use doppler_live::module::{Finding, Module};
 use doppler_live::modules::enf::{Enf, EnfPoint, EnfSegment};
 use doppler_live::modules::planes::Planes;

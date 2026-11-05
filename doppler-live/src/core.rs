@@ -163,6 +163,8 @@ pub enum Role {
     Solver,
     /// Stores results: the result JSON and the evidence trail.
     Record,
+    /// Shows data (a map, a plot); gives nothing.
+    View,
 }
 
 /// What a node is: its role, typed ports and a name. Nodes are programs; this is the
