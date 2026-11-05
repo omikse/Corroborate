@@ -3,12 +3,11 @@
 //! stores and dispatches to those modules. Nothing about a node is written down twice.
 
 use corroborate::core::NodeSpec;
-use corroborate::modules::{combine, enf, file, grid_frequencies, invert, manual, map, mic, planes, plugin, record, stream};
+use corroborate::modules::{combine, enf, grid_frequencies, invert, manual, map, mic, planes, plugin, record, source};
 
 #[derive(Clone, Debug)]
 pub enum Kind {
-    File { path: String },
-    Stream { url: String },
+    Source { input: String },
     Mic { device: String },
     /// Facts typed in by a person: date, time, place, coordinates, notes, own fields.
     Manual { rows: Vec<(String, String)> },
@@ -33,13 +32,12 @@ pub use record::{EVENTS as RECORD_EVENTS, FACTS as RECORD_FACTS, LOCATIONS as RE
 
 impl Kind {
     pub fn is_source(&self) -> bool {
-        matches!(self, Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. })
+        matches!(self, Kind::Source { .. } | Kind::Mic { .. })
     }
 
     pub fn default_label(&self) -> String {
         match self {
-            Kind::File { .. } => file::LABEL.into(),
-            Kind::Stream { .. } => stream::LABEL.into(),
+            Kind::Source { .. } => source::LABEL.into(),
             Kind::Mic { .. } => mic::LABEL.into(),
             Kind::Manual { .. } => manual::LABEL.into(),
             Kind::Planes => planes::LABEL.into(),
@@ -55,8 +53,7 @@ impl Kind {
 
     pub fn spec(&self) -> NodeSpec {
         match self {
-            Kind::File { .. } => file::spec(),
-            Kind::Stream { .. } => stream::spec(),
+            Kind::Source { .. } => source::spec(),
             Kind::Mic { .. } => mic::spec(),
             Kind::Manual { .. } => manual::spec(),
             Kind::Planes => planes::spec(),
@@ -74,8 +71,8 @@ impl Kind {
     /// The node's name in the file is `spec().name`.
     pub fn saved_param(&self) -> String {
         match self {
-            Kind::File { path } | Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } => path.clone(),
-            Kind::Stream { url } => url.clone(),
+            Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } => path.clone(),
+            Kind::Source { input } => input.clone(),
             Kind::Mic { device } => device.clone(),
             Kind::Combine { any } => combine::mode(*any).into(),
             Kind::Manual { .. } | Kind::Planes | Kind::Record | Kind::Map | Kind::Invert => String::new(),
@@ -85,8 +82,7 @@ impl Kind {
     /// A node read back from a project file: its saved name and setting.
     pub fn from_saved(name: &str, param: String) -> Option<Kind> {
         Some(match name {
-            file::NAME => Kind::File { path: param },
-            stream::NAME => Kind::Stream { url: param },
+            source::NAME | "file" | "stream" => Kind::Source { input: param },
             mic::NAME => Kind::Mic { device: param },
             manual::NAME => Kind::Manual { rows: Vec::new() },
             planes::NAME => Kind::Planes,
@@ -110,8 +106,7 @@ pub fn menu() -> Vec<(&'static str, Vec<Kind>)> {
         (
             "SOURCES",
             vec![
-                Kind::File { path: String::new() },
-                Kind::Stream { url: String::new() },
+                Kind::Source { input: String::new() },
                 Kind::Mic { device: String::new() },
                 Kind::Manual { rows: manual::defaults() },
             ],

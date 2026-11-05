@@ -1,15 +1,16 @@
-//! How a node looks and behaves on the canvas. Every node folder has a `Look` in its `node.rs`
-//! implementing this trait; each method has a default, so an empty `impl NodeLook for Look {}`
-//! is the standard node. Override a method in the node's own folder to change only that node:
+//! How a node looks on the canvas. Nodes have no separate windows: everything a node shows and
+//! every control it has is drawn in the node itself. Every node folder has a `Look` in its
+//! `node.rs` implementing this trait; each method has a default. Override a method in the node's
+//! own folder to change only that node:
 //!
 //! - `size`: the node's size on the canvas (unzoomed), given the standard size.
 //! - `fill`: the node's background colour.
 //! - `body`: draw inside the node, below its title and above its status line (the port dots and
-//!   names, centred on the side edges, are drawn over it). `ui` is a child
-//!   area there: paint with `ui.painter()`, or add controls (buttons, text fields, combo boxes);
-//!   controls take clicks before the node's own drag. Multiply sizes by `app.zoom`.
+//!   names, centred on the side edges, are drawn over it). `ui` is a child area there, with text
+//!   and spacing already scaled to the zoom: paint with `ui.painter()`, or add controls (buttons,
+//!   text fields, combo boxes); controls take clicks before the node's own drag. Use `content`
+//!   for the part clear of the port names, and multiply your own sizes by `app.zoom`.
 //! - `status`: false hides the status line at the bottom of the node.
-//! - `window`: false means double-click and "Open window" do nothing for this node.
 
 use super::*;
 
@@ -27,17 +28,12 @@ pub trait NodeLook: Sync {
     fn status(&self) -> bool {
         true
     }
-
-    fn window(&self) -> bool {
-        true
-    }
 }
 
 /// The look of a node kind: its folder's `Look`.
 pub fn of(kind: &Kind) -> &'static dyn NodeLook {
     match kind {
-        Kind::File { .. } => &file_node::Look,
-        Kind::Stream { .. } => &stream_node::Look,
+        Kind::Source { .. } => &source_node::Look,
         Kind::Mic { .. } => &mic_node::Look,
         Kind::Manual { .. } => &manual_node::Look,
         Kind::Planes => &planes_node::Look,
@@ -49,4 +45,45 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Combine { .. } => &combine_node::Look,
         Kind::Invert => &invert_node::Look,
     }
+}
+
+/// Text, spacing and controls in a node scaled with the canvas zoom (called before `body`).
+pub fn scale(ui: &mut egui::Ui, z: f32) {
+    let st = ui.style_mut();
+    for f in st.text_styles.values_mut() {
+        f.size *= z;
+    }
+    st.spacing.item_spacing *= z;
+    st.spacing.button_padding *= z;
+    st.spacing.interact_size *= z;
+    st.spacing.icon_width *= z;
+    st.spacing.icon_width_inner *= z;
+    st.spacing.icon_spacing *= z;
+}
+
+/// Width a port name takes beside its dot, unzoomed (11.5 px text, about 6.3 px a character).
+fn names_w(ports: &[corroborate::core::Port]) -> f32 {
+    ports.iter().map(|p| p.name.chars().count()).max().map_or(0.0, |n| n as f32 * 6.3 + 16.0)
+}
+
+/// The body area clear of the port names on the left (inputs) and right (outputs).
+pub fn content(app: &App, ui: &egui::Ui, i: NodeId) -> Rect {
+    let spec = &app.graph.nodes()[i].spec;
+    let r = ui.max_rect();
+    Rect::from_min_max(Pos2::new(r.left() + names_w(&spec.inputs) * app.zoom, r.top()), Pos2::new(r.right() - names_w(&spec.outputs) * app.zoom, r.bottom()))
+}
+
+/// Run `f` in a child area at `rect`.
+pub fn area<R>(ui: &mut egui::Ui, rect: Rect, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), f).inner
+}
+
+/// Small text in one colour, cut with … when it does not fit.
+pub fn line(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).small().color(color)).truncate());
+}
+
+/// Small text in one colour, wrapped onto more lines when it does not fit.
+pub fn wrapped(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).small().color(color)).wrap());
 }

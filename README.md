@@ -22,7 +22,8 @@ The tool is one movable folder: everything it keeps lives next to the program, i
 Nothing goes to system folders.
 
 In the workbench: right-click to add nodes, drag from an output to an input to wire (types must
-match), double-click a node to open its window. **Demos** has the synthetic protest scenario and the
+match). Nodes have no windows: each shows its data and controls on the canvas. `--new` opens an
+empty project (the old one is copied to `settings\project.bak.txt`). **Demos** has the synthetic protest scenario and the
 ENF location demo.
 
 ## Modules
@@ -36,14 +37,12 @@ To change one node, edit only its folder:
 - **Ports:** `spec()` in `mod.rs`. Built-in projects skip wires to ports a node no longer has.
 - **Look on the canvas:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
   `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls
-  such as buttons or a file picker), `status` (false) hides the status line, and `window` (false) turns off
-  the double-click window. The Map node is the example: its map is drawn by `body`. Any node can
+  such as buttons or a file picker), and `status` (false) hides the status line. The Map node is the example: its map is drawn by `body`. Any node can
   draw a map with `map_node::paint`.
 
 | Node | Folder | What it gives |
 |---|---|---|
-| File | [file](src/modules/file/README.md) | audio and time from a recording on disk |
-| Stream | [stream](src/modules/stream/README.md) | audio and time from a URL, live |
+| Source data | [source](src/modules/source/README.md) | audio and time from a file (mp3, wav, video), a YouTube video or live stream, or a stream URL |
 | Microphone | [mic](src/modules/mic/README.md) | audio and time from a capture device |
 | Manual data | [manual](src/modules/manual/README.md) | facts typed in: date, time, place, coordinates, notes |
 | Planes (Doppler) | [planes](src/modules/planes/README.md) | aircraft passes: speed, closest approach, distance |

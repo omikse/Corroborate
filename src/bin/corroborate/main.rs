@@ -5,7 +5,8 @@
 //!
 //! Graph: scroll to zoom, drag a node by its header, drag empty space to pan, drag from an output port to an
 //! input port to wire them (types must match), right-click an input to unwire it, right-click
-//! a node or empty space for more. Double-click a node to open its window.
+//! a node or empty space for more (rename, delete). Nodes have no windows: each shows its data and
+//! controls on the canvas.
 //!
 //! This file draws the graph, the timeline and the windows' frames. What each node shows and does
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
@@ -20,8 +21,6 @@ mod runtime;
 mod combine_node;
 #[path = "../../modules/enf/node.rs"]
 mod enf_node;
-#[path = "../../modules/file/node.rs"]
-mod file_node;
 #[path = "../../modules/grid_frequencies/node.rs"]
 mod grid_node;
 #[path = "../../modules/invert/node.rs"]
@@ -38,8 +37,8 @@ mod planes_node;
 mod plugin_node;
 #[path = "../../modules/record/node.rs"]
 mod record_node;
-#[path = "../../modules/stream/node.rs"]
-mod stream_node;
+#[path = "../../modules/source/node.rs"]
+mod source_node;
 
 use corroborate::core::{PortKind, Role, SourceKind};
 use corroborate::graph::{Graph, GraphError, NodeId};
@@ -209,7 +208,6 @@ struct App {
     /// Canvas magnification, kept separate from the graph's saved node positions.
     zoom: f32,
     selected: Option<NodeId>,
-    open: Vec<bool>,
     /// Wire being dragged from (node, output index).
     wiring: Option<(NodeId, usize)>,
     msg: String,
@@ -246,7 +244,6 @@ impl App {
             pan: Vec2::ZERO,
             zoom: 1.0,
             selected: None,
-            open: Vec::new(),
             wiring: None,
             msg: String::new(),
             stop: None,
@@ -263,12 +260,16 @@ impl App {
             area_cache: Default::default(),
             last_project_save: Instant::now(),
         };
-        if !app.load_project() {
+        if std::env::args().any(|a| a == "--new") {
+            // --new: an empty canvas (the old project file is kept as project.bak.txt).
+            let dir = corroborate::home().join("settings");
+            let _ = std::fs::copy(dir.join("project.txt"), dir.join("project.bak.txt"));
+        } else if !app.load_project() {
             app.default_project();
         }
         if let Some(src) = start {
             // A path or URL on the command line goes into the first source node.
-            let kind = if src.contains("://") { Kind::Stream { url: src } } else { Kind::File { path: src } };
+            let kind = Kind::Source { input: src };
             match app.nodes.iter().position(|n| !n.hidden && n.kind.is_source()) {
                 Some(i) => app.nodes[i].kind = kind,
                 None => {
@@ -285,7 +286,6 @@ impl App {
     fn add(&mut self, kind: Kind, pos: Pos2) -> NodeId {
         let id = self.graph.add(kind.default_label(), kind.spec());
         self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false });
-        self.open.push(false);
         id
     }
 
@@ -311,11 +311,10 @@ impl App {
         });
         self.graph = Graph::new();
         self.nodes.clear();
-        self.open.clear();
         self.textures.clear();
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
-        let src = self.add(Kind::Stream { url: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 240.0));
+        let src = self.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 240.0));
         self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
         let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(240.0, 140.0));
         let inv = self.add(Kind::Invert, Pos2::new(810.0, 20.0));
@@ -336,7 +335,7 @@ impl App {
     }
 
     fn default_project(&mut self) {
-        let src = self.add(Kind::Stream { url: String::new() }, Pos2::new(30.0, 40.0));
+        let src = self.add(Kind::Source { input: String::new() }, Pos2::new(30.0, 40.0));
         let mut rows = corroborate::modules::manual::defaults();
         rows.push(("elevation".into(), String::new()));
         let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 300.0));
@@ -482,13 +481,12 @@ impl App {
                 continue;
             }
             let input = match &n.kind {
-                Kind::File { path } => file_node::input(path),
-                Kind::Stream { url } => stream_node::input(url),
+                Kind::Source { input } => source_node::input(input),
                 Kind::Mic { device } => mic_node::input(device),
                 _ => None,
             };
             let Some(input) = input else {
-                n.state.lock().unwrap().status = "nothing to open: set it in the node's window".into();
+                n.state.lock().unwrap().status = "nothing to open: set it in the node".into();
                 continue;
             };
             let mut job = Job {
@@ -517,7 +515,7 @@ impl App {
             started += 1;
         }
         if started == 0 {
-            self.msg = "no source to run: open a source node (double-click) and set its file, URL or microphone".into();
+            self.msg = "no source to run: set a file, URL or microphone in a source node".into();
             return;
         }
         self.stop = Some(stop);
@@ -565,7 +563,7 @@ impl App {
                 Kind::GridFrequencies { path } => grid_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
                 Kind::Manual { rows } => manual_node::json(rows),
-                Kind::File { .. } | Kind::Stream { .. } | Kind::Mic { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
+                Kind::Source { .. } | Kind::Mic { .. } => format!(",\"audio_s\":{:.1},\"live\":{}", s.audio_s, s.live),
                 Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
                 Kind::Record => {
                     drop(s);
@@ -724,7 +722,6 @@ impl App {
         }
 
         let mut clicked = None;
-        let mut opened = None;
         let mut delete = None;
         let mut drop_on: Option<(NodeId, usize)> = None;
         let mut unwire: Option<(NodeId, &'static str)> = None;
@@ -744,14 +741,12 @@ impl App {
             if resp.clicked() {
                 clicked = Some(i);
             }
-            if resp.double_clicked() && nl.window() {
-                opened = Some(i);
-            }
+            let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
-                if nl.window() && ui.button("Open window").clicked() {
-                    opened = Some(i);
-                    ui.close();
-                }
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(label);
+                });
                 if ui.button("Delete node").clicked() {
                     delete = Some(i);
                     ui.close();
@@ -776,6 +771,7 @@ impl App {
             if body.width() > 0.0 && body.height() > 0.0 {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", i)));
                 child.set_clip_rect(body.intersect(area));
+                look::scale(&mut child, self.zoom);
                 nl.body(self, &mut child, i);
             }
             // Status line at the bottom of the node.
@@ -872,21 +868,16 @@ impl App {
         if let Some(i) = delete {
             self.graph.isolate(i);
             self.nodes[i].hidden = true;
-            self.open[i] = false;
             self.selected = None;
             self.save_project();
         }
         if let Some(i) = clicked {
             self.selected = Some(i);
         }
-        if let Some(i) = opened {
-            self.open[i] = true;
-            self.selected = Some(i);
-        }
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / delete · double-click: open",
+            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / rename / delete",
             FontId::proportional(11.0),
             DIM,
         );
@@ -1015,50 +1006,6 @@ impl App {
         }
     }
 
-    // ---------------- node windows
-
-    fn windows(&mut self, ctx: &egui::Context) {
-        for i in 0..self.nodes.len() {
-            if !self.open[i] || self.nodes[i].hidden || !look::of(&self.nodes[i].kind).window() {
-                continue;
-            }
-            let mut open = true;
-            let title = self.nodes[i].label.clone();
-            let size = if matches!(self.nodes[i].kind, Kind::Planes) { [820.0, 470.0] } else { [460.0, 360.0] };
-            egui::Window::new(&title).id(egui::Id::new(("win", i))).open(&mut open).default_size(size).show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| self.window_body(ui, i));
-            });
-            self.open[i] = open;
-        }
-    }
-
-    fn window_body(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        let running = self.running();
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.nodes[i].label);
-        });
-        ui.separator();
-        let state = self.nodes[i].state.clone();
-        match &mut self.nodes[i].kind {
-            Kind::File { path } => file_node::window(ui, path, &state),
-            Kind::Stream { url } => stream_node::window(ui, url, &state),
-            Kind::Mic { .. } => self.mic_window(ui, i),
-            Kind::Manual { rows } => manual_node::window(ui, i, rows),
-            Kind::Planes => self.planes_window(ui, i),
-            Kind::Enf { .. } => enf_node::window(ui, &state),
-            Kind::GridFrequencies { path } => grid_node::window(ui, path),
-            Kind::Plugin { path } => plugin_node::window(ui, path, &state),
-            Kind::Combine { .. } => self.combine_window(ui, i),
-            Kind::Invert => self.invert_window(ui, i),
-            Kind::Map => self.map_window(ui, i),
-            Kind::Record => self.record_window(ui, i),
-        }
-        if running && self.nodes[i].kind.is_source() {
-            ui.colored_label(DIM, "Changes to sources take effect at the next Run.");
-        }
-    }
-
     // ---------------- frame
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -1121,20 +1068,19 @@ fn describe(e: &GraphError) -> String {
     }
 }
 
+/// What a source node shows under its controls: status, audio so far, and its UTC clock.
 fn source_info(ui: &mut egui::Ui, st: &Shared) {
     let s = st.lock().unwrap();
-    ui.label(format!("status: {}", s.status));
+    look::line(ui, if s.status.is_empty() { "not run".to_string() } else { s.status.clone() }, if s.running { LIVE } else { TEXT });
     if s.audio_s > 0.0 {
-        ui.label(format!("audio: {:.0} s{}", s.audio_s, if s.live { " (live)" } else { "" }));
+        look::line(ui, format!("audio: {:.0} s{}", s.audio_s, if s.live { " (live)" } else { "" }), TEXT);
     }
     match &s.anchor {
         Some(a) => {
-            ui.label(format!("time 0 = {} UTC", timebase::fmt_utc(a.utc0)));
-            ui.colored_label(DIM, format!("from: {} · estimated error ± {:.0} s", a.source, anchor_error_s(a)));
+            look::line(ui, format!("time 0 = {} UTC", timebase::fmt_utc(a.utc0)), TEXT);
+            look::line(ui, format!("± {:.0} s · from {}", anchor_error_s(a), a.source), DIM);
         }
-        None => {
-            ui.colored_label(DIM, "no UTC anchor yet");
-        }
+        None => look::line(ui, "no UTC anchor yet", DIM),
     }
 }
 
@@ -1193,7 +1139,6 @@ impl eframe::App for App {
             self.graph_view(ui);
         });
         let ctx = ui.ctx().clone();
-        self.windows(&ctx);
 
         let running = self.running();
         if self.result_file.is_some() && self.last_save.elapsed() > Duration::from_secs(if running { 30 } else { 3600 * 24 }) {

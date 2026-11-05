@@ -8,7 +8,6 @@ use crate::core::{Port, PortKind};
 
 pub mod combine;
 pub mod enf;
-pub mod file;
 pub mod grid_frequencies;
 pub mod invert;
 pub mod manual;
@@ -17,7 +16,7 @@ pub mod mic;
 pub mod plugin;
 pub mod planes;
 pub mod record;
-pub mod stream;
+pub mod source;
 
 /// Outputs of every source node: audio and time.
 pub fn source_outputs() -> Vec<Port> {

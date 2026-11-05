@@ -236,10 +236,6 @@ impl crate::look::NodeLook for Look {
         false
     }
 
-    fn window(&self) -> bool {
-        false
-    }
-
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
         let z = app.zoom;
         {

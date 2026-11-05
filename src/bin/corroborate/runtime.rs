@@ -6,7 +6,7 @@
 use crate::enf_node::{self, EnfJob, EnfState};
 use crate::planes_node::{self, PlanesState};
 use crate::plugin_node::{self, PluginJob, PluginState};
-use crate::stream_node;
+use crate::source_node;
 use corroborate::timebase::{self, Anchor, SharedAnchor};
 use corroborate::{ingest, INPUT_SR};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,7 +101,7 @@ fn run(job: Job) {
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
             set_status("resolving the stream URL…");
-            match stream_node::resolve(u) {
+            match source_node::resolve(u) {
                 Ok(r) => r,
                 Err(e) => return finish(&job, Err(e)),
             }
