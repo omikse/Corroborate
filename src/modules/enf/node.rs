@@ -184,22 +184,28 @@ fn grid_summary(path: &str) -> Result<String, String> {
 }
 
 /// The hum frequency over source time (folded to the fundamental); faded where unclear.
-fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)]) {
+fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)], ran: bool) {
     p.rect_filled(rect, 4.0 * z, BG);
     let font = FontId::proportional(10.0 * z);
     p.text(rect.left_top() + Vec2::new(6.0, 4.0) * z, Align2::LEFT_TOP, "hum frequency", font.clone(), DIM);
     let (mut t0, mut t1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    let clear = pts.iter().any(|q| q.2);
     for &(t, y, ok) in pts {
         t0 = t0.min(t);
         t1 = t1.max(t);
-        if ok {
+        // With no clear reading yet, scale to the unclear ones so they still show.
+        if ok || !clear {
             y0 = y0.min(y);
             y1 = y1.max(y);
         }
     }
     if t0 >= t1 || y0 > y1 {
-        p.text(rect.center(), Align2::CENTER_CENTER, "no hum yet: press Run", font, DIM);
+        let note = if ran { "listening: no hum reading yet" } else { "no hum yet: press Run" };
+        p.text(rect.center(), Align2::CENTER_CENTER, note, font, DIM);
         return;
+    }
+    if !clear {
+        p.text(rect.center(), Align2::CENTER_CENTER, format!("{} readings, none clear: no steady hum", pts.len()), font.clone(), WARN);
     }
     if y1 - y0 < 0.02 {
         let m = (y0 + y1) / 2.0;
@@ -264,12 +270,12 @@ impl crate::look::NodeLook for Look {
         p.rect_stroke(map, 6.0 * z, Stroke::new(1.0 * z, LINE), StrokeKind::Outside);
 
         // Hum frequency over time: the last 10 minutes of readings.
-        let pts: Vec<(f64, f64, bool)> = {
+        let (pts, ran) = {
             let s = st.lock().unwrap();
             let from = s.enf.points.len().saturating_sub(600);
-            s.enf.points[from..].iter().map(|q| (q.t, q.hz / q.harmonic as f64, q.ok)).collect()
+            (s.enf.points[from..].iter().map(|q| (q.t, q.hz / q.harmonic as f64, q.ok)).collect::<Vec<_>>(), s.running || s.done)
         };
-        trace(&p, band, z, &pts);
+        trace(&p, band, z, &pts, ran);
 
         // Grid data, changed here.
         if let Kind::Enf { grid } = &mut app.nodes[i].kind {
