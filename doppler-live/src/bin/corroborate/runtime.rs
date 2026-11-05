@@ -93,6 +93,10 @@ pub struct NodeState {
     pub enf_segments: Vec<EnfSegment>,
     pub enf_nominal: Option<f64>,
     pub grid_data: Option<String>,
+    /// Location constraint from ENF (feasible regions where detected frequency is used).
+    pub location_constraint: Option<String>,
+    // Record.
+    pub location_constraints: Vec<String>,
     // Plugin.
     pub plugin: PluginState,
 }
@@ -164,6 +168,15 @@ pub fn load_grid_data() -> Option<String> {
         }
     }
     None
+}
+
+/// Compute location constraint from detected ENF frequency and grid data.
+/// If frequency is 50 Hz, return 50Hz regions; if 60 Hz, return 60Hz regions.
+/// Returns a JSON description of the feasible regions.
+fn location_from_enf_frequency(nominal_hz: f64, _grid_data: Option<&str>) -> Option<String> {
+    let hz = if nominal_hz > 55.0 { 60.0 } else { 50.0 };
+    let label = if hz > 55.0 { "60 Hz grid (Americas, Japan-East)" } else { "50 Hz grid (Europe, Africa, Asia)" };
+    Some(format!("{{\"method\":\"ENF {:.0} Hz\",\"label\":\"{}\"}}", hz, label))
 }
 
 /// YouTube page links need resolving to a direct stream URL (yt-dlp); others are used as-is.
@@ -340,6 +353,10 @@ fn run(job: Job) {
             s.enf_nominal = e.nominal();
             s.anchor = an.clone();
             s.audio_s = n as f64 / INPUT_SR;
+            // Compute location constraint from detected frequency.
+            if let Some(f) = s.enf_nominal {
+                s.location_constraint = location_from_enf_frequency(f, s.grid_data.as_deref());
+            }
             s.status = match s.enf_nominal {
                 Some(f) => format!("{f:.0} Hz grid, {} runs", s.enf_segments.len()),
                 None => "listening for hum".into(),

@@ -26,6 +26,7 @@ pub const MANUAL_KEYS: [&str; 5] = ["date", "time", "place", "coordinates", "not
 /// Record inputs: findings from up to six nodes and facts from up to three.
 pub const RECORD_EVENTS: [&str; 6] = ["findings 1", "findings 2", "findings 3", "findings 4", "findings 5", "findings 6"];
 pub const RECORD_FACTS: [&str; 3] = ["facts 1", "facts 2", "facts 3"];
+pub const RECORD_LOCATIONS: [&str; 3] = ["location 1", "location 2", "location 3"];
 
 impl Kind {
     pub fn is_source(&self) -> bool {
@@ -95,6 +96,7 @@ impl Kind {
                     .iter()
                     .map(|n| Port::opt(n, Event))
                     .chain(RECORD_FACTS.iter().map(|n| Port::opt(n, Json)))
+                    .chain(RECORD_LOCATIONS.iter().map(|n| Port::opt(n, Location)))
                     .collect(),
                 outputs: vec![],
             },
