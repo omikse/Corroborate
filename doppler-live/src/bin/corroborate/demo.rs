@@ -1,4 +1,4 @@
-//! Corroborate: the workbench. First version: a node graph, a timeline with lanes and a map,
+//! Demo:  a node graph, a timeline with lanes and a map,
 //! running the engine (`graph`, `sync`, `locate`, `timeline`) on a synthetic protest scenario.
 //!
 //! - Graph: drag nodes by their header, drag empty space to pan. Click a node to select it
@@ -211,7 +211,7 @@ fn build_scenario() -> Scenario {
 
 // ---------- app ----------
 
-struct App {
+pub struct Demo {
     sc: Scenario,
     pos: Vec<Pos2>,
     pan: Vec2,
@@ -226,8 +226,8 @@ const NODE_W: f32 = 200.0;
 const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
-impl App {
-    fn new() -> Self {
+impl Demo {
+    pub fn new() -> Self {
         let sc = build_scenario();
         let mut pos = Vec::new();
         for i in 0..sc.graph.nodes().len() {
@@ -609,21 +609,15 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
-                ui.colored_label(DIM, "Project: protest scenario");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.colored_label(WARN, "Synthetic scenario: the data is made up to test the engine.");
-                });
-            });
-        });
-        egui::Panel::bottom("timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(0.0)).show(ui, |ui| {
+impl Demo {
+    /// The demo fills the window below the app's top bar.
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("demo_timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(0.0)).show(ui, |ui| {
             self.timeline_view(ui);
         });
-        egui::Panel::right("side").exact_size(300.0).frame(egui::Frame::new().fill(PANEL).inner_margin(12.0)).show(ui, |ui| {
+        egui::Panel::right("demo_side").exact_size(300.0).frame(egui::Frame::new().fill(PANEL).inner_margin(12.0)).show(ui, |ui| {
+            ui.colored_label(WARN, "Synthetic scenario: the data is made up to test the engine.");
+            ui.add_space(8.0);
             self.side_panel(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
@@ -632,15 +626,4 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.node_windows(&ctx);
     }
-}
-
-fn main() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 880.0]).with_title("Corroborate"),
-        ..Default::default()
-    };
-    eframe::run_native("corroborate", options, Box::new(|cc| {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        Ok(Box::new(App::new()))
-    }))
 }

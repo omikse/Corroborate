@@ -175,6 +175,30 @@ impl Graph {
         if out.len() == n { Ok(out) } else { Err(GraphError::Cycle) }
     }
 
+    /// Remove every wire into or out of `id`: used when a node is deleted from the workspace.
+    pub fn isolate(&mut self, id: NodeId) {
+        self.wires.retain(|w| w.from != id && w.to != id);
+    }
+
+    /// Wires leaving output `out` of node `id`, as (target node, target input name).
+    pub fn targets(&self, id: NodeId, out: &str) -> Vec<(NodeId, &'static str)> {
+        let Some(port) = self.nodes.get(id).and_then(|n| n.spec.outputs.iter().position(|p| p.name == out)) else {
+            return Vec::new();
+        };
+        self.wires
+            .iter()
+            .filter(|w| w.from == id && w.from_port == port)
+            .map(|w| (w.to, self.nodes[w.to].spec.inputs[w.to_port].name))
+            .collect()
+    }
+
+    /// The node and output feeding input `inp` of `id`, if wired.
+    pub fn feeder(&self, id: NodeId, inp: &str) -> Option<(NodeId, &'static str)> {
+        let port = self.nodes.get(id)?.spec.inputs.iter().position(|p| p.name == inp)?;
+        let w = self.wires.iter().find(|w| w.to == id && w.to_port == port)?;
+        Some((w.from, self.nodes[w.from].spec.outputs[w.from_port].name))
+    }
+
     /// Evidence trail of `id`: every node it depends on, directly or not, in run order,
     /// ending with `id` itself.
     pub fn trail(&self, id: NodeId) -> Result<Vec<NodeId>, GraphError> {
@@ -287,6 +311,22 @@ mod tests {
         // The trail of the solver: file, planes, and the solver itself; not the unrelated node.
         assert_eq!(g.trail(s).unwrap(), vec![f, p, s]);
         assert!(!g.trail(s).unwrap().contains(&other));
+    }
+
+    #[test]
+    fn isolate_targets_and_feeder() {
+        let mut g = Graph::new();
+        let f = g.add("file", source());
+        let p = g.add("planes", detector());
+        let q = g.add("planes 2", detector());
+        g.connect(f, "audio", p, "audio").unwrap();
+        g.connect(f, "audio", q, "audio").unwrap();
+        g.connect(f, "time", p, "time").unwrap();
+        assert_eq!(g.targets(f, "audio"), vec![(p, "audio"), (q, "audio")]);
+        assert_eq!(g.feeder(p, "time"), Some((f, "time")));
+        g.isolate(f);
+        assert!(g.wires().is_empty());
+        assert_eq!(g.feeder(p, "time"), None);
     }
 
     #[test]

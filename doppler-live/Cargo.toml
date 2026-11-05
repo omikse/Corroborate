@@ -22,7 +22,7 @@ required-features = ["gui"]
 
 [[bin]]
 name = "corroborate"
-path = "src/bin/corroborate.rs"
+path = "src/bin/corroborate/main.rs"
 required-features = ["gui"]
 
 [[bin]]
