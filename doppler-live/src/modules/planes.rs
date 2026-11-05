@@ -5,6 +5,7 @@
 
 use crate::detect::{Config, Detector, Event};
 use crate::ingest::Resampler;
+use crate::core::{NodeSpec, Port, PortKind, Role};
 use crate::module::{Finding, Module, INPUT_SR};
 
 pub struct Planes {
@@ -39,6 +40,15 @@ impl Planes {
 impl Module for Planes {
     fn name(&self) -> &'static str {
         "planes"
+    }
+
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            name: "planes",
+            role: Role::Detector,
+            inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
+            outputs: vec![Port::req("pass", PortKind::Event)],
+        }
     }
 
     fn describe(&self) -> String {

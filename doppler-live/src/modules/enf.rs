@@ -13,6 +13,7 @@
 //! frequency is decided by vote once the hum is clear. Runs of clear readings of at least
 //! 30 s become findings.
 
+use crate::core::{NodeSpec, Port, PortKind, Role};
 use crate::ingest::Resampler;
 use crate::module::{Finding, Module, INPUT_SR};
 use crate::timebase::{fmt_utc, json_escape, Anchor};
@@ -320,6 +321,15 @@ impl Enf {
 impl Module for Enf {
     fn name(&self) -> &'static str {
         "enf"
+    }
+
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            name: "enf",
+            role: Role::Detector,
+            inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("time", PortKind::Time)],
+            outputs: vec![Port::req("hum", PortKind::Event)],
+        }
     }
 
     fn describe(&self) -> String {

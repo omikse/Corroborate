@@ -3,6 +3,7 @@
 //! Each module does its own preparation (downsampling, filtering) and says what it did in
 //! `describe`, so every number in the output can be traced to how it was made.
 
+use crate::core::NodeSpec;
 use crate::detect::Event;
 use crate::modules::enf::EnfSegment;
 use crate::timebase::Anchor;
@@ -61,6 +62,8 @@ impl Finding {
 
 pub trait Module: Send {
     fn name(&self) -> &'static str;
+    /// The node this module is in the workbench: typed inputs and outputs.
+    fn spec(&self) -> NodeSpec;
     /// How this module processes the stream (rates, bands, resolution, method), for the
     /// output files and the viewer.
     fn describe(&self) -> String;
@@ -82,4 +85,24 @@ pub fn build(names: &[&str]) -> Result<Vec<Box<dyn Module>>, String> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{PortKind, Role};
+
+    #[test]
+    fn built_in_modules_take_required_audio_and_give_events() {
+        for m in build(&["planes", "enf"]).unwrap() {
+            let spec = m.spec();
+            assert_eq!(spec.name, m.name());
+            assert_eq!(spec.role, Role::Detector);
+            assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Audio && p.required));
+            assert!(spec.inputs.iter().any(|p| p.kind == PortKind::Time && !p.required));
+            assert!(spec.outputs.iter().all(|p| p.kind == PortKind::Event));
+            assert!(spec.ready(&["audio"]));
+            assert!(!spec.ready(&["time"]));
+        }
+    }
 }
