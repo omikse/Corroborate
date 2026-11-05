@@ -14,6 +14,7 @@ pub mod core;
 pub mod detect;
 pub mod fit;
 pub mod ingest;
+pub mod locate;
 pub mod module;
 pub mod modules;
 pub mod plugin;

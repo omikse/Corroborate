@@ -166,7 +166,7 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs]) -> Solution {
 }
 
 /// Gauss-Jordan inverse with partial pivoting. None when singular.
-fn invert(mut a: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
+pub(crate) fn invert(mut a: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
     let n = a.len();
     let mut inv: Vec<Vec<f64>> = (0..n).map(|i| (0..n).map(|j| (i == j) as u8 as f64).collect()).collect();
     for c in 0..n {

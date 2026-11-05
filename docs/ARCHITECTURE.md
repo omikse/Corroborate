@@ -81,4 +81,11 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
   stream is the reference. Weighted least squares gives every offset with its error; streams with no
   chain of shared events are reported unsolved; residuals flag wrong matches.
 
-Not yet: locating an event from arrival times, the viewer using these types, and the timeline UI.
+- `locate.rs`: TDOA (Time Difference of Arrival). Arrival times on the shared clock plus recorder
+  positions give the source position and time; recorder radius is added to each arrival error; the
+  result radius is 2 sigma of the worst direction. Three recorders work but cannot be checked.
+- `tests/protest.rs`: four streams, unknown offsets, sync, then a bang located. Flash-synced
+  (1/30 s): radius ~15 m. Synced on sounds from unknown places: radius ~790 m. For locating, sync
+  needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
+
+Not yet: the viewer using these types, and the timeline UI.
