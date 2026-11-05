@@ -76,4 +76,9 @@ sound, metadata, manual). Two locations that overlap agree; ones that do not ove
   (time ± error), relative items wait for the solver (`unplaced`). `overlapping` lists items whose
   windows could be the same moment. `strength` is a display choice: narrow margin, strong colour.
 
-Not yet: the solver (offsets from shared events), the viewer using these types, and the timeline UI.
+- `sync.rs`: the sync solver. Each shared event k heard by stream i gives offset_i + t_ik = T_k (± error,
+  which should include the sound travel spread). Anchors fix streams to UTC; without them the first
+  stream is the reference. Weighted least squares gives every offset with its error; streams with no
+  chain of shared events are reported unsolved; residuals flag wrong matches.
+
+Not yet: locating an event from arrival times, the viewer using these types, and the timeline UI.

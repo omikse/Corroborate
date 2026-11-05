@@ -20,6 +20,7 @@ pub mod plugin;
 pub mod ridge;
 pub mod spectro;
 pub mod graph;
+pub mod sync;
 pub mod synth;
 pub mod timebase;
 pub mod timeline;
