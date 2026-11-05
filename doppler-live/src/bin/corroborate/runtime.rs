@@ -237,6 +237,15 @@ fn run(job: Job) {
         .collect();
     let mut enfs: Vec<(Enf, Shared)> = job.enfs.iter().map(|s| (Enf::new(), s.clone())).collect();
 
+    // Spawn doppler-view as a separate visualization process for Planes data.
+    if !planes.is_empty() {
+        let _ = Command::new("C:\\Apps\\DopplerOsint\\doppler-view.exe")
+            .arg(&ff_input)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
     set_status(if live { "connecting…" } else { "decoding…" });
     let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
         Ok(x) => x,
