@@ -57,8 +57,28 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
     let mut lines = text.lines();
     let is_live = lines.next().map(str::trim) == Some("True");
     match lines.next() {
-        Some(u) if out.status.success() && u.contains("://") => Ok((u.trim().to_string(), is_live)),
+        Some(u) if out.status.success() && u.contains("://") && is_live => Ok((u.trim().to_string(), true)),
+        // Not live: YouTube refuses its direct links to ffmpeg (403), so yt-dlp downloads the
+        // audio into recordings\ and it is read as a file. The copy stays there as evidence.
+        Some(_) if out.status.success() => download(url).map(|p| (p, false)),
         _ => Err(format!("yt-dlp: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no URL returned"))),
+    }
+}
+
+/// Download a video's audio with yt-dlp to `recordings\<site> <id>.<ext>`; reuses an earlier download.
+fn download(url: &str) -> Result<String, String> {
+    let dir = corroborate::home().join("recordings");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    let out = corroborate::no_window(&mut std::process::Command::new("yt-dlp"))
+        .args(["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "after_move:filepath", "-o"])
+        .arg(dir.join("%(extractor)s %(id)s.%(ext)s"))
+        .arg(url)
+        .output()
+        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match text.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => Ok(p.trim().to_string()),
+        _ => Err(format!("yt-dlp download: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no file written"))),
     }
 }
 

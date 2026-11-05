@@ -100,7 +100,7 @@ fn run(job: Job) {
         Input::File(p) => p.clone(),
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
-            set_status("asking yt-dlp what this link is…");
+            set_status("yt-dlp: checking the link, downloading the audio if it is not live…");
             match source_node::resolve(u) {
                 Ok((r, is_live)) => {
                     // A video that is not live is read as a recording: as fast as it decodes.
