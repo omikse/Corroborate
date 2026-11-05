@@ -1716,8 +1716,27 @@ fn draw_area_map(ui: &mut egui::Ui, area: Option<&WorldMask>, outlines: &[(f64, 
     }
     ui.colored_label(
         DIM,
-        "green: kept (still possible) · red: ruled out · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · no coastlines",
+        "green: kept (still possible) · red: ruled out · outlines: grid regions (blue 50 Hz, orange 60 Hz) · Robinson projection, 1° cells, lines every 30° · coastlines: Natural Earth 1:110m",
     );
+}
+
+/// Natural Earth 1:110m coastlines, built into the program: lines of (lat, lon).
+fn coastlines() -> &'static [Vec<(f64, f64)>] {
+    static C: std::sync::OnceLock<Vec<Vec<(f64, f64)>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        include_str!("coastlines.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                l.split(' ')
+                    .filter_map(|p| {
+                        let (lon, lat) = p.split_once(',')?;
+                        Some((lat.parse().ok()?, lon.parse().ok()?))
+                    })
+                    .collect()
+            })
+            .collect()
+    })
 }
 
 fn paint_area_map(p: &egui::Painter, rect: Rect, area: Option<&WorldMask>, outlines: &[(f64, Vec<(f64, f64)>)]) {
@@ -1753,6 +1772,21 @@ fn paint_area_map(p: &egui::Painter, rect: Rect, area: Option<&WorldMask>, outli
         }
     }
     p.add(egui::Shape::mesh(mesh));
+    let coast = Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 240, 235, 200));
+    for line in coastlines() {
+        let mut seg: Vec<Pos2> = Vec::new();
+        for w in line.windows(2) {
+            if seg.is_empty() {
+                seg.push(at(w[0].0, w[0].1));
+            }
+            if (w[1].1 - w[0].1).abs() > 180.0 {
+                p.add(egui::Shape::line(std::mem::take(&mut seg), coast));
+                continue;
+            }
+            seg.push(at(w[1].0, w[1].1));
+        }
+        p.add(egui::Shape::line(seg, coast));
+    }
     let grat = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90));
     for k in -6i32..=6 {
         let lon = k as f64 * 30.0;

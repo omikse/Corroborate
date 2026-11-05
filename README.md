@@ -42,7 +42,8 @@ the Planes node: [docs/doppler-view.md](docs/doppler-view.md).
 A location is a mask of 1° cells (`doppler-live/src/area.rs`). The Result record starts with the
 whole world and keeps only the cells every area wired into its `location` inputs allows. An empty
 result is shown as a contradiction, not hidden. The **Map** node draws any location in the Robinson
-projection: green where it is still possible, red where it is ruled out. No coastlines yet.
+projection: green where it is still possible, red where it is ruled out, with Natural Earth 1:110m
+coastlines (public domain) built into the program.
 
 ## Other code
 
