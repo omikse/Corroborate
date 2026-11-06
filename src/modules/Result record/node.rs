@@ -151,12 +151,15 @@ impl App {
                 )
             })
             .collect();
+        // Each input with the value on it in its kind's JSON form (see corroborate::data):
+        // anything wired in is kept, whatever module it comes from.
         let ins: Vec<String> = self
             .record_inputs(i)
             .iter()
             .map(|(inp, from, out, k)| {
+                let value = self.value_from(*from, out).map_or("null".to_string(), |d| d.to_json());
                 format!(
-                    "{{\"in\":\"{inp}\",\"from\":{from},\"node\":\"{}\",\"out\":\"{out}\",\"kind\":\"{}\",\"stream\":{}}}",
+                    "{{\"in\":\"{inp}\",\"from\":{from},\"node\":\"{}\",\"out\":\"{out}\",\"kind\":\"{}\",\"stream\":{},\"value\":{value}}}",
                     json_escape(&self.nodes[*from].label),
                     kind_name(*k),
                     is_stream(*k)

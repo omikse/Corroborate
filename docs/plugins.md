@@ -23,5 +23,41 @@ plugin that crashes stops on its own; the viewer carries on and says so in the p
   `meta` (a key and value: a fact about the source for the result JSON, listed in its box).
 - **stderr**: free text; the last line is shown in its box.
 
+## Protocol 2: the data bus
+
+A module folder whose `module.toml` says `[processing] protocol = 2` declares its ports and settings
+there, and its program talks in JSON lines both ways:
+
+```toml
+[[input]]
+name = "place"
+kind = "location"        # audio video time location track event file text json
+
+[[output]]
+name = "seen"
+kind = "event"
+
+[[setting]]
+name = "label"
+type = "text"            # text path number bool choice (number: min, max; choice: choices)
+default = "got a place"
+
+[processing]
+program = "bus_echo.exe"
+protocol = 2
+```
+
+- **Arguments:** `--set name=value` for each setting, already checked. A changed setting restarts it.
+- **stdin:** `{"type":"audio","pcm":"<base64 f32 LE mono 16 kHz>"}` when audio is wired in,
+  `{"type":"in","port":"place","value":…}` at start and whenever that input's value changes, and
+  `{"type":"end"}` when the audio source ends. It starts when the graph runs, with or without audio.
+- **stdout:** the messages above, plus `{"type":"out","port":"seen","value":…}`. Event and track
+  outputs grow by each list sent; the other kinds keep the latest value. The value goes on to every
+  input wired to that output, and into the result file.
+- **Values:** one JSON form per kind, in `src/data.rs`. A location may be sent as
+  `{"lat":50.1,"lon":14.4,"radius_km":25}` and is received as 1° cells.
+
+`examples/bus_echo.rs` is a complete one (the workbench's tests run it).
+
 The protocol, with a reader and writers for Rust plugins, is in `src/plugin.rs`. Two complete examples:
 - `enf-plugin`: tracks and findings from the audio. On the reference hour it runs in about 5 s on its own.

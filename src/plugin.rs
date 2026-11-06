@@ -23,6 +23,25 @@
 //! - **stderr**: free text for people; the viewer shows the last line.
 //!
 //! Unknown message types and fields are ignored, so the protocol can grow.
+//!
+//! **Protocol 2: the data bus.** A module whose module.toml says `[processing] protocol = 2`
+//! declares its ports and settings there (`[[input]]`, `[[output]]`, `[[setting]]`), and talks in
+//! JSON lines both ways. Values use the JSON form of their kind (see `data`).
+//! - **arguments**: `--set name=value` for each declared setting (checked against its type, range
+//!   and choices first); a changed setting restarts the program.
+//! - **stdin**: one JSON object per line.
+//!   ```text
+//!   {"type":"audio","pcm":"<base64 of f32 little-endian, mono, 16 000 Hz>"}   when audio is wired in
+//!   {"type":"in","port":"place","value":{…}}     an input's value, at start and whenever it changes
+//!   {"type":"end"}                               the audio source ended
+//!   ```
+//!   It is started once the graph runs, with or without audio, and runs until the graph stops.
+//! - **stdout**: everything above, plus
+//!   ```text
+//!   {"type":"out","port":"claps","value":[{"t_start":1.0,"t_end":1.2,"label":"clap"}]}
+//!   ```
+//!   An `event` or `track` output grows by each list sent; the other kinds keep the latest value.
+//!   What is sent goes on to every input wired to that output.
 
 use crate::timebase::json_escape;
 
@@ -59,6 +78,16 @@ pub enum Msg {
     Finding(PluginFinding),
     /// A fact about the source for the result JSON; a later value for the same key replaces it.
     Meta { key: String, value: String },
+    /// Protocol 2: a value on one of the module's declared outputs.
+    Out { port: String, value: Json },
+}
+
+/// Protocol 2: one line a program reads on stdin.
+#[derive(Clone, Debug, PartialEq)]
+pub enum In {
+    Audio(Vec<f32>),
+    Value { port: String, value: Json },
+    End,
 }
 
 // ---------------------------------------------------------------- reading
@@ -355,6 +384,10 @@ pub fn parse_line(line: &str) -> Option<Msg> {
             };
             Some(Msg::Meta { key: s("key"), value })
         }
+        "out" => {
+            let j = parse_json(line)?;
+            Some(Msg::Out { port: s("port"), value: j.get("value")?.clone() })
+        }
         _ => None,
     }
 }
@@ -399,6 +432,45 @@ pub fn finding(f: &PluginFinding) -> String {
 
 pub fn meta(key: &str, value: &str) -> String {
     format!(r#"{{"type":"meta","key":"{}","value":"{}"}}"#, json_escape(key), json_escape(value))
+}
+
+/// Protocol 2: a value on output `port` (`value` is its JSON form, see `data`).
+pub fn out(port: &str, value: &str) -> String {
+    format!(r#"{{"type":"out","port":"{}","value":{value}}}"#, json_escape(port))
+}
+
+/// Protocol 2: the line giving input `port` its value.
+pub fn input(port: &str, value: &str) -> String {
+    format!(r#"{{"type":"in","port":"{}","value":{value}}}"#, json_escape(port))
+}
+
+/// Protocol 2: the line carrying a block of audio.
+pub fn audio(x: &[f32]) -> String {
+    let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+    format!(r#"{{"type":"audio","pcm":"{}"}}"#, crate::data::base64(&bytes))
+}
+
+/// Protocol 2: the line saying the audio source ended.
+pub const END: &str = r#"{"type":"end"}"#;
+
+/// Protocol 2: read one stdin line (for programs written in Rust).
+pub fn parse_in(line: &str) -> Option<In> {
+    let j = parse_json(line)?;
+    match j.get("type")?.str()? {
+        "audio" => {
+            let b = crate::data::unbase64(j.get("pcm")?.str()?);
+            Some(In::Audio(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()))
+        }
+        "in" => Some(In::Value { port: j.get("port")?.str()?.to_string(), value: j.get("value")?.clone() }),
+        "end" => Some(In::End),
+        _ => None,
+    }
+}
+
+/// Protocol 2: `--set name=value` arguments, the module's settings.
+pub fn settings_args() -> Vec<(String, String)> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2).filter(|w| w[0] == "--set").filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect()
 }
 
 /// The value after `--source` in this program's arguments, and whether `--live` was given.
@@ -449,6 +521,18 @@ mod tests {
         assert_eq!(parse_line(&track("h1", 12.0, 59.993, false)), Some(Msg::Track { id: "h1".into(), t: 12.0, hz: 59.993, ok: false }));
         assert_eq!(parse_line(&meta("place", "Oyster Bay, \"NY\"")), Some(Msg::Meta { key: "place".into(), value: "Oyster Bay, \"NY\"".into() }));
         assert_eq!(parse_line(r#"{"type":"meta","key":"n","value":3}"#), Some(Msg::Meta { key: "n".into(), value: "3".into() }));
+    }
+
+    #[test]
+    fn protocol_2_lines() {
+        assert_eq!(
+            parse_line(&out("claps", r#"[{"t_start":1,"label":"x"}]"#)),
+            Some(Msg::Out { port: "claps".into(), value: parse_json(r#"[{"t_start":1,"label":"x"}]"#).unwrap() })
+        );
+        let x = [0.5f32, -0.25, 1.0e-3];
+        assert_eq!(parse_in(&audio(&x)), Some(In::Audio(x.to_vec())));
+        assert_eq!(parse_in(&input("place", r#"{"lat":1}"#)), Some(In::Value { port: "place".into(), value: parse_json(r#"{"lat":1}"#).unwrap() }));
+        assert_eq!(parse_in(END), Some(In::End));
     }
 
     #[test]

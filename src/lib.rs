@@ -6,12 +6,14 @@
 //! - `modules::enf`: ENF (Electrical Network Frequency), the mains hum and its drift.
 //! - `core`: the workbench types: values with error and source, locations with radius,
 //!   times with error, typed ports and node roles.
+//! - `data`: the data bus: one value type per port kind and its JSON form.
 //! - `plugin`: the protocol for plugins, separate programs fed the same audio through a pipe.
 //! - `ingest` reads WAV files and ffmpeg/stdin streams; `timebase` handles UTC
 //!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
 pub mod area;
 pub mod core;
+pub mod data;
 pub mod ingest;
 pub mod locate;
 pub mod module;

@@ -27,7 +27,7 @@ pub struct PluginState {
 }
 
 impl PluginState {
-    fn apply(&mut self, m: protocol::Msg) {
+    pub(crate) fn apply(&mut self, m: protocol::Msg) {
         match m {
             protocol::Msg::Hello { name, about, color } => {
                 if !name.is_empty() {
@@ -44,6 +44,8 @@ impl PluginState {
                 None => self.tracks.push((id, vec![(t, hz, ok)])),
             },
             protocol::Msg::Finding(f) => self.findings.push(f),
+            // Values on the data bus: kept by the bus (protocol 2), not here.
+            protocol::Msg::Out { .. } => {}
             protocol::Msg::Meta { key, value } => match self.meta.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, v)) => *v = value,
                 None => self.meta.push((key, value)),

@@ -37,20 +37,32 @@ canvas starts empty; `--new` opens an empty one (the old project is copied to `s
 
 Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the
 tool, under `app\modules\`). Its `module.toml` says what it is: `id` (what project files keep),
-`label`, `category` (the Add node heading), `order`, `aliases` (names older files used) and, for a
-module that is a separate program, `[processing] program`. `mod.rs` holds the node's ports;
-`node.rs` holds everything it does in the workbench (state while running, canvas, status, timeline
-marks, result file). The app (`src/bin/corroborate/`) only draws the graph and calls into the modules.
+`label`, `category` (the Add node heading), `order`, `aliases` (names older files used), `role`,
+its ports (`[[input]]`, `[[output]]`: name, kind, required), its settings (`[[setting]]`: name,
+type, default, range or choices) and, for a module that is a separate program,
+`[processing] program` and `protocol`. `node.rs` holds what a built-in module does in the
+workbench (state while running, canvas, status, timeline marks, result file). The app
+(`src/bin/corroborate/`) only draws the graph and calls into the modules.
+
+**Data between modules:** every output can be read as a value of its kind (time, location, event,
+track, text, json, file; audio is the stream itself), and any input of the same kind takes it.
+One JSON form per kind (`src/data.rs`) is what programs send and receive and what the Result
+record stores, so a module made by someone else feeds Map, Combine, Invert or the record like a
+built-in one. Settings are the only way the canvas changes processing: each value is checked
+against the module.toml before it is used, every change is written to the result file with its
+time, and the graph restarts half a second after the last change.
 
 **Adding a module:** drop its folder into `app\modules\`. The workbench reads module folders every
 second: the module appears in Add node under its category. A folder with a program
 (`[processing] program = "x.exe"`, plugin protocol: [docs/plugins.md](docs/plugins.md)) runs as a
-plugin. A project using a module the tool does not have keeps it as a grey placeholder with its
-setting and wires, and saves it back unchanged.
+plugin; with `protocol = 2` it is on the data bus, with the ports and settings its module.toml
+declares (example: `examples/bus_echo.rs`). A project using a module the tool does not have keeps
+it as a grey placeholder with its settings and wires, and saves it back unchanged.
 
 To change one node, edit only its folder:
 - **Name, menu place:** `module.toml` (in `app\modules\<label>\` it takes effect while the program runs).
-- **Ports:** `spec()` in `mod.rs`.
+- **Ports, settings:** `module.toml` (SOURCER's and Result record's ports follow what is opened or
+  wired, so theirs are made in `mod.rs`).
 - **Look on the canvas:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
   `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls
   such as buttons or a file picker), and `status` (false) hides the status line. The Map node is the

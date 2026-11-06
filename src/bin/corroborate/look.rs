@@ -43,6 +43,7 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Map => &map_node::Look,
         Kind::CombineLocations { .. } => &combine_locations_node::Look,
         Kind::InvertLocation => &invert_location_node::Look,
+        Kind::Module { .. } => &bus::Look,
         Kind::Missing { .. } => &Missing,
     }
 }

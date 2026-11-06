@@ -34,6 +34,9 @@ pub struct NodeState {
     pub enf: EnfState,
     pub plugin: PluginState,
     pub source: sourcer_node::SourceState,
+    /// What a program sent on each of its outputs (the data bus), and a count of the changes.
+    pub outbox: Vec<(&'static str, corroborate::data::Data)>,
+    pub outbox_rev: u64,
 }
 
 impl NodeState {
@@ -73,6 +76,8 @@ pub struct Job {
     pub work_dir: std::path::PathBuf,
     /// WAV files recording this source's audio (Result record nodes add and remove them).
     pub taps: crate::result_record_node::Taps,
+    /// Programs on the data bus wired to this source's audio: they get it as JSON lines.
+    pub buses: Vec<std::sync::mpsc::SyncSender<String>>,
 }
 
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -154,6 +159,7 @@ fn run(job: Job) {
         timebase::upgrade_from_hls(ff_input.clone(), first, anchor.clone(), 0.0);
     }
 
+    let mut buses = job.buses.clone();
     let mut n: u64 = 0;
     for x in rx {
         if job.stop.load(Ordering::Relaxed) {
@@ -174,6 +180,11 @@ fn run(job: Job) {
             if feed.as_ref().is_some_and(|tx| !plugin_node::feed(tx, &x, live, &job.plugins[i].state)) {
                 *feed = None;
             }
+        }
+        if !buses.is_empty() {
+            let line = corroborate::plugin::audio(&x);
+            // Live audio never waits for a program; a file's does.
+            buses.retain(|tx| if live { !matches!(tx.try_send(line.clone()), Err(std::sync::mpsc::TrySendError::Disconnected(_))) } else { tx.send(line.clone()).is_ok() });
         }
         for (p, s) in planes.iter_mut() {
             planes_node::push(p, s, &x, &an, audio_s);
@@ -201,6 +212,9 @@ fn run(job: Job) {
     }
     // End of input: plugins report what they hold and exit.
     drop(feeds);
+    for tx in &buses {
+        let _ = tx.send(corroborate::plugin::END.to_string());
+    }
     for (p, s) in planes.iter_mut() {
         planes_node::flush(p, s);
     }

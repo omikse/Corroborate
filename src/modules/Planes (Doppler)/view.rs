@@ -369,6 +369,8 @@ impl PluginView {
                 Some((_, v)) => *v = value,
                 None => self.meta.push((key, value)),
             },
+            // Data-bus values (protocol 2) are for the workbench.
+            plugin::Msg::Out { .. } => {}
         }
     }
 

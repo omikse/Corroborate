@@ -13,10 +13,7 @@ fn describe_project(app: &App) -> Vec<String> {
         .iter()
         .map(|&i| {
             let n = &app.nodes[i];
-            let rows = match &n.kind {
-                Kind::ManualData { rows } => format!(" rows={rows:?}"),
-                _ => String::new(),
-            };
+            let rows = if n.kind.rows().is_empty() { String::new() } else { format!(" rows={:?}", n.kind.rows()) };
             let folded = if n.collapsed { " collapsed" } else { "" };
             format!("node {} {} {:?} label={:?} at {:.0},{:.0}{rows}{folded}", idx(i), n.kind.spec().name, n.kind.saved_param(), n.label, n.pos.x, n.pos.y)
         })
@@ -224,7 +221,7 @@ fn missing_module_keeps_its_place() {
                 wire|1|where|2|location\n";
     let mut a = App::empty();
     assert!(a.load_project_text(text));
-    assert!(matches!(&a.nodes[1].kind, Kind::Missing { name, param } if name == "teleporter" && param == "speed=9"));
+    assert!(matches!(&a.nodes[1].kind, Kind::Missing { name, param, .. } if name == "teleporter" && param == "speed=9"));
     assert_eq!(a.graph.wires().len(), 2, "{:#?}", describe_project(&a));
     let again = a.project_text();
     let mut b = App::empty();

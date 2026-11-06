@@ -19,6 +19,9 @@
 mod drive;
 #[cfg(test)]
 mod project_tests;
+#[cfg(test)]
+mod bus_tests;
+mod bus;
 mod look;
 mod nodes;
 mod runtime;
@@ -236,6 +239,16 @@ struct App {
     last_project_save: Instant,
     /// Where the canvas starts on screen (last frame); tests use it to find nodes.
     canvas_origin: Pos2,
+    /// Programs on the data bus, by node, while the graph runs; when inputs were last sent.
+    programs: HashMap<NodeId, bus::Program>,
+    bus_sent: Instant,
+    /// Settings changed on the canvas (for the result file), text being typed into setting
+    /// boxes, and why a typed value was refused.
+    changes: Vec<bus::SettingChange>,
+    drafts: HashMap<(NodeId, String), String>,
+    setting_errors: HashMap<(NodeId, String), String>,
+    /// How many times the graph has (re)started.
+    runs: u64,
 }
 
 const NODE_W: f32 = 210.0;
@@ -267,6 +280,12 @@ impl App {
             area_cache: Default::default(),
             last_project_save: Instant::now(),
             canvas_origin: Pos2::ZERO,
+            programs: HashMap::new(),
+            bus_sent: Instant::now(),
+            changes: Vec::new(),
+            drafts: HashMap::new(),
+            setting_errors: HashMap::new(),
+            runs: 0,
         }
     }
 
@@ -342,10 +361,8 @@ impl App {
             text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}{folded}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
         for (ni, &i) in keep.iter().enumerate() {
-            if let Kind::ManualData { rows } = &self.nodes[i].kind {
-                for (k, v) in rows {
-                    text.push_str(&format!("row|{ni}|{}|{}\n", clean(k), clean(v)));
-                }
+            for (k, v) in self.nodes[i].kind.rows() {
+                text.push_str(&format!("row|{ni}|{}|{}\n", clean(k), clean(v)));
             }
         }
         for w in self.graph.wires() {
@@ -388,8 +405,8 @@ impl App {
             return false;
         }
         for (n, k, v) in rows {
-            if let Some(Kind::ManualData { rows }) = self.nodes.get_mut(n).map(|x| &mut x.kind) {
-                rows.push((k, v));
+            if let Some(node) = self.nodes.get_mut(n) {
+                node.kind.add_row(k, v);
             }
         }
         // A node whose module this tool lacks keeps the ports its saved wires use.
@@ -462,6 +479,7 @@ impl App {
             Kind::ResultRecord { .. } => self.record_area_out(from),
             Kind::CombineLocations { any } => self.combine_area_out(from, *any),
             Kind::InvertLocation => self.invert_area_out(from),
+            Kind::Module { .. } | Kind::Plugin { .. } => self.outbox_area(from),
             _ => Err("this node gives no area".into()),
         }
     }
@@ -469,6 +487,8 @@ impl App {
     fn run(&mut self) {
         self.stop_all();
         self.save_project();
+        self.runs += 1;
+        self.start_programs();
         let dir = results_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.msg = format!("cannot create {}: {e}", dir.display());
@@ -499,6 +519,7 @@ impl App {
                 stop: stop.clone(),
                 work_dir: dir.clone(),
                 taps: n.taps.clone(),
+                buses: self.audio_buses(i),
             };
             for (t, _) in self.graph.targets(i, "audio") {
                 let tn = &self.nodes[t];
@@ -542,6 +563,10 @@ impl App {
                     s.push_str(&format!("{t}:{}:{};", self.nodes[t].kind.spec().name, self.nodes[t].kind.saved_param()));
                 }
             }
+            if let Kind::Module { settings, .. } = &n.kind {
+                // A program gets its settings when it starts.
+                s.push_str(&format!("{i}:{settings:?}|"));
+            }
             if let Kind::ManualData { rows } = &n.kind {
                 // Plugins read the place when they start.
                 if self.graph.targets(i, "place").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
@@ -564,7 +589,7 @@ impl App {
                 return;
             }
         }
-        if self.run_sig.is_none() || self.sig_seen.1.elapsed() > Duration::from_millis(1200) {
+        if self.run_sig.is_none() || self.sig_seen.1.elapsed() > Duration::from_millis(500) {
             self.run();
         }
     }
@@ -573,6 +598,7 @@ impl App {
         if let Some(s) = self.stop.take() {
             s.store(true, Ordering::Relaxed);
         }
+        self.programs.clear();
     }
 
     // ---------------- result record
@@ -611,6 +637,10 @@ impl App {
                 Kind::Sourcer { .. } => sourcer_node::json(&s),
                 Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } => String::new(),
                 Kind::Missing { name, .. } => format!(",\"module_missing\":\"{}\"", json_escape(name)),
+                Kind::Module { .. } => {
+                    drop(s);
+                    self.module_json(i)
+                }
                 Kind::ResultRecord { .. } => {
                     drop(s);
                     self.record_json(i)
@@ -635,10 +665,11 @@ impl App {
             })
             .collect();
         format!(
-            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires are the evidence trail; anchor error_s is an estimate from the anchor's source\",\"nodes\":[\n{}\n],\"wires\":[{}]}}\n",
+            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires and setting changes are the evidence trail; anchor error_s is an estimate from the anchor's source\",\"nodes\":[\n{}\n],\"wires\":[{}],\"setting_changes\":{}}}\n",
             timebase::fmt_utc(timebase::now_unix()),
             nodes_j.join(",\n"),
-            wires.join(",")
+            wires.join(","),
+            self.changes_json(ids)
         )
     }
 
@@ -838,7 +869,7 @@ impl App {
                 let (status, running) = {
                     let s = self.nodes[i].state.lock().unwrap();
                     let st = match &self.nodes[i].kind {
-                        Kind::Plugin { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
+                        Kind::Plugin { .. } | Kind::Module { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
                         Kind::ManualData { rows } => manual_data_node::status(rows),
                         Kind::Map => self.map_status(i),
                         Kind::CombineLocations { .. } | Kind::InvertLocation => match self.area_from(i) {
@@ -984,6 +1015,7 @@ impl App {
                 Kind::Planes => planes_node::marks(&s),
                 Kind::Enf { .. } => enf_node::marks(&s),
                 Kind::Plugin { .. } => plugin_node::marks(&s),
+                Kind::Module { .. } => bus::marks(&s),
                 _ => continue,
             };
             if s.audio_s > 0.0 {
@@ -1194,6 +1226,7 @@ impl App {
 
         let running = self.running();
         self.keep_running();
+        self.feed_programs();
         self.record_tick();
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();

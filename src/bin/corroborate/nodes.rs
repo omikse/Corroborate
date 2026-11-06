@@ -8,7 +8,7 @@ use corroborate::core::{NodeSpec, Port, PortKind, Role};
 use corroborate::module_manifest::{self as mm, Manifest};
 use corroborate::modules::{combine_locations, enf, grid_frequencies, invert_location, manual_data, map, planes, plugin, result_record, sourcer};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -31,9 +31,12 @@ pub enum Kind {
     CombineLocations { any: bool },
     /// Flips a location: what it added it now subtracts, and the other way round.
     InvertLocation,
+    /// A module with no Rust code: a program on the data bus (protocol 2) with the ports and
+    /// settings its module.toml declares. Settings are saved as `row|` lines, like Manual's.
+    Module { m: Arc<Manifest>, settings: Vec<(String, String)> },
     /// A module this project uses that this tool does not have. Kept as it was saved (name,
-    /// setting, wires) so saving the project loses nothing; its ports come from the saved wires.
-    Missing { name: String, param: String },
+    /// setting, rows, wires) so saving the project loses nothing; its ports come from the saved wires.
+    Missing { name: String, param: String, rows: Vec<(String, String)> },
 }
 
 pub use combine_locations::INPUTS as COMBINE_INPUTS;
@@ -77,6 +80,7 @@ impl Kind {
             Kind::Map => label(map::manifest()),
             Kind::CombineLocations { any } => combine_locations::label(*any),
             Kind::InvertLocation => label(invert_location::manifest()),
+            Kind::Module { m, .. } => m.label.clone(),
             Kind::Missing { name, .. } => format!("{name} (module missing)"),
         }
     }
@@ -93,6 +97,7 @@ impl Kind {
             Kind::CombineLocations { .. } => combine_locations::spec(),
             Kind::InvertLocation => invert_location::spec(),
             Kind::Map => map::spec(),
+            Kind::Module { m, .. } => m.spec(),
             Kind::Missing { name, .. } => NodeSpec { name: mm::intern(name), role: Role::View, inputs: vec![], outputs: vec![] },
         }
     }
@@ -105,7 +110,7 @@ impl Kind {
             Kind::Sourcer { input } => input.clone(),
             Kind::CombineLocations { any } => combine_locations::mode(*any).into(),
             Kind::Missing { param, .. } => param.clone(),
-            Kind::ManualData { .. } | Kind::Planes | Kind::Map | Kind::InvertLocation => String::new(),
+            Kind::ManualData { .. } | Kind::Planes | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
         }
     }
 
@@ -124,8 +129,41 @@ impl Kind {
             Some("result-record") => Kind::ResultRecord { folder: param },
             Some("combine-locations") => Kind::CombineLocations { any: combine_locations::is_any(&param) },
             Some("manual-data") => Kind::ManualData { rows: Vec::new() },
-            Some(id) => Kind::of_id(id, &[]).unwrap_or(Kind::Missing { name: name.into(), param }),
-            None => Kind::Missing { name: name.into(), param },
+            Some(id) => Kind::of_id(id, &[]).unwrap_or(Kind::Missing { name: name.into(), param, rows: Vec::new() }),
+            None => match modules().into_iter().find(|m| m.id == name).and_then(Kind::module) {
+                Some(k) => k,
+                None => Kind::Missing { name: name.into(), param, rows: Vec::new() },
+            },
+        }
+    }
+
+    /// The node of a dropped-in module on the data bus (protocol 2 with a program), its
+    /// settings at their defaults.
+    pub fn module(m: Manifest) -> Option<Kind> {
+        (m.protocol == 2 && m.program.is_some()).then(|| Kind::Module { settings: m.default_settings(), m: Arc::new(m) })
+    }
+
+    /// Lines a project file keeps under the node: Manual's rows, a module's settings.
+    pub fn rows(&self) -> &[(String, String)] {
+        match self {
+            Kind::ManualData { rows } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } => rows,
+            _ => &[],
+        }
+    }
+
+    /// A row from a project file: a Manual row, a module setting (a value its checks refuse
+    /// keeps the default), a missing module's row as it was.
+    pub fn add_row(&mut self, k: String, v: String) {
+        match self {
+            Kind::ManualData { rows } | Kind::Missing { rows, .. } => rows.push((k, v)),
+            Kind::Module { m, settings } => {
+                if let Some(Ok(v)) = m.setting(&k).map(|s| s.check(&v)) {
+                    if let Some(slot) = settings.iter_mut().find(|(n, _)| *n == k) {
+                        slot.1 = v;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -216,6 +254,7 @@ pub fn menu_in(dir: &Path) -> Vec<(String, Vec<(String, Kind)>)> {
             for m in ms {
                 let kind_for = |settings: &[(String, String)]| match (&m.program, Kind::of_id(m.id, settings)) {
                     (_, Some(k)) => Some(k),
+                    (Some(_), None) if m.protocol == 2 => Kind::module((*m).clone()),
                     (Some(p), None) => Some(Kind::Plugin { path: program_path(m, p).to_string_lossy().into_owned() }),
                     (None, None) => None,
                 };
@@ -283,7 +322,7 @@ mod tests {
             assert_eq!(Kind::from_saved(old, String::new()).spec().name, id, "{old}");
         }
         assert!(matches!(Kind::from_saved("mic", "USB".into()), Kind::Sourcer { input } if input == "mic:USB"));
-        assert!(matches!(Kind::from_saved("teleporter", "x".into()), Kind::Missing { name, param } if name == "teleporter" && param == "x"));
+        assert!(matches!(Kind::from_saved("teleporter", "x".into()), Kind::Missing { name, param, .. } if name == "teleporter" && param == "x"));
     }
 
     /// One name per module: every module folder is named by its label, holds a module.toml,
