@@ -1,0 +1,43 @@
+id = "link"
+label = "Link"
+color = "#a8b35f"
+flow = "list"
+description = "Evidence for the clocks: moment t_a on clock a is moment t_b on clock b, with its error (1 sigma). Every link in the project goes into the solve, wired or not."
+
+[[field]]
+name = "t_a"
+required = true
+type = "number"
+label = "time on clock a"
+unit = "s"
+
+[[field]]
+name = "b"
+required = true
+type = "text"
+label = "clock b"
+
+[[field]]
+name = "t_b"
+required = true
+type = "number"
+label = "time on clock b"
+unit = "s"
+
+[[field]]
+name = "error_s"
+type = "number"
+label = "error"
+unit = "s"
+min = 0
+default = 1
+
+[[field]]
+name = "a"
+type = "text"
+label = "clock a (empty: the audio's)"
+
+[[field]]
+name = "source"
+type = "text"
+label = "where it comes from"

@@ -59,7 +59,7 @@ impl Input {
             Input::Mic(d) => format!("dshow:{d}"),
         }
     }
-    fn live(&self) -> bool {
+    pub fn live(&self) -> bool {
         !matches!(self, Input::File(_))
     }
 }
@@ -78,6 +78,8 @@ pub struct Job {
     pub taps: crate::result_record_node::Taps,
     /// Programs on the data bus wired to this source's audio: they get it as JSON lines.
     pub buses: Vec<std::sync::mpsc::SyncSender<String>>,
+    /// The clock this source's times are on (its node's id, or the clock it shares).
+    pub clock: String,
 }
 
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -141,9 +143,9 @@ fn run(job: Job) {
         *anchor.lock().unwrap() = timebase::file_anchor(p);
     }
 
-    let mut args = vec!["--source".to_string(), key.clone(), if live { "--live" } else { "--file" }.to_string()];
+    let mut args = vec!["--source".to_string(), key.clone(), if live { "--live" } else { "--file" }.to_string(), "--clock".to_string(), job.clock.clone()];
     if let Some(a) = anchor.lock().unwrap().as_ref() {
-        args.extend(["--utc0".to_string(), format!("{:.3}", a.utc0), "--utc-source".to_string(), a.source.clone()]);
+        args.extend(["--utc0".to_string(), format!("{:.3}", a.utc0), "--utc-source".to_string(), a.source.clone(), "--utc-error".to_string(), format!("{:.3}", a.error_s)]);
     }
     let mut feeds: Vec<_> = job.plugins.iter().map(|p| plugin_node::start(p, &args, &job.work_dir)).collect();
     let mut planes: Vec<_> = job.planes.iter().map(|s| (planes_node::start(s), s.clone())).collect();

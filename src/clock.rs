@@ -251,6 +251,73 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
     out
 }
 
+impl Anchor {
+    /// What names it for its on/off switch (saved in the project): who gave it, and where.
+    pub fn key(&self) -> String {
+        format!("anchor {} {} {:.3}", self.from, self.clock, self.t)
+    }
+}
+
+impl Link {
+    /// What names it for its on/off switch (saved in the project): who gave it, and where.
+    pub fn key(&self) -> String {
+        format!("link {} {} {:.3} {} {:.3}", self.from, self.a, self.t_a, self.b, self.t_b)
+    }
+}
+
+/// Anchors in the JSON form of the `anchor` type: a list (or one) of
+/// `{"t", "utc", "error_s"?, "clock"?, "source"?}`. A missing or empty clock is `default_clock`
+/// (the clock of the audio the module heard); a missing error is 1 s. Items without `t` or
+/// `utc` are skipped.
+pub fn anchors_from_json(json: &str, default_clock: &str, from: &str) -> Vec<Anchor> {
+    items(json)
+        .iter()
+        .filter_map(|j| {
+            Some(Anchor {
+                clock: text_or(j, "clock", default_clock),
+                t: j.get("t")?.num()?,
+                utc: j.get("utc")?.num()?,
+                error_s: j.get("error_s").and_then(|x| x.num()).unwrap_or(1.0),
+                from: from.to_string(),
+                enabled: true,
+            })
+        })
+        .collect()
+}
+
+/// Links in the JSON form of the `link` type: a list (or one) of
+/// `{"t_a", "b", "t_b", "error_s"?, "a"?, "source"?}`. A missing or empty `a` is `default_clock`;
+/// a missing error is 1 s. Items without `t_a`, `b` or `t_b` are skipped.
+pub fn links_from_json(json: &str, default_clock: &str, from: &str) -> Vec<Link> {
+    items(json)
+        .iter()
+        .filter_map(|j| {
+            Some(Link {
+                a: text_or(j, "a", default_clock),
+                t_a: j.get("t_a")?.num()?,
+                b: j.get("b")?.str().filter(|b| !b.is_empty())?.to_string(),
+                t_b: j.get("t_b")?.num()?,
+                error_s: j.get("error_s").and_then(|x| x.num()).unwrap_or(1.0),
+                from: from.to_string(),
+                enabled: true,
+            })
+        })
+        .collect()
+}
+
+fn items(json: &str) -> Vec<crate::plugin::Json> {
+    use crate::plugin::Json;
+    match crate::plugin::parse_json(json) {
+        Some(Json::Arr(v)) => v,
+        Some(j @ Json::Obj(_)) => vec![j],
+        _ => Vec::new(),
+    }
+}
+
+fn text_or(j: &crate::plugin::Json, k: &str, default: &str) -> String {
+    j.get(k).and_then(|x| x.str()).filter(|x| !x.is_empty()).unwrap_or(default).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +410,16 @@ mod tests {
         let c = solve(&a, &l);
         assert_eq!(c.get("b").kind, Kind::None);
         assert!(c.clocks.contains_key("b"), "a switched-off link still names its clocks");
+    }
+    #[test]
+    fn evidence_from_json() {
+        let a = anchors_from_json(r#"[{"t":12.5,"utc":1000,"error_s":2},{"clock":"n7","t":1,"utc":5},{"t":3}]"#, "n2", "n9");
+        assert_eq!(a.len(), 2);
+        assert_eq!((a[0].clock.as_str(), a[0].t, a[0].utc, a[0].error_s, a[0].from.as_str()), ("n2", 12.5, 1000.0, 2.0, "n9"));
+        assert_eq!((a[1].clock.as_str(), a[1].error_s), ("n7", 1.0));
+        let l = links_from_json(r#"{"t_a":1,"b":"n3","t_b":4,"error_s":0.1}"#, "n2", "n9");
+        assert_eq!((l[0].a.as_str(), l[0].t_a, l[0].b.as_str(), l[0].t_b, l[0].error_s), ("n2", 1.0, "n3", 4.0, 0.1));
+        assert!(links_from_json(r#"[{"t_a":1,"t_b":2}]"#, "n2", "x").is_empty());
+        assert_ne!(a[0].key(), a[1].key());
     }
 }

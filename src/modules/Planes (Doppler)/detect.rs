@@ -87,6 +87,8 @@ pub struct Event {
     pub id: u64,
     /// Closest-approach time, start and end of the fitted ridge (s since stream start).
     pub t_cpa: f64,
+    /// Error of `t_cpa` from the fit, seconds (1 sigma): its measurement error.
+    pub t_err: f64,
     pub t_start: f64,
     pub t_end: f64,
     pub f0: f64,
@@ -462,6 +464,7 @@ impl Detector {
         Some(Event {
             id: 0,
             t_cpa: tc,
+            t_err: f.tc_err,
             t_start: t0,
             t_end: t1,
             f0,

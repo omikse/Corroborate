@@ -1,0 +1,36 @@
+id = "anchor"
+label = "Anchor"
+color = "#5fb3a8"
+flow = "list"
+description = "Evidence for the clocks: moment t on a clock is at a UTC (Coordinated Universal Time), with its error (1 sigma). Every anchor in the project goes into the solve, wired or not."
+
+[[field]]
+name = "t"
+required = true
+type = "number"
+label = "time on the clock"
+unit = "s"
+
+[[field]]
+name = "utc"
+required = true
+type = "datetime"
+label = "is at (UTC)"
+
+[[field]]
+name = "error_s"
+type = "number"
+label = "error"
+unit = "s"
+min = 0
+default = 1
+
+[[field]]
+name = "clock"
+type = "text"
+label = "clock (empty: the audio's)"
+
+[[field]]
+name = "source"
+type = "text"
+label = "where it comes from"

@@ -54,10 +54,11 @@ pub struct SettingChange {
 
 /// Start module `m`'s program with `settings`. Its messages go into `st`: outputs into the
 /// outbox, hello/status/log into the plugin part shown on the node.
-pub fn start(m: &Manifest, settings: &[(String, String)], st: Shared, dir: &std::path::Path) -> Result<Program, String> {
+/// `extra` are more arguments (the audio source's `--source`, `--file` or `--live`, `--clock`).
+pub fn start(m: &Manifest, settings: &[(String, String)], st: Shared, dir: &std::path::Path, extra: &[String]) -> Result<Program, String> {
     let prog = m.program.as_ref().ok_or("its module.toml names no program")?;
     let path = nodes::program_path(m, prog);
-    let mut args = Vec::new();
+    let mut args = extra.to_vec();
     for (k, v) in settings {
         let s = m.setting(k).ok_or(format!("no setting {k}"))?;
         args.extend(["--set".to_string(), format!("{k}={}", s.check(v)?)]);
@@ -153,10 +154,18 @@ impl App {
     /// The value on output `out` of node `from`, or why there is none (yet).
     pub(crate) fn value_from(&self, from: NodeId, out: &str) -> Result<Data, String> {
         let kind = self.graph.nodes()[from].spec.outputs.iter().find(|p| p.name == out).map(|p| p.kind).ok_or(format!("{} has no output {out}", self.nodes[from].label))?;
+        // Times a program sent without a clock are on the clock of the audio it heard.
+        let clock = self.clock_of(from).unwrap_or_default();
         {
             let s = self.nodes[from].state.lock().unwrap();
             if let Some((_, d)) = s.outbox.iter().find(|(n, _)| *n == out) {
-                return Ok(d.clone());
+                let mut d = d.clone();
+                match &mut d {
+                    Data::Events(v) => v.iter_mut().filter(|e| e.clock.is_empty()).for_each(|e| e.clock = clock.clone()),
+                    Data::Tracks(v) => v.iter_mut().filter(|p| p.clock.is_empty()).for_each(|p| p.clock = clock.clone()),
+                    _ => {}
+                }
+                return Ok(d);
             }
         }
         let s = self.nodes[from].state.lock().unwrap();
@@ -164,15 +173,30 @@ impl App {
             (_, Kind::Value { ty, rows }) => corroborate::modules::value::data(ty, rows),
             (PortKind::Location, _) => {
                 drop(s);
-                self.area_from(from).map(|(area, note)| Data::Location { area, note })
+                self.area_from(from).map(|(area, note)| Data::Location { area, note, site: None })
             }
             (PortKind::Time, _) => s
                 .anchor
                 .as_ref()
-                .map(|a| Data::Time { clock: self.nodes[from].uid.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() })
+                .map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() })
                 .ok_or("no time yet".into()),
             (PortKind::Event, Kind::Plugin { .. }) => Ok(Data::Events(
-                s.plugin.findings.iter().map(|f| Event { clock: String::new(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: 0.0 }).collect(),
+                s.plugin.findings.iter().map(|f| Event { clock: clock.clone(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: f.error_s }).collect(),
+            )),
+            // Planes' passes: each is its closest approach, with the fit's error of that time.
+            (PortKind::Event, Kind::Planes) => Ok(Data::Events(
+                s.planes
+                    .passes
+                    .iter()
+                    .map(|e| Event {
+                        clock: clock.clone(),
+                        t_start: e.t_cpa,
+                        t_end: e.t_cpa,
+                        label: format!("pass #{}", e.id),
+                        detail: format!("closest approach; heard {:.1}–{:.1} s, {:.0} m/s, {:.2} km, f0 {:.1} Hz", e.t_start, e.t_end, e.speed, e.dist / 1000.0, e.f0),
+                        error_s: e.t_err,
+                    })
+                    .collect(),
             )),
             (PortKind::Json, Kind::Plugin { .. }) => Ok(Data::Json(json_object(&s.plugin.meta))),
             (PortKind::Audio | PortKind::Video, _) => Err("a stream, not a value".into()),
@@ -210,7 +234,7 @@ impl App {
         s.outbox
             .iter()
             .find_map(|(_, d)| match d {
-                Data::Location { area, note } => Some((area.clone(), note.clone())),
+                Data::Location { area, note, .. } => Some((area.clone(), note.clone())),
                 _ => None,
             })
             .ok_or("no location from it yet".into())
@@ -226,12 +250,30 @@ impl App {
             if n.hidden {
                 continue;
             }
-            if let Ok(p) = start(m, settings, n.state.clone(), &dir) {
+            // The audio's source, for programs that read its files or need its clock.
+            let mut extra: Vec<String> = Vec::new();
+            if let Some((f, _)) = self.audio_source(i) {
+                if let Kind::Sourcer { input } = &self.nodes[f].kind {
+                    if let Some(inp) = sourcer_node::input(input) {
+                        extra.extend(["--source".to_string(), inp.key(), if inp.live() { "--live" } else { "--file" }.to_string()]);
+                    }
+                }
+                if let Some(c) = self.clock_of(f) {
+                    extra.extend(["--clock".to_string(), c]);
+                }
+            }
+            if let Ok(p) = start(m, settings, n.state.clone(), &dir, &extra) {
                 self.programs.insert(i, p);
             }
         }
         self.bus_sent = Instant::now() - Duration::from_secs(1);
         self.feed_programs();
+    }
+
+    /// What feeds node `i`'s audio input: (node, output).
+    pub(crate) fn audio_source(&self, i: NodeId) -> Option<(NodeId, &'static str)> {
+        let p = self.graph.nodes()[i].spec.inputs.iter().find(|p| p.kind == PortKind::Audio)?;
+        self.graph.feeder(i, p.name)
     }
 
     /// Where source `src`'s audio goes on the bus: the programs wired to its audio output.
@@ -245,6 +287,13 @@ impl App {
             return;
         }
         self.bus_sent = Instant::now();
+        // A program is live while the audio it hears is.
+        for &i in self.programs.keys() {
+            if let Some((f, _)) = self.audio_source(i) {
+                let live = self.nodes[f].state.lock().unwrap().live;
+                self.nodes[i].state.lock().unwrap().live = live;
+            }
+        }
         let mut send: Vec<(NodeId, &'static str, Data)> = Vec::new();
         for (&i, p) in &self.programs {
             for port in &self.graph.nodes()[i].spec.inputs {
@@ -389,7 +438,7 @@ pub(crate) fn summary(d: &Data) -> String {
     match d {
         Data::Time { utc: Some(u), error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*u)),
         Data::Time { clock, t, error_s, .. } => format!("{t:+.1} s on {clock} ± {error_s:.1} s"),
-        Data::Location { area, note } => format!("{} {note}", map_node::area_status(area)),
+        Data::Location { area, note, .. } => format!("{} {note}", map_node::area_status(area)),
         Data::Events(v) => match v.last() {
             Some(e) => format!("{} events, last: {}", v.len(), e.label),
             None => "no events".into(),

@@ -5,7 +5,7 @@
 //! | kind       | JSON                                                                          |
 //! |------------|-------------------------------------------------------------------------------|
 //! | `time`     | `{"clock": "n3", "t": 12.5, "utc": 1793839234.0, "error_s": 0.5, "source": "file metadata"}`: moment `t` on `clock` (see `clock`), `utc` only when known; `{"utc": …}` alone is on clock `"utc"` |
-//! | `location` | `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W); programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
+//! | `location` | `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W), plus `"lat"`, `"lon"` and `"elevation"` (m) when it is a point; programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
 //! | `event`    | `[{"clock": "n3", "t_start": 12.0, "t_end": 14.5, "label": "…", "detail": "…", "error_s": 0.1}, …]` (`error_s`: the event's own measurement error) |
 //! | `track`    | `[{"clock": "n3", "id": "h1", "t": 12.0, "value": 59.993, "ok": true}, …]` |
 //! | `text`     | `"any text"`                                                                  |
@@ -44,12 +44,21 @@ pub struct TrackPoint {
     pub ok: bool,
 }
 
+/// A point on the Earth: degrees, and metres above sea level when known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Site {
+    pub lat: f64,
+    pub lon: f64,
+    pub elevation: Option<f64>,
+}
+
 /// A value on a port.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Data {
     /// Moment `t` on `clock`; `utc` when known. `error_s` is the time's whole error (1 sigma).
     Time { clock: String, t: f64, utc: Option<f64>, error_s: f64, source: String },
-    Location { area: Arc<Area>, note: String },
+    /// An area; `site` is the point it was made from, when it was (a typed latitude and longitude).
+    Location { area: Arc<Area>, note: String, site: Option<Site> },
     Events(Vec<Event>),
     Tracks(Vec<TrackPoint>),
     Text(String),
@@ -96,7 +105,10 @@ impl Data {
                 let utc = utc.map_or(String::new(), |u| format!(",\"utc\":{u:.3}"));
                 format!("{{\"clock\":\"{}\",\"t\":{t}{utc},\"error_s\":{error_s},\"source\":\"{}\"}}", json_escape(clock), json_escape(source))
             }
-            Data::Location { area, note } => format!("{{\"add\":{},\"cells\":{},\"note\":\"{}\"}}", area.add, area.cells.runs_json(), json_escape(note)),
+            Data::Location { area, note, site } => {
+                let site = site.map_or(String::new(), |s| format!(",\"lat\":{},\"lon\":{}{}", s.lat, s.lon, s.elevation.map_or(String::new(), |e| format!(",\"elevation\":{e}"))));
+                format!("{{\"add\":{},\"cells\":{}{site},\"note\":\"{}\"}}", area.add, area.cells.runs_json(), json_escape(note))
+            }
             Data::Events(v) => {
                 let e: Vec<String> = v
                     .iter()
@@ -147,11 +159,14 @@ impl Data {
             PortKind::Location => {
                 let add = !matches!(j.get("add"), Some(Json::Bool(false)));
                 let note = text(j, "note");
-                let cells = if let (Some(lat), Some(lon)) = (num(j, "lat"), num(j, "lon")) {
-                    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
-                        return Err(format!("location {lat}, {lon} is not on Earth"));
-                    }
-                    WorldMask::circle(lat, lon, num(j, "radius_km").unwrap_or(0.0).max(0.0))
+                let site = match (num(j, "lat"), num(j, "lon")) {
+                    (Some(lat), Some(lon)) if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) => return Err(format!("location {lat}, {lon} is not on Earth")),
+                    (Some(lat), Some(lon)) => Some(Site { lat, lon, elevation: num(j, "elevation") }),
+                    _ => None,
+                };
+                // Cells when given (they are the area); else a circle around the point.
+                let cells = if let (Some(s), None) = (site, j.get("cells")) {
+                    WorldMask::circle(s.lat, s.lon, num(j, "radius_km").unwrap_or(0.0).max(0.0))
                 } else {
                     let mut m = WorldMask::none();
                     let runs = j.get("cells").ok_or("location needs \"cells\" or \"lat\" and \"lon\"")?;
@@ -167,7 +182,7 @@ impl Data {
                     }
                     m
                 };
-                Ok(Data::Location { area: Arc::new(Area { cells, add }), note })
+                Ok(Data::Location { area: Arc::new(Area { cells, add }), note, site })
             }
             PortKind::Event => {
                 let items = list(j);
@@ -332,7 +347,8 @@ mod tests {
             Data::Time { clock: "utc".into(), t: 1_793_839_234.5, utc: Some(1_793_839_234.5), error_s: 0.25, source: "file \"metadata\"".into() },
             Data::Time { clock: "n3".into(), t: 12.5, utc: None, error_s: 2.0, source: String::new() },
             Data::Time { clock: "n3".into(), t: 12.5, utc: Some(1_793_839_234.5), error_s: 2.0, source: String::new() },
-            Data::Location { area: Arc::new(Area { cells, add: false }), note: "not here".into() },
+            Data::Location { area: Arc::new(Area { cells: cells.clone(), add: false }), note: "not here".into(), site: None },
+            Data::Location { area: Arc::new(Area { cells, add: true }), note: String::new(), site: Some(Site { lat: 42.4797, lon: -76.4514, elevation: Some(335.0) }) },
             Data::Events(vec![
                 Event { clock: "n2".into(), t_start: 12.0, t_end: 14.5, label: "clap".into(), detail: "loud\nshort".into(), error_s: 0.1 },
                 Event { t_start: 1.0, t_end: 1.0, ..Default::default() },

@@ -9,6 +9,12 @@ name = "audio"
 kind = "audio"
 required = true
 
+# A time wired in anchors the clock of the audio: the audio's start is at that time.
+[[input]]
+name = "time"
+kind = "time"
+anchors = "audio"
+
 [[output]]
 name = "aircrafts"
 kind = "event"

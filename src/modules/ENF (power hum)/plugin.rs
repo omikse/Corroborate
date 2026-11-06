@@ -87,6 +87,7 @@ impl<W: Write> Out<W> {
                         "harmonic {} · mean SNR {:.1} dB · {} readings · {:.0} Hz grid",
                         g.harmonic, g.mean_snr_db, g.n_points, g.nominal
                     ),
+                    error_s: 0.0,
                 }));
             }
         }

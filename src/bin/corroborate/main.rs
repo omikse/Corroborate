@@ -23,12 +23,15 @@ mod project_tests;
 #[cfg(test)]
 mod bus_tests;
 #[cfg(test)]
+mod clock_tests;
+#[cfg(test)]
 mod look_tests;
 #[cfg(test)]
 mod canvas_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
+mod evidence;
 mod project;
 mod layout;
 mod look;
@@ -258,6 +261,8 @@ struct App {
     /// The project file chosen with Open or Save as; None is the untitled one,
     /// settings\project.txt (project.rs).
     project_path: Option<PathBuf>,
+    /// Shared clocks, the evidence about the clocks and the clocks solved from it (evidence.rs).
+    ev: evidence::Evidence,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
 }
@@ -306,6 +311,7 @@ impl App {
             history: Default::default(),
             project_path: None,
             next_uid: 1,
+            ev: Default::default(),
         }
     }
 
@@ -376,7 +382,7 @@ impl App {
     fn project_text(&self) -> String {
         // Only visible nodes, renumbered.
         let keep: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
-        self.nodes_text(&keep)
+        self.nodes_text(&keep) + self.evidence_text().as_str()
     }
 
     /// Nodes `keep` in project-file form (renumbered from 0), with the wires between them: the
@@ -444,6 +450,10 @@ impl App {
                 }
                 ["row", n, k, v] => rows.push((n.parse().unwrap_or(usize::MAX), k.to_string(), v.to_string())),
                 ["wire", a, o, b, i] => wires.push((a.parse().unwrap_or(usize::MAX), o.to_string(), b.parse().unwrap_or(usize::MAX), i.to_string())),
+                // Clocks and evidence belong to the project: loading reads them, pasting does not.
+                other if keep_ids => {
+                    self.evidence_line(other);
+                }
                 _ => {}
             }
         }
@@ -537,7 +547,7 @@ impl App {
         match &n.kind {
             Kind::Enf { .. } => enf_node::area_out(&n.state),
             Kind::Value { ty, rows } => match corroborate::modules::value::data(ty, rows)? {
-                corroborate::data::Data::Location { area, note } => Ok((area, note)),
+                corroborate::data::Data::Location { area, note, .. } => Ok((area, note)),
                 _ => Err("this value is not a location".into()),
             },
             Kind::ResultRecord { .. } => self.record_area_out(from),
@@ -584,6 +594,7 @@ impl App {
                 work_dir: dir.clone(),
                 taps: n.taps.clone(),
                 buses: self.audio_buses(i),
+                clock: self.clock_of(i).unwrap_or_default(),
             };
             for (t, _) in self.graph.targets(i, "audio") {
                 let tn = &self.nodes[t];
@@ -894,6 +905,10 @@ impl App {
             }
             let mut fold = false;
             let collapsed = self.nodes[i].collapsed;
+            // Same clock / Separate clocks act on the selected sources (or this one).
+            let srcs: Vec<NodeId> = if self.is_picked(i) { self.picked() } else { vec![i] }.into_iter().filter(|&j| self.nodes[j].kind.is_source()).collect();
+            let (can_share, shared) = (srcs.len() >= 2, srcs.iter().any(|&j| self.shares_clock(j)));
+            let mut clock_act: Option<bool> = None;
             let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
                 ui.horizontal(|ui| {
@@ -904,11 +919,24 @@ impl App {
                     fold = true;
                     ui.close();
                 }
+                if can_share && ui.button("Same clock").on_hover_text("These sources' times are on one clock (photos from one camera, files from one recorder)").clicked() {
+                    clock_act = Some(true);
+                    ui.close();
+                }
+                if shared && ui.button("Separate clocks").on_hover_text("Each of these sources gets its own clock again").clicked() {
+                    clock_act = Some(false);
+                    ui.close();
+                }
                 if ui.button("Delete node").clicked() {
                     delete = Some(i);
                     ui.close();
                 }
             });
+            match clock_act {
+                Some(true) => self.same_clock(&srcs),
+                Some(false) => self.separate_clocks(&srcs),
+                None => {}
+            }
             if fold {
                 self.nodes[i].collapsed = !collapsed;
                 self.save_project();
@@ -1370,6 +1398,7 @@ impl App {
         self.history_tick(&ctx);
         self.keep_running();
         self.feed_programs();
+        self.update_clocks();
         self.record_tick();
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();

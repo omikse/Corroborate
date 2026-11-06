@@ -2,5 +2,34 @@ id = "adsb-check"
 label = "ADS-B check"
 category = "Plugins"
 
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+
+# The site: a location with latitude, longitude and elevation (m).
+[[input]]
+name = "place"
+kind = "location"
+
+# When the audio starts: wire the SOURCER's time.
+[[input]]
+name = "time"
+kind = "time"
+
+[[output]]
+name = "findings"
+kind = "event"
+
+[[output]]
+name = "facts"
+kind = "json"
+
+# Each heard pass matched to an aircraft: evidence for the audio's clock.
+[[output]]
+name = "anchors"
+kind = "anchor"
+
 [processing]
 program = "adsb-check.exe"
+protocol = 2

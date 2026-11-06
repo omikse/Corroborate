@@ -7,7 +7,9 @@
 //!   source's own metadata; `--utc0 <unix s> --utc-source <text>` when the UTC of the first sample
 //!   is already known (files); and `--manual key=value` for each filled field of the Value nodes
 //!   wired into it (a latitude and longitude also as `coordinates=lat, lon`), as they were when
-//!   the plugin started. Plugins that only need audio can ignore them all.
+//!   the plugin started; `--clock <id>` the clock its times are on (the source's), and
+//!   `--utc-error <s>` the error of `--utc0` (1 sigma). Plugins that only need audio can ignore
+//!   them all.
 //! - **stdin**: the audio, raw f32 little-endian, mono, 16 000 Hz, from the first sample of the
 //!   source. End of input means the source ended: report what is still held, then exit.
 //! - **stdout**: one JSON object per line. Times are seconds from the first sample; frequencies Hz.
@@ -16,7 +18,7 @@
 //!   {"type":"status","text":"now 59.9976 Hz"}         latest state for the plugin's box ("\n" = new line)
 //!   {"type":"view","f_lo":59.5,"f_hi":60.5}           the band the plugin's view should show
 //!   {"type":"track","id":"h1","t":12.0,"hz":59.993,"ok":true}   a point of a measured frequency line
-//!   {"type":"finding","id":1,"t_start":17.0,"t_end":119.0,"f_lo":59.96,"f_hi":60.01,"label":"…","detail":"…"}
+//!   {"type":"finding","id":1,"t_start":17.0,"t_end":119.0,"f_lo":59.96,"f_hi":60.01,"label":"…","detail":"…","error_s":0.5}
 //!   {"type":"meta","key":"coordinates","value":"40.7128, -74.0060"}   a fact for the result JSON
 //!   ```
 //! - A plugin must read stdin to the end, even if it ignores the audio: a file's analysis waits
@@ -29,7 +31,8 @@
 //! declares its ports and settings there (`[[input]]`, `[[output]]`, `[[setting]]`), and talks in
 //! JSON lines both ways. Values use the JSON form of their kind (see `data`).
 //! - **arguments**: `--set name=value` for each declared setting (checked against its type, range
-//!   and choices first); a changed setting restarts the program.
+//!   and choices first); a changed setting restarts the program. With audio wired in, also the
+//!   source's `--source`, `--file` or `--live` and `--clock`.
 //! - **stdin**: one JSON object per line.
 //!   ```text
 //!   {"type":"audio","pcm":"<base64 of f32 little-endian, mono, 16 000 Hz>"}   when audio is wired in
@@ -67,6 +70,8 @@ pub struct PluginFinding {
     pub label: String,
     /// More detail, shown on hover.
     pub detail: String,
+    /// Measurement error of its times, seconds (1 sigma); 0 when not given.
+    pub error_s: f64,
 }
 
 /// One line of plugin output.
@@ -375,6 +380,7 @@ pub fn parse_line(line: &str) -> Option<Msg> {
             f_hi: n("f_hi")?,
             label: s("label"),
             detail: s("detail"),
+            error_s: n("error_s").unwrap_or(0.0),
         })),
         "meta" => {
             let value = match get("value")? {
@@ -420,14 +426,15 @@ pub fn track(id: &str, t: f64, hz: f64, ok: bool) -> String {
 
 pub fn finding(f: &PluginFinding) -> String {
     format!(
-        r#"{{"type":"finding","id":{},"t_start":{:.3},"t_end":{:.3},"f_lo":{:.5},"f_hi":{:.5},"label":"{}","detail":"{}"}}"#,
+        r#"{{"type":"finding","id":{},"t_start":{:.3},"t_end":{:.3},"f_lo":{:.5},"f_hi":{:.5},"label":"{}","detail":"{}","error_s":{:.3}}}"#,
         f.id,
         f.t_start,
         f.t_end,
         f.f_lo,
         f.f_hi,
         json_escape(&f.label),
-        json_escape(&f.detail)
+        json_escape(&f.detail),
+        f.error_s
     )
 }
 
@@ -490,6 +497,12 @@ pub fn manual_args() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The value after argument `k` (such as `--clock` or `--utc-error`), if given.
+pub fn arg(k: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned()
+}
+
 /// `--utc0` and `--utc-source`: the UTC (Unix seconds) of the first sample and where it came from.
 pub fn utc0_args() -> Option<(f64, String)> {
     let args: Vec<String> = std::env::args().collect();
@@ -511,6 +524,7 @@ mod tests {
             f_hi: 60.01,
             label: "59.9925 Hz  -35..+11 mHz".into(),
             detail: "harmonic 2 \"quoted\"\nsecond line".into(),
+            error_s: 0.5,
         };
         assert_eq!(parse_line(&finding(&f)), Some(Msg::Finding(f)));
         assert_eq!(

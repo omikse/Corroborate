@@ -131,7 +131,8 @@ impl Kind {
             Some("result-record") => Kind::ResultRecord { folder: param },
             Some("combine-locations") => Kind::CombineLocations { any: combine_locations::is_any(&param) },
             Some("value") => Kind::Value { ty: if param.is_empty() { "location".into() } else { param }, rows: Vec::new() },
-            Some(id) => Kind::of_id(id, &[]).unwrap_or(Kind::Missing { name: name.into(), param, rows: Vec::new() }),
+            // A built-in module on the data bus (ADS-B check) is a program like a dropped-in one.
+            Some(id) => Kind::of_id(id, &[]).or_else(|| modules().into_iter().find(|m| m.id == id).and_then(Kind::module)).unwrap_or(Kind::Missing { name: name.into(), param, rows: Vec::new() }),
             None => match modules().into_iter().find(|m| m.id == name).and_then(Kind::module) {
                 Some(k) => k,
                 None => Kind::Missing { name: name.into(), param, rows: Vec::new() },

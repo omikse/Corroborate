@@ -11,17 +11,22 @@
 //! - heard with no aircraft in the data (a plane without ADS-B, or a false detection).
 //! The status sums it up by distance: the detector's real range at this site.
 //!
-//! Needs MANUAL DATA `coordinates` (lat, lon) and, for close passes, `elevation` (m above sea level);
-//! the UTC of the audio (files: `--utc0` from the viewer; live: this PC's clock); and ADS-B data:
-//! files: every `adsb*.jsonl` next to the source (`tools/adsb-log.py` writes them); live: polls
-//! adsb.lol every 10 s (backing off when refused) and logs to `adsb-logs/` in the working folder.
-//! Aircraft without ADS-B Out, or too low for any receiver, are not in the data.
+//! A module on the data bus (protocol 2, see module.toml). Inputs: `audio`; `place`, the site (a
+//! location with latitude, longitude and, for close passes, elevation in metres above sea level);
+//! `time`, when the audio starts (wire the SOURCER's time; live sources without one use this PC's
+//! clock). Outputs: `findings` (events), `facts` (json) and `anchors`: each heard pass matched to
+//! an aircraft says that the pass's closest approach on the audio's clock is at the aircraft's
+//! heard UTC, ± the pass's own error and the flight data's timing error, so the project's clocks
+//! can be checked and tightened by it. Flight data: files: every `adsb*.jsonl` next to the source
+//! (`--source`; `tools/adsb-log.py` writes them); live: polls adsb.lol every 10 s (backing off
+//! when refused) and logs to `adsb-logs/` in the working folder. Aircraft without ADS-B Out, or
+//! too low for any receiver, are not in the data.
 
 use corroborate::modules::planes::Planes;
-use corroborate::plugin::{self, Json, PluginFinding};
-use corroborate::{ingest, timebase, Config, Event, Finding, Module};
+use corroborate::plugin::{self, In, Json, PluginFinding};
+use corroborate::{timebase, Config, Event, Finding, Module};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 const C: f64 = 343.0;
@@ -37,6 +42,9 @@ const MAX_WAIT_S: f64 = 60.0;
 const COLOR: [u8; 3] = [255, 140, 90];
 const PLANES_BAND: (f64, f64) = (40.0, 450.0);
 const BINS_KM: [f64; 4] = [2.0, 5.0, 10.0, EXPECT_KM];
+/// Timing error of an aircraft's closest approach in the flight data, seconds (1 sigma): positions
+/// come every few seconds and are interpolated.
+const ADSB_TIMING_S: f64 = 3.0;
 
 // ---------------------------------------------------------------- flight data
 
@@ -134,7 +142,7 @@ impl Adsb {
 
 // ---------------------------------------------------------------- geometry
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Site {
     lat: f64,
     lon: f64,
@@ -276,11 +284,39 @@ struct Check<W: Write> {
     heard: Vec<Heard>,
     next_id: u64,
     last_status: String,
+    /// What goes on the `facts` output.
+    facts: Vec<(String, String)>,
 }
 
 impl<W: Write> Check<W> {
     fn line(&mut self, s: String) {
         let _ = writeln!(self.out, "{s}");
+    }
+
+    /// A finding on the `findings` output.
+    fn finding(&mut self, f: &PluginFinding) {
+        let e = format!(
+            "[{{\"t_start\":{:.3},\"t_end\":{:.3},\"label\":\"{}\",\"detail\":\"{}\",\"error_s\":{:.3}}}]",
+            f.t_start,
+            f.t_end,
+            timebase::json_escape(&f.label),
+            timebase::json_escape(&f.detail),
+            f.error_s
+        );
+        self.line(plugin::out("findings", &e));
+    }
+
+    /// Sets a fact; `send_facts` puts them all on the `facts` output.
+    fn fact(&mut self, k: &str, v: &str) {
+        match self.facts.iter_mut().find(|(n, _)| n == k) {
+            Some((_, x)) => *x = v.to_string(),
+            None => self.facts.push((k.to_string(), v.to_string())),
+        }
+    }
+
+    fn send_facts(&mut self) {
+        let kv: Vec<String> = self.facts.iter().map(|(k, v)| format!("\"{}\":\"{}\"", timebase::json_escape(k), timebase::json_escape(v))).collect();
+        self.line(plugin::out("facts", &format!("{{{}}}", kv.join(","))));
     }
 
     /// New expectations from new flight data.
@@ -337,6 +373,7 @@ impl<W: Write> Check<W> {
             );
             let hex = x.a.hex.clone();
             let t_emit = x.a.t_emit;
+            let heard_utc = x.a.heard;
             match best {
                 Some(hi) => {
                     self.heard[hi].claimed = true;
@@ -352,8 +389,18 @@ impl<W: Write> Check<W> {
                         e.speed,
                         e.f0
                     );
-                    let f = PluginFinding { id, t_start: e.t_start, t_end: e.t_end, f_lo: e.f_post.min(e.f_pre), f_hi: e.f_post.max(e.f_pre), label, detail };
-                    self.line(plugin::finding(&f));
+                    let f = PluginFinding { id, t_start: e.t_start, t_end: e.t_end, f_lo: e.f_post.min(e.f_pre), f_hi: e.f_post.max(e.f_pre), label, detail, error_s: e.t_err };
+                    self.finding(&f);
+                    // The pass's closest approach on the audio's clock is at the aircraft's heard UTC.
+                    let err = (e.t_err.powi(2) + ADSB_TIMING_S.powi(2)).sqrt();
+                    if err.is_finite() {
+                        let a = format!(
+                            "[{{\"t\":{:.3},\"utc\":{heard_utc:.3},\"error_s\":{err:.3},\"source\":\"ADS-B {}\"}}]",
+                            e.t_cpa,
+                            timebase::json_escape(&name)
+                        );
+                        self.line(plugin::out("anchors", &a));
+                    }
                     if let Some(a) = adsb.ac.get(&hex) {
                         let track = format!("#{} {}", e.id, a.name());
                         for (t, hz) in predicted(a, self.site, t_emit, e.f0, utc0) {
@@ -381,8 +428,8 @@ impl<W: Write> Check<W> {
                         )
                     };
                     let detail = format!("{when}\n{why}\nhex {hex}");
-                    let f = PluginFinding { id, t_start: rel - 15.0, t_end: rel + 15.0, f_lo: PLANES_BAND.0, f_hi: PLANES_BAND.1, label, detail };
-                    self.line(plugin::finding(&f));
+                    let f = PluginFinding { id, t_start: rel - 15.0, t_end: rel + 15.0, f_lo: PLANES_BAND.0, f_hi: PLANES_BAND.1, label, detail, error_s: 0.0 };
+                    self.finding(&f);
                     let x = &mut self.expects[xi];
                     (x.done, x.counted, x.beyond) = (true, !beyond, beyond);
                 }
@@ -425,8 +472,8 @@ impl<W: Write> Check<W> {
             self.next_id += 1;
             let label = format!("? #{} heard, no aircraft  ({:.2} km, {:.0} m/s fit)", e.id, e.dist / 1000.0, e.speed);
             let detail = format!("pass #{} heard at {} UTC\n{why}\na plane without ADS-B, below receiver coverage, or a false detection", e.id, timebase::fmt_utc_clock(heard_utc));
-            let f = PluginFinding { id: self.next_id, t_start: e.t_start, t_end: e.t_end, f_lo: e.f_post.min(e.f_pre), f_hi: e.f_post.max(e.f_pre), label, detail };
-            self.line(plugin::finding(&f));
+            let f = PluginFinding { id: self.next_id, t_start: e.t_start, t_end: e.t_end, f_lo: e.f_post.min(e.f_pre), f_hi: e.f_post.max(e.f_pre), label, detail, error_s: e.t_err };
+            self.finding(&f);
             self.heard[hi].done = true;
         }
         drop(adsb);
@@ -470,11 +517,12 @@ impl<W: Write> Check<W> {
         let n_expected = counted.len();
         if text != self.last_status {
             self.line(plugin::status(&text));
-            self.line(plugin::meta("expected passes (≤15 km)", &n_expected.to_string()));
-            self.line(plugin::meta("expected and heard", &heard.to_string()));
-            self.line(plugin::meta("heard without aircraft", &lone.to_string()));
-            self.line(plugin::meta("beyond detector speed limits", &beyond.to_string()));
-            self.line(plugin::meta("heard/expected by distance", &bins.join(", ")));
+            self.fact("expected passes (≤15 km)", &n_expected.to_string());
+            self.fact("expected and heard", &heard.to_string());
+            self.fact("heard without aircraft", &lone.to_string());
+            self.fact("beyond detector speed limits", &beyond.to_string());
+            self.fact("heard/expected by distance", &bins.join(", "));
+            self.send_facts();
             self.last_status = text;
         }
     }
@@ -482,29 +530,25 @@ impl<W: Write> Check<W> {
 
 // ---------------------------------------------------------------- input
 
-/// The site from the Value node wired into `place`: `coordinates` "lat, lon" and optional
-/// `elevation` (m, leading number).
-fn site_from(manual: &[(String, String)]) -> Result<(Site, String), String> {
-    let get = |k: &str| manual.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
-    let coords = get("coordinates").ok_or("needs the site: wire a Value node of type location (latitude, longitude, elevation) into place")?;
-    let nums: Vec<f64> = coords.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|s| s.parse().ok()).collect();
-    let (lat, lon) = match nums[..] {
-        [lat, lon, ..] if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) => (lat, lon),
-        _ => return Err(format!("could not read coordinates \"{coords}\": write them as lat, lon")),
+/// The site from the location wired into `place`: its latitude, longitude and elevation (m).
+fn site_from(j: &Json) -> Result<(Site, String), String> {
+    let (Some(lat), Some(lon)) = (j.get("lat").and_then(Json::num), j.get("lon").and_then(Json::num)) else {
+        return Err("needs the site as a point: wire a Value node of type location (latitude, longitude, elevation) into place".into());
     };
-    let elev = get("elevation").and_then(|v| v.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).find(|s| !s.is_empty())?.parse().ok());
+    let elev = j.get("elevation").and_then(Json::num);
     let note = match elev {
-        Some(e) => format!("site {lat:.5}, {lon:.5}, {e:.0} m (manual data)"),
-        None => format!("site {lat:.5}, {lon:.5} (manual data); no elevation: sea level assumed, so low passes read far"),
+        Some(e) => format!("site {lat:.5}, {lon:.5}, {e:.0} m"),
+        None => format!("site {lat:.5}, {lon:.5}; no elevation: sea level assumed, so low passes read far"),
     };
     Ok((Site { lat, lon, elev: elev.unwrap_or(0.0) }, note))
 }
 
-/// Read stdin to the end (the viewer waits for every plugin to take its audio).
-fn drain() {
-    let mut buf = vec![0u8; 1 << 16];
-    let mut i = std::io::stdin().lock();
-    while matches!(i.read(&mut buf), Ok(n) if n > 0) {}
+/// When the audio starts (UTC) from the time wired into `time`, and where that came from.
+fn utc0_from(j: &Json) -> Option<(f64, String)> {
+    let utc = j.get("utc").and_then(Json::num)?;
+    let t = j.get("t").and_then(Json::num).unwrap_or(0.0);
+    let src = j.get("source").and_then(Json::str).unwrap_or("the time wired into time");
+    Some((utc - t, src.to_string()))
 }
 
 /// Flight data logged next to a file: every adsb*.jsonl in its folder.
@@ -586,78 +630,78 @@ fn poll_live(site: Site, adsb: Arc<Mutex<Adsb>>, log_path: std::path::PathBuf) {
 
 fn main() {
     let (source, live) = plugin::source_args();
-    let manual = plugin::manual_args();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let _ = writeln!(out, "{}", plugin::hello("ADS-B CHECK", "test: flight data expects passes, the planes detector confirms", COLOR));
-    let fail = |out: &mut dyn Write, why: &str| {
-        let _ = writeln!(out, "{}", plugin::status(why));
-        let _ = out.flush();
-        drain();
-    };
-    let (site, site_note) = match site_from(&manual) {
-        Ok(s) => s,
-        Err(e) => return fail(&mut out, &e),
-    };
-    let adsb: Arc<Mutex<Adsb>> = Default::default();
-    let adsb_desc = if live {
-        let path = std::path::PathBuf::from("adsb-logs").join(format!("adsb-{}.jsonl", timebase::utc_stamp(timebase::now_unix())));
-        let desc = format!("live from adsb.lol every {POLL_S:.0} s, logged to {}", path.display());
-        let _ = writeln!(out, "{}", plugin::meta("adsb log", &path.display().to_string()));
-        poll_live(site, adsb.clone(), path);
-        desc
-    } else {
-        let src = source.clone().unwrap_or_default();
-        let names = load_logs(&src, &mut adsb.lock().unwrap());
-        if names.is_empty() {
-            return fail(&mut out, &format!("{site_note}\nno flight data: put adsb*.jsonl next to the file (tools/adsb-log.py logs one)"));
+    let _ = writeln!(out, "{}", plugin::status("waiting for the site: wire a location (latitude, longitude, elevation) into place"));
+    let _ = out.flush();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if let Some(m) = plugin::parse_in(&line) {
+                if tx.send(m).is_err() {
+                    break;
+                }
+            }
         }
-        let _ = writeln!(out, "{}", plugin::meta("adsb files", &names.join(", ")));
-        format!("from {}", names.join(", "))
-    };
-    let utc0 = if live { None } else { plugin::utc0_args() };
-    if !live && utc0.is_none() {
-        return fail(&mut out, "this file has no UTC (Coordinated Universal Time) anchor, so it cannot be matched to flight data: record it with REC, or give it a creation time");
-    }
-    let _ = writeln!(out, "{}", plugin::meta("site", &site_note));
-    let _ = writeln!(out, "{}", plugin::meta("rules", &format!("expected = closest approach ≤ {EXPECT_KM:.0} km; heard = a pass within ±{MATCH_S:.0} s of closest approach + sound travel")));
-
+    });
     let cfg = Config::default();
     let mut ck = Check {
         out,
-        site,
-        site_note,
-        utc0,
-        adsb,
-        adsb_desc,
+        site: Site::default(),
+        site_note: String::new(),
+        utc0: None,
+        adsb: Default::default(),
+        adsb_desc: String::new(),
         gates: (cfg.v_min, cfg.v_max),
         polls_seen: 0,
         expects: Vec::new(),
         heard: Vec::new(),
         next_id: 0,
         last_status: String::new(),
+        facts: Vec::new(),
     };
+    let rules = format!("expected = closest approach ≤ {EXPECT_KM:.0} km; heard = a pass within ±{MATCH_S:.0} s of closest approach + sound travel");
+    ck.fact("rules", &rules);
     let mut planes = Planes::new(cfg);
-    let mut samples: u64 = 0;
-    let mut next_check = 0.0;
-    for x in ingest::spawn_stdin(800) {
-        if ck.utc0.is_none() {
-            ck.utc0 = Some((timebase::now_unix() - samples as f64 / 16_000.0, "this PC's clock when the audio arrived (late by the stream's delay)".into()));
-        }
-        samples += x.len() as u64;
-        for f in planes.push(&x) {
-            if let Finding::Plane(e) = f {
-                ck.heard.push(Heard { e, claimed: false, done: false });
+    let (mut samples, mut next_check) = (0u64, 0.0);
+    // Flight data is set up once the site is known; `ready` when it is there to check against.
+    let (mut site_known, mut ready) = (false, false);
+    for m in rx {
+        match m {
+            In::Value { port, value } if port == "place" && !site_known => match site_from(&value) {
+                Ok((site, note)) => {
+                    (ck.site, ck.site_note, site_known) = (site, note, true);
+                    let site_note = ck.site_note.clone();
+                    ck.fact("site", &site_note);
+                    ready = setup_flight_data(&mut ck, live, source.as_deref());
+                    ck.send_facts();
+                }
+                Err(e) => ck.line(plugin::status(&e)),
+            },
+            In::Value { port, value } if port == "time" => {
+                if let Some(u) = utc0_from(&value) {
+                    ck.utc0 = Some(u);
+                }
             }
+            In::Value { .. } => {}
+            In::Audio(x) => {
+                samples += x.len() as u64;
+                for f in planes.push(&x) {
+                    if let Finding::Plane(e) = f {
+                        ck.heard.push(Heard { e, claimed: false, done: false });
+                    }
+                }
+            }
+            In::End => break,
         }
         let audio_t = samples as f64 / 16_000.0;
-        if audio_t >= next_check {
+        if ready && audio_t >= next_check {
             next_check = audio_t + 5.0;
-            ck.refresh();
-            ck.resolve(audio_t, false);
-            if ck.out.flush().is_err() {
-                return;
-            }
+            check(&mut ck, live, samples, false);
+        }
+        if ck.out.flush().is_err() {
+            return;
         }
     }
     for f in planes.flush() {
@@ -665,7 +709,46 @@ fn main() {
             ck.heard.push(Heard { e, claimed: false, done: false });
         }
     }
-    ck.refresh();
-    ck.resolve(samples as f64 / 16_000.0, true);
+    if ready {
+        check(&mut ck, live, samples, true);
+    } else if !site_known {
+        ck.line(plugin::status("no site: wire a location (latitude, longitude, elevation) into place"));
+    }
     let _ = ck.out.flush();
+}
+
+/// Flight data for the site: live, polled from adsb.lol and logged; a file's, from the logs next
+/// to it. False (with the reason as the status) when there is none.
+fn setup_flight_data<W: Write>(ck: &mut Check<W>, live: bool, source: Option<&str>) -> bool {
+    if live {
+        let path = std::path::PathBuf::from("adsb-logs").join(format!("adsb-{}.jsonl", timebase::utc_stamp(timebase::now_unix())));
+        ck.adsb_desc = format!("live from adsb.lol every {POLL_S:.0} s, logged to {}", path.display());
+        ck.fact("adsb log", &path.display().to_string());
+        poll_live(ck.site, ck.adsb.clone(), path);
+        return true;
+    }
+    let names = load_logs(source.unwrap_or_default(), &mut ck.adsb.lock().unwrap());
+    if names.is_empty() {
+        let text = format!("{}\nno flight data: put adsb*.jsonl next to the file (tools/adsb-log.py logs one)", ck.site_note);
+        ck.line(plugin::status(&text));
+        return false;
+    }
+    ck.fact("adsb files", &names.join(", "));
+    ck.adsb_desc = format!("from {}", names.join(", "));
+    true
+}
+
+/// Match flight data and heard passes so far (`fin`: the audio has ended). A file needs its time;
+/// live audio without one uses this PC's clock.
+fn check<W: Write>(ck: &mut Check<W>, live: bool, samples: u64, fin: bool) {
+    let audio_t = samples as f64 / 16_000.0;
+    if ck.utc0.is_none() {
+        if !live {
+            ck.line(plugin::status("no UTC (Coordinated Universal Time) for this file, so it cannot be matched to flight data: wire the SOURCER's time into time (record with REC, or give the file a creation time)"));
+            return;
+        }
+        ck.utc0 = Some((timebase::now_unix() - audio_t, "this PC's clock when the audio arrived (late by the stream's delay)".into()));
+    }
+    ck.refresh();
+    ck.resolve(audio_t, fin);
 }

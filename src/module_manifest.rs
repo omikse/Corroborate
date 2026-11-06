@@ -317,6 +317,9 @@ pub struct Manifest {
     /// How the node looks ([look] and the port look keys).
     pub frame: FrameLook,
     pub port_looks: Vec<(String, PortLook)>,
+    /// Time inputs that anchor another input's clock (`[[input]] anchors = "audio"`): (time
+    /// input, anchored input). The wired time is when that input's audio starts.
+    pub anchors: Vec<(String, String)>,
     /// Its look.rhai, if it has one.
     pub script: Option<String>,
 }
@@ -412,6 +415,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         }
     };
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
+    let mut anchors: Vec<(String, String)> = Vec::new();
     let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
         for p in tables(k)? {
@@ -426,6 +430,11 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             if v.iter().any(|q| q.name == name) {
                 return Err(format!("[[{k}]] {name} is declared twice"));
             }
+            match p.get("anchors") {
+                None => {}
+                Some(toml::Value::String(a)) if k == "input" && kind == PortKind::Time => anchors.push((name.to_string(), a.clone())),
+                Some(_) => return Err(format!("[[{k}]] {name}: `anchors` goes on a time input and names another input")),
+            }
             let l = port_look(p, &format!("[[{k}]] {name}"))?;
             if l != PortLook::default() {
                 port_looks.push((name.to_string(), l));
@@ -436,6 +445,9 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let inputs = ports("input", false)?;
     let outputs = ports("output", true)?;
+    if let Some((t, a)) = anchors.iter().find(|(_, a)| !inputs.iter().any(|p| p.name == a)) {
+        return Err(format!("[[input]] {t}: anchors \"{a}\", which is not an input"));
+    }
     let frame = match t.get("look") {
         None => FrameLook::default(),
         Some(toml::Value::Table(l)) => {
@@ -551,6 +563,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         protocol,
         frame,
         port_looks,
+        anchors,
         script: None,
     })
 }
@@ -646,6 +659,7 @@ mod tests {
             protocol: 1,
             frame: FrameLook::default(),
             port_looks: vec![],
+            anchors: vec![],
             script: None,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];

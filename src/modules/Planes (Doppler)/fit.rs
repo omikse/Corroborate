@@ -19,6 +19,8 @@ pub struct Fit {
     pub p: [f64; 4],
     pub rms: f64,
     pub n: usize,
+    /// Error of the closest-approach time `tc`, seconds (1 sigma): `tc_error`.
+    pub tc_err: f64,
     /// Asymptote frequencies implied by the fit (approach, recede).
     pub f_pre: f64,
     pub f_post: f64,
@@ -141,6 +143,42 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
+/// The fit's Jacobian product JᵀJ at `p` (central differences, steps as in `lm`).
+fn jtj_at(ts: &[f64], p: &[f64; 4], c: f64) -> [[f64; 4]; 4] {
+    let h = [1e-4 * p[0].abs().max(1.0), 1e-3 * p[1], 1e-3 * p[2], 1e-2];
+    let mut jtj = [[0.0; 4]; 4];
+    for &t in ts {
+        let mut g = [0.0; 4];
+        for j in 0..4 {
+            let (mut a, mut b) = (*p, *p);
+            a[j] += h[j];
+            b[j] -= h[j];
+            g[j] = (model(t, &a, c) - model(t, &b, c)) / (2.0 * h[j]);
+        }
+        for i in 0..4 {
+            for j in 0..4 {
+                jtj[i][j] += g[i] * g[j];
+            }
+        }
+    }
+    jtj
+}
+
+/// Error (1 sigma, seconds) of the closest-approach time of a fit at `p` with residual `rms`
+/// (Hz): sqrt(σ² · (JᵀJ)⁻¹[tc][tc]), σ² the residual variance with 4 parameters taken out.
+/// Infinite when the fit does not pin `tc` down.
+pub fn tc_error(ts: &[f64], p: &[f64; 4], c: f64, rms: f64) -> f64 {
+    let n = ts.len() as f64;
+    if n <= 4.0 {
+        return f64::INFINITY;
+    }
+    let var = rms * rms * n / (n - 4.0);
+    match solve4(jtj_at(ts, p, c), [0.0, 0.0, 0.0, 1.0]) {
+        Some(x) if x[3].is_finite() && x[3] > 0.0 => (var * x[3]).sqrt(),
+        _ => f64::INFINITY,
+    }
+}
+
 /// Levenberg–Marquardt with a central-difference Jacobian.
 pub fn lm(ts: &[f64], fs: &[f64], p0: [f64; 4], c: f64, iters: usize) -> [f64; 4] {
     let mut p = p0;
@@ -222,6 +260,7 @@ pub fn fit(ts: &[f64], fs: &[f64], c: f64) -> Option<Fit> {
         p,
         rms,
         n: ts.len(),
+        tc_err: tc_error(ts, &p, c, rms),
         f_pre: f0 * c / (c - v),
         f_post: f0 * c / (c + v),
     })
@@ -270,7 +309,7 @@ pub fn robust_fit(ts: &[f64], fs: &[f64], c: f64, tol: f64) -> Option<(Fit, Vec<
         iff.extend(idx.iter().map(|&i| fs[i]));
         let rms = (cost(&it, &iff, &p, c) / idx.len() as f64).sqrt();
         let [f0, v, _, _] = p;
-        let fit = Fit { p, rms, n: idx.len(), f_pre: f0 * c / (c - v), f_post: f0 * c / (c + v) };
+        let fit = Fit { p, rms, n: idx.len(), tc_err: tc_error(&it, &p, c, rms), f_pre: f0 * c / (c - v), f_post: f0 * c / (c + v) };
         best = Some((fit, idx));
     }
     best
@@ -311,6 +350,35 @@ mod tests {
         assert!((f.p[2] - 900.0).abs() < 60.0, "{:?}", f.p);
         assert!((f.p[3] - 80.0).abs() < 0.5, "{:?}", f.p);
         assert!(f.rms < 0.25, "rms {}", f.rms);
+    }
+
+    /// The closest-approach error matches the scatter of `tc` over many noisy passes.
+    #[test]
+    fn tc_error_matches_scatter() {
+        let truth = [112.0, 62.0, 900.0, 80.0];
+        let ts: Vec<f64> = (0..640).map(|i| i as f64 * 0.25).collect();
+        let mut seed = 12345u64;
+        let mut gauss = || {
+            // Sum of 12 uniforms minus 6: close to a standard normal.
+            let mut s = 0.0;
+            for _ in 0..12 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s += (seed >> 11) as f64 / (1u64 << 53) as f64;
+            }
+            s - 6.0
+        };
+        let (mut tcs, mut errs) = (Vec::new(), Vec::new());
+        for _ in 0..40 {
+            let fs: Vec<f64> = ts.iter().map(|&t| model(t, &truth, C_SOUND) + 1.0 * gauss()).collect();
+            let f = fit(&ts, &fs, C_SOUND).expect("fit");
+            tcs.push(f.p[3]);
+            errs.push(f.tc_err);
+        }
+        let m = tcs.iter().sum::<f64>() / tcs.len() as f64;
+        let sd = (tcs.iter().map(|t| (t - m).powi(2)).sum::<f64>() / (tcs.len() - 1) as f64).sqrt();
+        let e = errs.iter().sum::<f64>() / errs.len() as f64;
+        assert!(e > 0.0 && e.is_finite(), "error {e}");
+        assert!(sd / e > 0.6 && sd / e < 1.6, "scatter {sd:.4} s, error {e:.4} s");
     }
 
     #[test]
