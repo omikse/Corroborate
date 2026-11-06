@@ -11,6 +11,10 @@
 //! This file draws the graph, the timeline and the windows' frames. What each node shows and does
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
+// Release builds are a Windows GUI program: no console window. Debug builds keep the console
+// for diagnostics.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(test)]
 mod drive;
 mod look;
@@ -1005,6 +1009,9 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
+            // Which build this is: the commit it was built from (+ when there were uncommitted
+            // changes), set by run.cmd; "dev" for a plain cargo build.
+            ui.colored_label(DIM, option_env!("CORROBORATE_BUILD").unwrap_or("dev"));
             ui.separator();
             {
                 // The graph runs always: changes restart it. Recording is in the Result record node.

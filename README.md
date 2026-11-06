@@ -9,17 +9,25 @@ built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Rust, plus ffmpeg on `PATH` (yt-dlp for YouTube links).
 
+**run.cmd** (double-click it, or run it from the repository root) builds the current code and
+starts the workbench from `app\`, the tool's own folder. The build is shown in the top bar: the
+commit, with `+` when there were uncommitted changes. It works while the app is open: the open
+window keeps its build and the next start gets the new one (`tools\run.ps1` says how).
+
 ```bash
-cargo build --release     # corroborate, planes-view, corroborate-cli and the plugins
+run.cmd                   # build, update app\, start the workbench (no console window)
+run.cmd -NoStart          # build and update app\ only
+run.cmd --run             # ... start and press Run on the saved project
+run.cmd --new             # ... start with an empty canvas
 cargo test --release
-target/release/corroborate              # the workbench
-target/release/corroborate --run        # open the saved project and press Run
-target/release/corroborate --new        # an empty canvas
 ```
 
-The tool is one movable folder: everything it keeps lives next to the program, in `settings\`
-(the project, planes-view's settings), `results\` (result JSON, flight logs) and `recordings\`.
-Nothing goes to system folders.
+cargo writes only `target\`; nothing runs from there, so building never waits for an open app.
+Release builds have no console window; debug builds keep it.
+
+The tool is one movable folder: everything it keeps lives next to the program (in `app\`), in
+`settings\` (the project, planes-view's settings), `results\` (result JSON, flight logs) and
+`recordings\`. Nothing goes to system folders.
 
 In the workbench: right-click to add nodes, drag from an output to an input to wire (types must
 match). Nodes have no windows: each shows its data and controls on the canvas. With no saved project the
