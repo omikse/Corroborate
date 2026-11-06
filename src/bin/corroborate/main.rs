@@ -927,6 +927,8 @@ impl App {
                         Kind::Missing { .. } => "module not found: add its folder to modules\\".into(),
                         _ => s.status.clone(),
                     };
+                    // A type defined differently in two places is named on every node using it.
+                    let st = spec.inputs.iter().chain(&spec.outputs).find_map(|p| corroborate::types::conflict(corroborate::module_manifest::kind_id(p.kind))).unwrap_or(st);
                     (st, s.running)
                 };
                 let status = if status.chars().count() > 34 { format!("{}…", status.chars().take(33).collect::<String>()) } else { status };
@@ -1212,6 +1214,7 @@ fn describe(e: &GraphError) -> String {
         GraphError::KindMismatch { from, to } => format!("cannot wire {from} into {to}: the types differ"),
         GraphError::InputTaken { port, .. } => format!("input '{port}' already has a wire (right-click it to unwire)"),
         GraphError::Cycle => "that wire would make a loop".into(),
+        GraphError::TypeConflict(e) => format!("cannot wire: {e}"),
         other => format!("{other:?}"),
     }
 }

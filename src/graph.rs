@@ -36,6 +36,8 @@ pub enum GraphError {
     NoOutput { node: NodeId, port: String },
     NoInput { node: NodeId, port: String },
     KindMismatch { from: String, to: String },
+    /// The type is defined differently in two places (src/types.rs).
+    TypeConflict(String),
     InputTaken { node: NodeId, port: String },
     Cycle,
 }
@@ -92,6 +94,9 @@ impl Graph {
                 from: format!("{}.{} ({:?})", src.label, op.name, op.kind),
                 to: format!("{}.{} ({:?})", dst.label, ip.name, ip.kind),
             });
+        }
+        if let Some(e) = crate::types::conflict(crate::module_manifest::kind_id(op.kind)) {
+            return Err(GraphError::TypeConflict(e));
         }
         if self.wires.iter().any(|w| w.to == to && w.to_port == to_port) {
             return Err(GraphError::InputTaken { node: to, port: inp.to_string() });

@@ -71,8 +71,15 @@ foreach ($dir in Get-ChildItem (Join-Path $root 'src\modules') -Directory) {
     if (-not (Test-Path $manifest)) { continue }
     $dst = Join-Path $modules $dir.Name
     New-Item -ItemType Directory -Force $dst | Out-Null
-    foreach ($f in Get-ChildItem $dir.FullName -File | Where-Object { $_.Extension -in '.toml', '.rhai', '.md', '.json' }) {
-        $to = Join-Path $dst $f.Name
+    $own = @(Get-ChildItem $dir.FullName -File | Where-Object { $_.Extension -in '.toml', '.rhai', '.md', '.json' })
+    # The types the module brings: types\<id>.toml.
+    $types = Join-Path $dir.FullName 'types'
+    if (Test-Path $types) {
+        New-Item -ItemType Directory -Force (Join-Path $dst 'types') | Out-Null
+        $own += @(Get-ChildItem $types -File -Filter '*.toml')
+    }
+    foreach ($f in $own) {
+        $to = if ($f.DirectoryName -eq $types) { Join-Path (Join-Path $dst 'types') $f.Name } else { Join-Path $dst $f.Name }
         if (-not (Test-Path $to) -or (Get-Item $to).LastWriteTime -lt $f.LastWriteTime) {
             Copy-Item $f.FullName $to
         } elseif ((Get-FileHash $to).Hash -ne (Get-FileHash $f.FullName).Hash) {

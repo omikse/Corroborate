@@ -122,6 +122,8 @@ pub enum PortKind {
     Json,
     /// An input that takes any kind (the Result record's inputs); it shows the kind wired into it.
     Any,
+    /// A type from a type.toml that is not built in (src/types.rs), by its id.
+    Custom(&'static str),
 }
 
 /// One input or output of a node.

@@ -34,6 +34,7 @@ pub fn kind_name(k: PortKind) -> &'static str {
         PortKind::Text => "text",
         PortKind::Json => "data",
         PortKind::Any => "anything",
+        PortKind::Custom(id) => id,
     }
 }
 

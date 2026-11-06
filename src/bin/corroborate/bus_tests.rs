@@ -178,3 +178,61 @@ fn settings_on_the_canvas() {
     assert!(d.app().setting_errors.is_empty());
     d.app().stop_all();
 }
+
+const SPOT_TYPE: &str = r##"id = "spot"
+label = "Spot"
+color = "#33aa77"
+flow = "value"
+description = "A test type: a point and a name."
+
+[[field]]
+name = "lat"
+type = "number"
+
+[[field]]
+name = "name"
+type = "text"
+"##;
+
+/// A module folder that brings its own type (types\spot.toml): its ports use it, wires of it
+/// work, values are checked against its fields, and a second definition that differs is a
+/// conflict that refuses wires.
+#[test]
+fn module_brings_its_type() {
+    let root = out_dir().join("bus_modules").join("module_brings_its_type");
+    let dir = root.join("Spot echo");
+    std::fs::create_dir_all(dir.join("types")).unwrap();
+    std::fs::write(dir.join("types").join("spot.toml"), SPOT_TYPE).unwrap();
+    std::fs::write(dir.join("module.toml"), MANIFEST.replace("kind = \"location\"", "kind = \"spot\"")).unwrap();
+    let found = mm::discover(&root);
+    let m = found[0].1.clone().expect("the module's own type is known to its ports");
+    assert_eq!(m.inputs[0].kind, PortKind::Custom("spot"));
+    let t = corroborate::types::lookup("spot").unwrap();
+    assert_eq!((t.color, t.origin.as_str()), ([0x33, 0xaa, 0x77], r"modules\Spot echo\types\spot.toml"));
+
+    let mut app = App::empty();
+    let a = app.add(Kind::module(m.clone()).unwrap(), Pos2::new(30.0, 40.0));
+    let b = app.add(Kind::module(m).unwrap(), Pos2::new(330.0, 40.0));
+    app.wire(a, "place", b, "place");
+    assert_eq!(app.graph.wires().len(), 1, "a wire of the module's type");
+    let p = app.graph.nodes()[b].spec.inputs[0].clone();
+    assert!(app.port_hover(b, &p, false).contains("Spot (value, input, optional)\nA test type"));
+
+    let spot = PortKind::Custom("spot");
+    assert_eq!(Data::parse(spot, r#"{"lat": 50, "name": "here"}"#).unwrap().to_json(), r#"{"lat":50,"name":"here"}"#);
+    assert!(Data::parse(spot, r#"{"lat": "north"}"#).unwrap_err().contains("\"lat\" must be a number"));
+    assert!(Data::parse(spot, "3").unwrap_err().contains("object"));
+
+    // Another modules folder defines spot differently: both are named, and wiring is refused.
+    let other = out_dir().join("bus_modules").join("module_brings_its_type_2");
+    std::fs::create_dir_all(other.join("Other").join("types")).unwrap();
+    std::fs::write(other.join("Other").join("types").join("spot.toml"), SPOT_TYPE.replace("#33aa77", "#ffffff")).unwrap();
+    std::fs::write(other.join("Other").join("module.toml"), "id = \"other\"\nlabel = \"Other\"\n").unwrap();
+    mm::discover(&other);
+    let e = corroborate::types::conflict("spot").expect("a conflict");
+    assert!(e.contains(r"modules\Spot echo\types\spot.toml and modules\Other\types\spot.toml"), "{e}");
+    app.graph.disconnect(b, "place");
+    assert!(matches!(app.graph.connect(a, "place", b, "place"), Err(GraphError::TypeConflict(_))));
+    corroborate::types::set_module_types(&other, Vec::new());
+    assert!(app.graph.connect(a, "place", b, "place").is_ok(), "fixed: wires again");
+}

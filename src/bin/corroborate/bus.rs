@@ -392,7 +392,7 @@ pub(crate) fn summary(d: &Data) -> String {
         },
         Data::Tracks(v) => format!("{} points", v.len()),
         Data::Text(t) | Data::File(t) => t.clone(),
-        Data::Json(j) => j.clone(),
+        Data::Json(j) | Data::Custom { json: j, .. } => j.clone(),
     }
 }
 

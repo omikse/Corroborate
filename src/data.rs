@@ -51,6 +51,9 @@ pub enum Data {
     /// Any JSON, kept as its text.
     Json(String),
     File(String),
+    /// A value of a type from a type.toml (src/types.rs), checked against its fields, kept as
+    /// its JSON text.
+    Custom { kind: &'static str, json: String },
 }
 
 impl Data {
@@ -63,6 +66,7 @@ impl Data {
             Data::Text(_) => PortKind::Text,
             Data::Json(_) => PortKind::Json,
             Data::File(_) => PortKind::File,
+            Data::Custom { kind, .. } => PortKind::Custom(kind),
         }
     }
 
@@ -71,6 +75,11 @@ impl Data {
         match (self, new) {
             (Data::Events(a), Data::Events(b)) => a.extend(b),
             (Data::Tracks(a), Data::Tracks(b)) => a.extend(b),
+            (Data::Custom { kind: a, json: ja }, Data::Custom { kind: b, json: jb }) if *a == b && crate::types::lookup(b).is_some_and(|t| t.flow == crate::types::Flow::List) => {
+                let mut items = parse_json(ja).map(|j| list(&j)).unwrap_or_default();
+                items.extend(parse_json(&jb).map(|j| list(&j)).unwrap_or_default());
+                *ja = write_json(&Json::Arr(items));
+            }
             (me, new) => *me = new,
         }
     }
@@ -102,6 +111,7 @@ impl Data {
             }
             Data::Text(s) | Data::File(s) => format!("\"{}\"", json_escape(s)),
             Data::Json(s) => s.clone(),
+            Data::Custom { json, .. } => json.clone(),
         }
     }
 
@@ -160,6 +170,14 @@ impl Data {
             PortKind::Text => Ok(Data::Text(j.str().ok_or("text must be a string")?.to_string())),
             PortKind::File => Ok(Data::File(j.str().ok_or("file must be a path as a string")?.to_string())),
             PortKind::Json => Ok(Data::Json(write_json(j))),
+            PortKind::Custom(id) => {
+                let t = crate::types::lookup(id).ok_or(format!("type \"{id}\" is not known"))?;
+                let items = if t.flow == crate::types::Flow::List { list(j) } else { vec![j.clone()] };
+                for item in &items {
+                    check_fields(&t, item)?;
+                }
+                Ok(Data::Custom { kind: id, json: write_json(j) })
+            }
             PortKind::Audio | PortKind::Video | PortKind::Any => Err(format!("{kind:?} is not sent as a value")),
         }
     }
@@ -167,6 +185,41 @@ impl Data {
     /// As `from_json`, from text.
     pub fn parse(kind: PortKind, text: &str) -> Result<Data, String> {
         Data::from_json(kind, &parse_json(text).ok_or("not JSON")?)
+    }
+}
+
+/// Says what is wrong when `j` does not fit type `t`'s fields (a field left out is fine).
+fn check_fields(t: &crate::types::TypeDef, j: &Json) -> Result<(), String> {
+    use crate::types::FieldType as F;
+    let fits = |ty: &F, v: &Json| match (ty, v) {
+        (F::Number { .. } | F::Datetime, Json::Num(_)) | (F::Bool, Json::Bool(_)) | (F::Text | F::File | F::Choice(_), Json::Str(_)) | (_, Json::Null) => true,
+        _ => false,
+    };
+    let what = |ty: &F| match ty {
+        F::Number { .. } => "a number",
+        F::Datetime => "Unix seconds",
+        F::Bool => "true or false",
+        _ => "text",
+    };
+    match &t.fields[..] {
+        [] => Ok(()),
+        [f] if f.name == "value" => match fits(&f.ty, j) {
+            true => Ok(()),
+            false => Err(format!("{} must be {}", t.id, what(&f.ty))),
+        },
+        fields => {
+            if !matches!(j, Json::Obj(_)) {
+                return Err(format!("{} must be an object {{\"{}\": …}}", t.id, fields[0].name));
+            }
+            for f in fields {
+                if let Some(v) = j.get(&f.name) {
+                    if !fits(&f.ty, v) {
+                        return Err(format!("{}: \"{}\" must be {}", t.id, f.name, what(&f.ty)));
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 

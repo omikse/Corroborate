@@ -265,27 +265,100 @@ pub fn read(file: &Path, origin: &str) -> Result<TypeDef, String> {
     Ok(t)
 }
 
-/// Types found in folders (the tool's types\ folder, modules' types\), set by the workbench.
-static FOUND: RwLock<Option<Arc<Vec<Arc<TypeDef>>>>> = RwLock::new(None);
-
-/// Sets the types found in folders; they override built-in ones of the same id.
-pub fn set_found(types: Vec<TypeDef>) {
-    *FOUND.write().unwrap() = Some(Arc::new(types.into_iter().map(Arc::new).collect()));
+/// Where types come from besides the program: the tool's types\ folder, and each modules folder's
+/// modules (their types\ folders), by modules folder.
+#[derive(Default)]
+struct Sources {
+    folder: Vec<Arc<TypeDef>>,
+    modules: Vec<(PathBuf, Vec<Arc<TypeDef>>)>,
+    merged: Vec<Arc<TypeDef>>,
+    conflicts: Vec<(&'static str, Vec<String>)>,
 }
 
-/// Every type: the built-in ones (overridden by a folder of the same id), then the ones found.
-pub fn all() -> Vec<Arc<TypeDef>> {
-    merged(&FOUND.read().unwrap().clone().unwrap_or_default())
+static SOURCES: RwLock<Option<Sources>> = RwLock::new(None);
+
+/// Equal but for where it came from.
+fn same(a: &TypeDef, b: &TypeDef) -> bool {
+    (a.id, &a.label, a.color, a.flow, &a.description, &a.fields) == (b.id, &b.label, b.color, b.flow, &b.description, &b.fields)
 }
 
-fn merged(found: &[Arc<TypeDef>]) -> Vec<Arc<TypeDef>> {
-    let mut v: Vec<Arc<TypeDef>> = builtin().iter().map(|b| found.iter().find(|t| t.id == b.id).cloned().unwrap_or_else(|| b.clone())).collect();
-    for t in found {
+/// One list from the built-in types, the types folder (it overrides them) and modules' types (a
+/// module may reuse a type; one that defines it differently is a conflict).
+fn merge(folder: &[Arc<TypeDef>], modules: &[Arc<TypeDef>]) -> (Vec<Arc<TypeDef>>, Vec<(&'static str, Vec<String>)>) {
+    let mut v: Vec<Arc<TypeDef>> = builtin().iter().map(|b| folder.iter().find(|t| t.id == b.id).cloned().unwrap_or_else(|| b.clone())).collect();
+    for t in folder {
         if !v.iter().any(|a| a.id == t.id) {
             v.push(t.clone());
         }
     }
-    v
+    let mut conflicts: Vec<(&'static str, Vec<String>)> = Vec::new();
+    for t in modules {
+        match v.iter().find(|a| a.id == t.id) {
+            None => v.push(t.clone()),
+            Some(a) if same(a, t) => {}
+            Some(a) => match conflicts.iter_mut().find(|(id, _)| *id == t.id) {
+                Some((_, o)) => o.push(t.origin.clone()),
+                None => conflicts.push((t.id, vec![a.origin.clone(), t.origin.clone()])),
+            },
+        }
+    }
+    (v, conflicts)
+}
+
+fn update(f: impl FnOnce(&mut Sources)) {
+    let mut g = SOURCES.write().unwrap();
+    let s = g.get_or_insert_with(Sources::default);
+    f(s);
+    let modules: Vec<Arc<TypeDef>> = s.modules.iter().flat_map(|(_, v)| v.iter().cloned()).collect();
+    (s.merged, s.conflicts) = merge(&s.folder, &modules);
+}
+
+/// Sets the types found in the tool's types\ folder; they override built-in ones of the same id.
+pub fn set_found(types: Vec<TypeDef>) {
+    update(|s| s.folder = types.into_iter().map(Arc::new).collect());
+}
+
+/// Sets the types the modules in modules folder `dir` bring.
+pub fn set_module_types(dir: &Path, types: Vec<TypeDef>) {
+    let types: Vec<Arc<TypeDef>> = types.into_iter().map(Arc::new).collect();
+    update(|s| match s.modules.iter_mut().find(|(d, _)| d == dir) {
+        Some((_, v)) => *v = types,
+        None => s.modules.push((dir.to_path_buf(), types)),
+    });
+}
+
+/// Every type: the built-in ones (overridden by the types folder), then the ones found.
+pub fn all() -> Vec<Arc<TypeDef>> {
+    match SOURCES.read().unwrap().as_ref() {
+        Some(s) => s.merged.clone(),
+        None => builtin().to_vec(),
+    }
+}
+
+/// Why type `id` cannot be used: defined differently in two places. Wires of it are refused.
+pub fn conflict(id: &str) -> Option<String> {
+    let g = SOURCES.read().unwrap();
+    let (_, o) = g.as_ref()?.conflicts.iter().find(|(k, _)| *k == id)?;
+    Some(format!("type \"{id}\" is defined differently in {}", o.join(" and ")))
+}
+
+/// Every type defined differently in two places, with the places.
+pub fn conflicts() -> Vec<(&'static str, Vec<String>)> {
+    SOURCES.read().unwrap().as_ref().map(|s| s.conflicts.clone()).unwrap_or_default()
+}
+
+/// The types in a module folder's types\ (`types\<id>.toml`), or what is wrong with one.
+pub fn of_module(folder: &Path) -> Result<Vec<TypeDef>, String> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(folder.join("types")).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "toml")).collect();
+    files.sort();
+    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    files
+        .iter()
+        .map(|f| {
+            let file = f.file_name().unwrap_or_default().to_string_lossy();
+            read(f, &format!("modules\\{name}\\types\\{file}")).map_err(|e| format!("types\\{file}: {e}"))
+        })
+        .collect()
 }
 
 /// The type of port kind `k`; a grey value type when there is none.
@@ -296,10 +369,10 @@ pub fn of(k: crate::core::PortKind) -> Arc<TypeDef> {
 
 /// The type `id`, if there is one.
 pub fn lookup(id: &str) -> Option<Arc<TypeDef>> {
-    if let Some(t) = FOUND.read().unwrap().as_ref().and_then(|f| f.iter().find(|t| t.id == id).cloned()) {
-        return Some(t);
+    match SOURCES.read().unwrap().as_ref() {
+        Some(s) => s.merged.iter().find(|t| t.id == id).cloned(),
+        None => builtin().iter().find(|t| t.id == id).cloned(),
     }
-    builtin().iter().find(|t| t.id == id).cloned()
 }
 
 #[cfg(test)]
@@ -347,11 +420,26 @@ mod tests {
         }
         let found: Vec<Arc<TypeDef>> = discover(&dir).into_iter().map(|(_, t)| Arc::new(t.unwrap())).collect();
         assert_eq!(found[1].origin, "types\\spectrum");
-        let all = merged(&found);
+        let (all, conflicts) = merge(&found, &[]);
+        assert!(conflicts.is_empty());
         let get = |id: &str| all.iter().find(|t| t.id == id).unwrap().clone();
         assert_eq!(get("location").color, [1, 2, 3]);
         assert_eq!(get("spectrum").flow, Flow::Stream);
         assert_eq!(all.len(), 11);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modules_reuse_or_conflict() {
+        let t = |id: &str, col: &str, origin: &str| {
+            let mut t = parse(&format!("id = \"{id}\"
+color = \"{col}\"")).unwrap();
+            t.origin = origin.into();
+            Arc::new(t)
+        };
+        let (all, conflicts) = merge(&[], &[t("spectrum", "#445566", "a"), t("spectrum", "#445566", "b"), t("tick", "#000000", "a")]);
+        assert_eq!((all.len(), conflicts.len()), (12, 0), "the same type twice is one type");
+        let (_, conflicts) = merge(&[], &[t("spectrum", "#445566", "a"), t("spectrum", "#ffffff", "b"), t("location", "#000000", "c")]);
+        assert_eq!(conflicts, [("spectrum", vec!["a".to_string(), "b".to_string()]), ("location", vec!["built in".to_string(), "c".to_string()])]);
     }
 }

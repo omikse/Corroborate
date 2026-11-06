@@ -12,8 +12,9 @@
 //!
 //! role = "detector"            # source-file|source-live|reference|detector|transform|solver|record|view
 //!
-//! [[input]]                    # what can be wired in; kinds: audio video time location track
-//! name = "audio"               # event file text json any
+//! [[input]]                    # what can be wired in; kind: a type's id (built in: audio video
+//! name = "audio"               # time location track event file text json any; more in types\,
+//!                              # or in this module's own types\<id>.toml, see src/types.rs)
 //! kind = "audio"
 //! required = true              # must be wired for the module to run (default false)
 //!
@@ -128,6 +129,7 @@ pub fn port_kind(s: &str) -> Option<PortKind> {
         "text" => PortKind::Text,
         "json" => PortKind::Json,
         "any" => PortKind::Any,
+        _ if crate::types::lookup(s).is_some() => PortKind::Custom(intern(s)),
         _ => return None,
     })
 }
@@ -145,6 +147,7 @@ pub fn kind_id(k: PortKind) -> &'static str {
         PortKind::Text => "text",
         PortKind::Json => "json",
         PortKind::Any => "any",
+        PortKind::Custom(id) => id,
     }
 }
 
@@ -414,7 +417,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         for p in tables(k)? {
             let name = p.get("name").and_then(|x| x.as_str()).ok_or(format!("a [[{k}]] has no `name`"))?;
             let kind = p.get("kind").and_then(|x| x.as_str()).ok_or(format!("[[{k}]] {name} has no `kind`"))?;
-            let kind = port_kind(kind).ok_or(format!("[[{k}]] {name}: kind \"{kind}\" must be one of audio, video, time, location, track, event, file, text, json, any"))?;
+            let kind = port_kind(kind).ok_or(format!("[[{k}]] {name}: kind \"{kind}\" is not a type: add types\\{kind}\\type.toml, or types\\{kind}.toml in the module's folder"))?;
             let required = match p.get("required") {
                 None => req_default,
                 Some(toml::Value::Boolean(b)) => *b,
@@ -554,15 +557,17 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
 
 /// The module folders in `dir`: each subfolder with a module.toml, read. A folder whose file
 /// cannot be read or parsed comes back with the error, so it can be shown.
+/// The types the modules bring (each folder's types\) join the shared type list first, so their
+/// ports can name them.
 pub fn discover(dir: &Path) -> Vec<(PathBuf, Result<Manifest, String>)> {
-    let mut found: Vec<(PathBuf, Result<Manifest, String>)> = std::fs::read_dir(dir)
+    let folders: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.join("module.toml").is_file()).collect();
+    let types: Vec<Result<Vec<crate::types::TypeDef>, String>> = folders.iter().map(|p| crate::types::of_module(p)).collect();
+    crate::types::set_module_types(dir, types.iter().flatten().flatten().cloned().collect());
+    let mut found: Vec<(PathBuf, Result<Manifest, String>)> = folders
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.join("module.toml").is_file())
-        .map(|p| {
-            let m = std::fs::read_to_string(p.join("module.toml")).map_err(|e| e.to_string()).and_then(|t| parse(&t)).map(|mut m| {
+        .zip(types)
+        .map(|(p, types)| {
+            let m = types.and_then(|_| std::fs::read_to_string(p.join("module.toml")).map_err(|e| e.to_string())).and_then(|t| parse(&t)).map(|mut m| {
                 m.folder = Some(p.clone());
                 m.script = std::fs::read_to_string(p.join("look.rhai")).ok();
                 m
