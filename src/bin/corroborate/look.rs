@@ -77,11 +77,21 @@ fn names_w(ports: &[corroborate::core::Port]) -> f32 {
     ports.iter().map(|p| if p.kind == corroborate::core::PortKind::Any { 16 } else { p.name.chars().count() }).max().map_or(0.0, |n| n as f32 * 6.3 + 16.0)
 }
 
-/// The body area clear of the port names on the left (inputs) and right (outputs).
+/// The body area clear of the port names written inside the left and right edges.
 pub fn content(app: &App, ui: &egui::Ui, i: NodeId) -> Rect {
+    use corroborate::module_manifest::{PortLabel, Side};
     let spec = &app.graph.nodes()[i].spec;
+    let on = |side: Side| -> Vec<corroborate::core::Port> {
+        let all = spec.inputs.iter().map(|p| (p, false)).chain(spec.outputs.iter().map(|p| (p, true)));
+        all.filter(|(p, out)| {
+            let l = app.port_look(i, p);
+            l.side.unwrap_or(if *out { Side::Right } else { Side::Left }) == side && l.label.unwrap_or(PortLabel::Inside) == PortLabel::Inside && app.port_shown(i, p, *out, &l)
+        })
+        .map(|(p, _)| p.clone())
+        .collect()
+    };
     let r = ui.max_rect();
-    Rect::from_min_max(Pos2::new(r.left() + names_w(&spec.inputs) * app.zoom, r.top()), Pos2::new(r.right() - names_w(&spec.outputs) * app.zoom, r.bottom()))
+    Rect::from_min_max(Pos2::new(r.left() + names_w(&on(Side::Left)) * app.zoom, r.top()), Pos2::new(r.right() - names_w(&on(Side::Right)) * app.zoom, r.bottom()))
 }
 
 /// Run `f` in a child area at `rect`.

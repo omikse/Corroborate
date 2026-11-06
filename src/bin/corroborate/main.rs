@@ -21,10 +21,14 @@ mod drive;
 mod project_tests;
 #[cfg(test)]
 mod bus_tests;
+#[cfg(test)]
+mod look_tests;
 mod bus;
+mod layout;
 mod look;
 mod nodes;
 mod runtime;
+mod script;
 
 // Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
 #[path = "../../modules/Combine locations/node.rs"]
@@ -249,6 +253,11 @@ struct App {
     setting_errors: HashMap<(NodeId, String), String>,
     /// How many times the graph has (re)started.
     runs: u64,
+    /// Module manifests by id (looks, ports), read again each second; and when.
+    looks: HashMap<&'static str, Arc<corroborate::module_manifest::Manifest>>,
+    looks_at: Instant,
+    /// look.rhai scripts, compiled, by module id; and what each node's script last gave.
+    scripts: script::Scripts,
 }
 
 const NODE_W: f32 = 210.0;
@@ -286,6 +295,9 @@ impl App {
             drafts: HashMap::new(),
             setting_errors: HashMap::new(),
             runs: 0,
+            looks: HashMap::new(),
+            looks_at: Instant::now(),
+            scripts: Default::default(),
         }
     }
 
@@ -685,6 +697,9 @@ impl App {
         let size = if self.nodes[i].collapsed {
             // Title and one row per port, nothing else.
             Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 6.0)
+        } else if let Some((w, h)) = self.frame_look(i).size {
+            // module.toml's [look] size, or what its look.rhai says.
+            Vec2::new(w, h)
         } else {
             let standard = Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 26.0);
             look::of(&self.nodes[i].kind).size(self, i, standard)
@@ -697,21 +712,6 @@ impl App {
     fn body_rect(&self, rect: Rect) -> Rect {
         let z = self.zoom;
         Rect::from_min_max(Pos2::new(rect.left() + 6.0 * z, rect.top() + (HEAD + 4.0) * z), Pos2::new(rect.right() - 6.0 * z, rect.bottom() - 22.0 * z))
-    }
-
-    /// A port dot on the node's left (inputs) or right (outputs) edge: the ports of each side
-    /// spaced one row apart around the middle of the edge.
-    fn port_pos(&self, origin: Pos2, i: NodeId, idx: usize, out: bool) -> Pos2 {
-        let r = self.node_rect(origin, i);
-        if self.nodes[i].collapsed {
-            // Collapsed: rows from under the title, inputs left, outputs right.
-            let y = r.top() + (HEAD + 3.0 + (idx as f32 + 0.5) * ROW) * self.zoom;
-            return Pos2::new(if out { r.right() } else { r.left() }, y);
-        }
-        let spec = &self.graph.nodes()[i].spec;
-        let n = if out { spec.outputs.len() } else { spec.inputs.len() }.max(1) as f32;
-        let y = r.center().y + (idx as f32 - (n - 1.0) / 2.0) * ROW * self.zoom;
-        Pos2::new(if out { r.right() } else { r.left() }, y)
     }
 
     fn add_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
@@ -740,6 +740,7 @@ impl App {
 
     fn graph_view(&mut self, ui: &mut egui::Ui) {
         self.area_cache.borrow_mut().clear();
+        self.refresh_looks();
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, BG);
@@ -779,6 +780,8 @@ impl App {
         self.canvas_origin = origin;
         let menu_at = (bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));
+        // Scripted looks of the nodes on screen, run again only when what they read changed.
+        self.run_scripts(origin, area, ui.input(|i| i.time));
 
         let trail = self.selected.and_then(|s| self.graph.trail(s).ok()).unwrap_or_default();
         // Wires out of a node fed by a running live stream pulse in the direction of flow.
@@ -786,12 +789,11 @@ impl App {
         let now = ui.input(|i| i.time);
         for w in self.graph.wires() {
             let kind = self.graph.nodes()[w.from].spec.outputs[w.from_port].kind;
-            let a = self.port_pos(origin, w.from, w.from_port, true);
-            let b = self.port_pos(origin, w.to, w.to_port, false);
-            let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
+            let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
+            let (b, sb) = self.port_place(origin, w.to, w.to_port, false);
             let lit = trail.contains(&w.from) && trail.contains(&w.to);
             let col = if self.selected.is_some() && !lit { alpha(kind_color(kind), 0.2) } else { kind_color(kind) };
-            let pts = [a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b];
+            let pts = layout::wire_points(a, sa, b, sb);
             let width = if lit { 2.6 } else { 1.7 };
             if live[w.from] {
                 vein(&painter, pts, col, width * self.zoom, now, self.zoom);
@@ -846,26 +848,32 @@ impl App {
             let is_sel = self.selected == Some(i);
             let in_trail = trail.contains(&i);
             let fade = self.selected.is_some() && !in_trail;
-            let fill = nl.fill(self, i);
-            painter.rect_filled(rect, 6.0 * self.zoom, if fade { alpha(fill, 0.6) } else { fill });
+            let frame = self.frame_look(i);
+            let fill = frame.fill.map_or_else(|| nl.fill(self, i), |[r, g, b]| Color32::from_rgb(r, g, b));
+            let radius = frame.radius.unwrap_or(6.0) * self.zoom;
+            painter.rect_filled(rect, radius, if fade { alpha(fill, 0.6) } else { fill });
             let border = if is_sel { SEL } else if in_trail { alpha(SEL, 0.6) } else { LINE };
-            painter.rect_stroke(rect, 6.0 * self.zoom, Stroke::new((if is_sel { 2.0 } else { 1.0 }) * self.zoom, border), StrokeKind::Inside);
+            painter.rect_stroke(rect, radius, Stroke::new((if is_sel { 2.0 } else { 1.0 }) * self.zoom, border), StrokeKind::Inside);
             painter.line_segment([Pos2::new(rect.left(), head.bottom()), Pos2::new(rect.right(), head.bottom())], Stroke::new(self.zoom, LINE));
             let tc = if fade { DIM } else { TEXT };
             let lab = &self.nodes[i].label;
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
             painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
-            // The node's own drawing and controls, from its folder's `Look`.
-            let body = self.body_rect(rect);
+            // The node's own drawing and controls: its look.rhai when it has one (which may call
+            // the folder's Rust `Look` as native()), else that `Look`.
+            let show_status = frame.status.unwrap_or_else(|| nl.status());
+            let body = if frame.status != Some(false) { self.body_rect(rect) } else { Rect::from_min_max(self.body_rect(rect).min, rect.max - Vec2::splat(6.0 * self.zoom)) };
             if !collapsed && body.width() > 0.0 && body.height() > 0.0 {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", i)));
                 child.set_clip_rect(body.intersect(area));
                 look::scale(&mut child, self.zoom);
-                nl.body(self, &mut child, i);
+                if !self.draw_script(&mut child, i, body) {
+                    nl.body(self, &mut child, i);
+                }
             }
             // Status line at the bottom of the node.
-            if !collapsed && nl.status() {
+            if !collapsed && show_status {
                 let (status, running) = {
                     let s = self.nodes[i].state.lock().unwrap();
                     let st = match &self.nodes[i].kind {
@@ -893,7 +901,11 @@ impl App {
 
             let missing = self.graph.missing(i);
             for (k, p) in spec.inputs.iter().enumerate() {
-                let c = self.port_pos(origin, i, k, false);
+                let pl = self.port_look(i, p);
+                if !self.port_shown(i, p, false, &pl) {
+                    continue;
+                }
+                let (c, side) = self.port_place(origin, i, k, false);
                 // An input that takes anything: grey and open until wired, then the wired kind's colour and name.
                 let fed = (p.kind == PortKind::Any).then(|| self.graph.feeder(i, p.name)).flatten();
                 let fed_kind = fed.and_then(|(f, o)| self.graph.nodes()[f].spec.outputs.iter().find(|x| x.name == o).map(|x| x.kind));
@@ -907,17 +919,9 @@ impl App {
                     _ if p.kind == PortKind::Any => "+".into(),
                     _ => p.name.into(),
                 };
-                if fed_kind.is_some() {
-                    painter.circle_filled(c, 5.0 * self.zoom, col);
-                } else if p.required {
-                    painter.circle_filled(c, 5.0 * self.zoom, col);
-                } else {
-                    painter.circle_filled(c, 5.0 * self.zoom, NODE);
-                    painter.circle_stroke(c, 4.5 * self.zoom, Stroke::new(1.6 * self.zoom, col));
-                }
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
                 let nc = if fed_kind.is_some() { tc } else { nc };
-                painter.text(c + Vec2::new(10.0 * self.zoom, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(11.5 * self.zoom), nc);
+                layout::draw_port(&painter, c, side, &pl, col, fed_kind.is_some() || p.required, &name, nc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click());
                 if pr.secondary_clicked() {
                     unwire = Some((i, p.name));
@@ -927,9 +931,12 @@ impl App {
                 }
             }
             for (k, p) in spec.outputs.iter().enumerate() {
-                let c = self.port_pos(origin, i, k, true);
-                painter.circle_filled(c, 5.0 * self.zoom, kind_color(p.kind));
-                painter.text(c - Vec2::new(10.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, p.name, FontId::proportional(11.5 * self.zoom), tc);
+                let pl = self.port_look(i, p);
+                if !self.port_shown(i, p, true, &pl) {
+                    continue;
+                }
+                let (c, side) = self.port_place(origin, i, k, true);
+                layout::draw_port(&painter, c, side, &pl, kind_color(p.kind), true, p.name, tc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
                 if pr.drag_started() {
                     self.wiring = Some((i, k));
@@ -939,12 +946,11 @@ impl App {
 
         // Wire being dragged.
         if let Some((n, k)) = self.wiring {
-            let a = self.port_pos(origin, n, k, true);
+            let (a, sa) = self.port_place(origin, n, k, true);
             if let Some(b) = pointer {
                 let kind = self.graph.nodes()[n].spec.outputs[k].kind;
-                let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
                 painter.add(CubicBezierShape::from_points_stroke(
-                    [a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b],
+                    layout::wire_points(a, sa, b, corroborate::module_manifest::Side::Left),
                     false,
                     Color32::TRANSPARENT,
                     Stroke::new(2.0 * self.zoom, kind_color(kind)),
@@ -1015,7 +1021,11 @@ impl App {
                 Kind::Planes => planes_node::marks(&s),
                 Kind::Enf { .. } => enf_node::marks(&s),
                 Kind::Plugin { .. } => plugin_node::marks(&s),
-                Kind::Module { .. } => bus::marks(&s),
+                // A module on the bus has a lane once it has sent events.
+                Kind::Module { .. } => match bus::marks(&s) {
+                    m if m.is_empty() => continue,
+                    m => m,
+                },
                 _ => continue,
             };
             if s.audio_s > 0.0 {

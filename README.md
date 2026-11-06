@@ -63,10 +63,26 @@ To change one node, edit only its folder:
 - **Name, menu place:** `module.toml` (in `app\modules\<label>\` it takes effect while the program runs).
 - **Ports, settings:** `module.toml` (SOURCER's and Result record's ports follow what is opened or
   wired, so theirs are made in `mod.rs`).
-- **Look on the canvas:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
+- **Look on the canvas, without touching code:**
+  - `module.toml` `[look]`: the node's `size`, `fill`, corner `radius`, `status = false` to hide the
+    status line; for each port (in its `[[input]]`/`[[output]]`, or `[look.ports.<name>]`): `side`
+    (left, right, top, bottom), `at` (px along that edge), `label` (inside, outside, hidden), `dot`
+    (circle, square, diamond), `dot_size`, `color`. Anything left out stays as it was.
+  - `look.rhai` beside it (a [Rhai](https://rhai.rs) script): `layout(node)` changes the frame and
+    ports while the node runs (for example hide a port until a setting is filled), `draw(node)`
+    draws inside the node: text, rectangles, circles, lines, editors for the module's settings,
+    a map view, and `native()` for the module's own Rust drawing. Scripts only draw: they cannot
+    add, remove or wire ports, and a wired port is always shown. A script runs only when what it
+    reads changes, never while the canvas pans or zooms; one that fails shows its error on its own
+    node. The full list is at the top of `src/bin/corroborate/script.rs`; Invert location and Map
+    have one each.
+  - In `app\modules\<label>\` both files take effect within a second of saving.
+- **Look in Rust:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
   `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls
   such as buttons or a file picker), and `status` (false) hides the status line. The Map node is the
   example: its map is drawn by `body`. Any node can draw a map with `map_node::paint`.
+- **Collapse:** right-click any node → Collapse leaves its title and port names (saved with the
+  project).
 
 | Module (folder) | id | What it gives |
 |---|---|---|

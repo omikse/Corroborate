@@ -2,7 +2,7 @@
 
 use crate::core::NodeSpec;
 
-crate::builtin_manifest!();
+crate::builtin_manifest!(look);
 
 /// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {

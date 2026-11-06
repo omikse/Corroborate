@@ -361,7 +361,7 @@ fn json_object(kv: &[(String, String)]) -> String {
 }
 
 /// One line about an output's value, for the node.
-fn summary(d: &Data) -> String {
+pub(crate) fn summary(d: &Data) -> String {
     match d {
         Data::Time { utc0, error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*utc0)),
         Data::Location { area, note } => format!("{} {note}", map_node::area_status(area)),

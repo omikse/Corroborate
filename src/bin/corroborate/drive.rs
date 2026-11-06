@@ -25,6 +25,9 @@ pub fn out_dir() -> PathBuf {
     d
 }
 
+/// Tests run at the same time; the graphics device is set up and rendered to one at a time.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // A toolkit: scenarios use what they need.
 #[allow(dead_code)]
 impl Drive {
@@ -34,6 +37,7 @@ impl Drive {
     }
 
     pub fn with(app: App) -> Self {
+        let gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
         let h = Harness::builder().with_size(Vec2::new(1400.0, 780.0)).wgpu().build_ui_state(
             |ui, app: &mut App| {
                 ui.ctx().set_visuals(egui::Visuals::dark());
@@ -41,6 +45,7 @@ impl Drive {
             },
             app,
         );
+        drop(gpu);
         let mut d = Self { h };
         d.frames(3);
         d
@@ -155,7 +160,10 @@ impl Drive {
 
     /// Saves what the screen shows as `target/drive/<name>.png` and prints the path.
     pub fn shot(&mut self, name: &str) -> PathBuf {
-        let img = self.h.render().expect("render (wgpu)");
+        let img = {
+            let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+            self.h.render().expect("render (wgpu)")
+        };
         let p = out_dir().join(format!("{name}.png"));
         img.save(&p).expect("save png");
         println!("shot: {}", p.display());

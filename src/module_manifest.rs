@@ -32,6 +32,23 @@
 //! program = "adsb-check.exe"   # a separate program speaking the plugin protocol
 //! protocol = 2                 # 1: audio in, findings out (default); 2: the data bus (src/plugin.rs)
 //!
+//! [look]                       # how the node looks; anything left out stays as the workbench draws it
+//! size = [260, 140]            # unzoomed px
+//! fill = "#2a3038"
+//! radius = 10                  # corner radius
+//! status = false               # hide the status line
+//!
+//! [look.ports.audio]           # one port (input or output) by name; the same keys may also go
+//! side = "bottom"              # in its [[input]] / [[output]]. side: left right top bottom
+//! at = 40                      # px along that edge from its start (left or top); else spaced evenly
+//! label = "outside"            # inside | outside | hidden
+//! dot = "square"               # circle | square | diamond
+//! dot_size = 6
+//! color = "#ff8800"
+//!
+//! A `look.rhai` beside module.toml can change the look while the node runs (see the workbench's
+//! script.rs).
+//!
 //! [[variant]]                  # offered more than once in Add node, each with its own settings
 //! label = "Combine locations (any)"
 //! mode = "any"
@@ -147,6 +164,142 @@ fn role(s: &str) -> Option<Role> {
     })
 }
 
+/// An edge of a node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    pub fn parse(s: &str) -> Option<Side> {
+        Some(match s {
+            "left" => Side::Left,
+            "right" => Side::Right,
+            "top" => Side::Top,
+            "bottom" => Side::Bottom,
+            _ => return None,
+        })
+    }
+}
+
+/// Where a port's name is written: inside the node beside its dot, outside it, or not at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortLabel {
+    Inside,
+    Outside,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DotShape {
+    Circle,
+    Square,
+    Diamond,
+}
+
+/// How one port looks; None keeps what the workbench does.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PortLook {
+    pub side: Option<Side>,
+    /// Unzoomed px along its edge from the edge's start (left end or top end).
+    pub at: Option<f32>,
+    pub label: Option<PortLabel>,
+    pub dot: Option<DotShape>,
+    pub dot_size: Option<f32>,
+    pub color: Option<[u8; 3]>,
+    /// Not drawn (a script's choice; a wired port is drawn all the same).
+    pub hidden: bool,
+}
+
+impl PortLook {
+    /// `over` on top of this: what it sets wins.
+    pub fn with(&self, over: &PortLook) -> PortLook {
+        PortLook {
+            side: over.side.or(self.side),
+            at: over.at.or(self.at),
+            label: over.label.or(self.label),
+            dot: over.dot.or(self.dot),
+            dot_size: over.dot_size.or(self.dot_size),
+            color: over.color.or(self.color),
+            hidden: self.hidden || over.hidden,
+        }
+    }
+}
+
+/// How the node's frame looks; None keeps what the workbench does.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameLook {
+    pub size: Option<(f32, f32)>,
+    pub fill: Option<[u8; 3]>,
+    pub radius: Option<f32>,
+    pub status: Option<bool>,
+}
+
+/// `#rrggbb`
+pub fn parse_color(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+fn look_num(t: &toml::Table, k: &str, what: &str) -> Result<Option<f32>, String> {
+    match t.get(k) {
+        None => Ok(None),
+        Some(toml::Value::Integer(n)) => Ok(Some(*n as f32)),
+        Some(toml::Value::Float(f)) => Ok(Some(*f as f32)),
+        Some(_) => Err(format!("{what}: `{k}` must be a number")),
+    }
+}
+
+fn look_color(t: &toml::Table, k: &str, what: &str) -> Result<Option<[u8; 3]>, String> {
+    match t.get(k) {
+        None => Ok(None),
+        Some(toml::Value::String(s)) => parse_color(s).map(Some).ok_or(format!("{what}: `{k}` \"{s}\" must be a colour like \"#ff8800\"")),
+        Some(_) => Err(format!("{what}: `{k}` must be a colour like \"#ff8800\"")),
+    }
+}
+
+/// The look keys of a port (in its [[input]]/[[output]] or [look.ports.<name>]).
+fn port_look(t: &toml::Table, what: &str) -> Result<PortLook, String> {
+    let word = |k: &str| -> Result<Option<&str>, String> {
+        match t.get(k) {
+            None => Ok(None),
+            Some(toml::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(format!("{what}: `{k}` must be text in quotes")),
+        }
+    };
+    Ok(PortLook {
+        side: match word("side")? {
+            None => None,
+            Some(s) => Some(Side::parse(s).ok_or(format!("{what}: side \"{s}\" must be left, right, top or bottom"))?),
+        },
+        at: look_num(t, "at", what)?,
+        label: match word("label")? {
+            None => None,
+            Some("inside") => Some(PortLabel::Inside),
+            Some("outside") => Some(PortLabel::Outside),
+            Some("hidden") => Some(PortLabel::Hidden),
+            Some(s) => return Err(format!("{what}: label \"{s}\" must be inside, outside or hidden")),
+        },
+        dot: match word("dot")? {
+            None => None,
+            Some("circle") => Some(DotShape::Circle),
+            Some("square") => Some(DotShape::Square),
+            Some("diamond") => Some(DotShape::Diamond),
+            Some(s) => return Err(format!("{what}: dot \"{s}\" must be circle, square or diamond")),
+        },
+        dot_size: look_num(t, "dot_size", what)?,
+        color: look_color(t, "color", what)?,
+        hidden: false,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
     pub id: &'static str,
@@ -167,6 +320,11 @@ pub struct Manifest {
     pub settings: Vec<Setting>,
     /// How its program talks: 1 audio in, findings out; 2 the data bus (ports and settings).
     pub protocol: u32,
+    /// How the node looks ([look] and the port look keys).
+    pub frame: FrameLook,
+    pub port_looks: Vec<(String, PortLook)>,
+    /// Its look.rhai, if it has one.
+    pub script: Option<String>,
 }
 
 impl Manifest {
@@ -182,6 +340,11 @@ impl Manifest {
     /// Settings as they start: each declared one at its default.
     pub fn default_settings(&self) -> Vec<(String, String)> {
         self.settings.iter().map(|s| (s.name.clone(), s.default.clone())).collect()
+    }
+
+    /// How port `name` looks, as module.toml says.
+    pub fn port_look(&self, name: &str) -> PortLook {
+        self.port_looks.iter().find(|(n, _)| n == name).map(|(_, l)| l.clone()).unwrap_or_default()
     }
 }
 
@@ -254,7 +417,8 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             Some(_) => Err(format!("`{k}` must be [[{k}]] sections")),
         }
     };
-    let ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
+    let mut port_looks: Vec<(String, PortLook)> = Vec::new();
+    let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
         for p in tables(k)? {
             let name = p.get("name").and_then(|x| x.as_str()).ok_or(format!("a [[{k}]] has no `name`"))?;
@@ -268,12 +432,49 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             if v.iter().any(|q| q.name == name) {
                 return Err(format!("[[{k}]] {name} is declared twice"));
             }
+            let l = port_look(p, &format!("[[{k}]] {name}"))?;
+            if l != PortLook::default() {
+                port_looks.push((name.to_string(), l));
+            }
             v.push(Port { name: intern(name), kind, required });
         }
         Ok(v)
     };
     let inputs = ports("input", false)?;
     let outputs = ports("output", true)?;
+    let frame = match t.get("look") {
+        None => FrameLook::default(),
+        Some(toml::Value::Table(l)) => {
+            let size = match l.get("size") {
+                None => None,
+                Some(toml::Value::Array(a)) if a.len() == 2 => {
+                    let n: Vec<f32> = a.iter().filter_map(|x| x.as_float().or(x.as_integer().map(|i| i as f64))).map(|x| x as f32).collect();
+                    match n[..] {
+                        [w, h] if w > 0.0 && h > 0.0 => Some((w, h)),
+                        _ => return Err("[look] `size` must be [width, height], both above 0".into()),
+                    }
+                }
+                Some(_) => return Err("[look] `size` must be [width, height]".into()),
+            };
+            if let Some(toml::Value::Table(ps)) = l.get("ports") {
+                for (name, p) in ps {
+                    let p = p.as_table().ok_or(format!("[look.ports.{name}] must be a section"))?;
+                    let over = port_look(p, &format!("[look.ports.{name}]"))?;
+                    match port_looks.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, l)) => *l = l.with(&over),
+                        None => port_looks.push((name.clone(), over)),
+                    }
+                }
+            }
+            let status = match l.get("status") {
+                None => None,
+                Some(toml::Value::Boolean(b)) => Some(*b),
+                Some(_) => return Err("[look] `status` must be true or false".into()),
+            };
+            FrameLook { size, fill: look_color(l, "fill", "[look]")?, radius: look_num(l, "radius", "[look]")?, status }
+        }
+        Some(_) => return Err("`look` must be a [look] section".into()),
+    };
     let mut settings: Vec<Setting> = Vec::new();
     for s in tables("setting")? {
         let name = s.get("name").and_then(|x| x.as_str()).ok_or("a [[setting]] has no `name`")?.to_string();
@@ -354,6 +555,9 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         outputs,
         settings,
         protocol,
+        frame,
+        port_looks,
+        script: None,
     })
 }
 
@@ -369,6 +573,7 @@ pub fn discover(dir: &Path) -> Vec<(PathBuf, Result<Manifest, String>)> {
         .map(|p| {
             let m = std::fs::read_to_string(p.join("module.toml")).map_err(|e| e.to_string()).and_then(|t| parse(&t)).map(|mut m| {
                 m.folder = Some(p.clone());
+                m.script = std::fs::read_to_string(p.join("look.rhai")).ok();
                 m
             });
             (p, m)
@@ -443,6 +648,9 @@ mod tests {
             outputs: vec![],
             settings: vec![],
             protocol: 1,
+            frame: FrameLook::default(),
+            port_looks: vec![],
+            script: None,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];
         let cats = by_category(&all);
@@ -499,6 +707,41 @@ protocol = 2
     }
 
     #[test]
+    fn looks() {
+        let m = parse(
+            r##"id = "x"
+label = "X"
+[[input]]
+name = "audio"
+kind = "audio"
+side = "bottom"
+at = 40
+[[output]]
+name = "out"
+kind = "event"
+[look]
+size = [260, 140]
+fill = "#2a3038"
+radius = 10
+status = false
+[look.ports.audio]
+dot = "square"
+color = "#ff8800"
+[look.ports.video]
+label = "hidden"
+"##,
+        )
+        .unwrap();
+        assert_eq!(m.frame, FrameLook { size: Some((260.0, 140.0)), fill: Some([0x2a, 0x30, 0x38]), radius: Some(10.0), status: Some(false) });
+        let a = m.port_look("audio");
+        assert_eq!((a.side, a.at, a.dot, a.color), (Some(Side::Bottom), Some(40.0), Some(DotShape::Square), Some([255, 136, 0])));
+        assert_eq!(m.port_look("video").label, Some(PortLabel::Hidden), "a port made in code can be given a look by name");
+        assert_eq!(m.port_look("out"), PortLook::default());
+        assert!(parse("id = \"x\"\nlabel = \"X\"\n[look]\nfill = \"red\"").unwrap_err().contains("colour"));
+        assert!(parse("id = \"x\"\nlabel = \"X\"\n[look.ports.a]\nside = \"up\"").unwrap_err().contains("left, right"));
+    }
+
+    #[test]
     fn intern_keeps_one_copy() {
         assert!(std::ptr::eq(intern("same name"), intern(&String::from("same name"))));
     }
@@ -513,6 +756,17 @@ macro_rules! builtin_manifest {
         pub fn manifest() -> &'static $crate::module_manifest::Manifest {
             static M: std::sync::OnceLock<$crate::module_manifest::Manifest> = std::sync::OnceLock::new();
             M.get_or_init(|| $crate::module_manifest::parse(include_str!("module.toml")).expect("its module.toml (checked by tests)"))
+        }
+    };
+    (look) => {
+        /// What this module is: its folder's module.toml, with its look.rhai.
+        pub fn manifest() -> &'static $crate::module_manifest::Manifest {
+            static M: std::sync::OnceLock<$crate::module_manifest::Manifest> = std::sync::OnceLock::new();
+            M.get_or_init(|| {
+                let mut m = $crate::module_manifest::parse(include_str!("module.toml")).expect("its module.toml (checked by tests)");
+                m.script = Some(include_str!("look.rhai").to_string());
+                m
+            })
         }
     };
 }
