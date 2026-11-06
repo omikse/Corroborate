@@ -1160,6 +1160,8 @@ impl App {
                 if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
                     self.run();
                 }
+                ui.separator();
+                self.play_controls(ui);
                 ui.menu_button("Add node", |ui| {
                     let at = Pos2::new(400.0, 300.0) - self.pan;
                     self.add_menu(ui, at);
@@ -1271,6 +1273,7 @@ impl App {
         self.keep_running();
         self.feed_programs();
         self.update_clocks();
+        self.playhead_tick(&ctx);
         self.record_tick();
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();

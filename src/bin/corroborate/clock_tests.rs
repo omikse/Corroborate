@@ -336,3 +336,33 @@ fn playhead_links_sourcer_planes_and_timeline() {
     assert!((end - (t + 80.0)).abs() < 1e-6, "{end} vs {t}");
     d.shot("playhead_linked");
 }
+
+/// Playing moves the selected node's playhead; in a live project a live group's playhead stops
+/// at the newest audio, and Live jumps back to it.
+#[test]
+fn play_and_live_playheads() {
+    let mut app = App::empty();
+    let a = source(&mut app, 40.0);
+    anchor(&app, a, 1000.0, 1.0);
+    app.update_clocks();
+    app.pick_only(a);
+    let c = uid(&app, a);
+    assert!(!app.is_live());
+    app.set_playhead(&c, 2.0);
+    app.ph.playing = true;
+    app.play_step(1.5);
+    assert_eq!(app.playhead_on(&c), Some(3.5));
+    assert_eq!(app.ph.utc, Some(1003.5));
+    {
+        let mut s = app.nodes[a].state.lock().unwrap();
+        s.live = true;
+        s.audio_s = 3.0;
+    }
+    assert!(app.is_live());
+    app.play_step(1.0);
+    assert_eq!(app.playhead_on(&c), Some(3.0), "stops at now");
+    assert!(!app.ph.playing);
+    app.set_playhead(&c, 0.5);
+    app.go_live();
+    assert_eq!(app.playhead_on(&c), Some(3.0));
+}

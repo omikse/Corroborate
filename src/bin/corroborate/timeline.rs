@@ -409,6 +409,21 @@ impl App {
         }
     }
 
+    /// Play / pause, and whether this is a simulation or live (with Live: back to now).
+    pub(crate) fn play_controls(&mut self, ui: &mut egui::Ui) {
+        if ui.small_button(if self.ph.playing { "Pause" } else { "Play" }).on_hover_text("Space: play or pause the selected node's playhead").clicked() {
+            self.ph.playing = !self.ph.playing;
+        }
+        if self.is_live() {
+            ui.colored_label(Color32::from_rgb(235, 80, 80), "live");
+            if ui.small_button("Live").on_hover_text("jump the playhead back to now").clicked() {
+                self.go_live();
+            }
+        } else {
+            ui.colored_label(DIM, "simulation");
+        }
+    }
+
     /// The timeline panel's contents.
     pub(crate) fn timeline_view(&mut self, ui: &mut egui::Ui) {
         let (events, end) = self.timeline_events();
@@ -449,6 +464,8 @@ impl App {
             if !self.follow && ui.small_button("Follow").clicked() {
                 self.follow = true;
             }
+            ui.separator();
+            self.play_controls(ui);
         });
         if !self.tls.open {
             return;
