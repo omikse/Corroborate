@@ -184,6 +184,8 @@ struct NodeData {
     hidden: bool,
     /// WAV files this source's audio is being recorded into (by Result record nodes).
     taps: result_record_node::Taps,
+    /// Folded to its title and port names (right-click → Collapse); it keeps running and wired.
+    collapsed: bool,
 }
 
 fn project_file() -> Option<PathBuf> {
@@ -232,6 +234,8 @@ struct App {
     /// Areas worked out this frame, by node (see `area_from`).
     area_cache: std::cell::RefCell<HashMap<NodeId, Result<(Arc<Area>, String), String>>>,
     last_project_save: Instant,
+    /// Where the canvas starts on screen (last frame); tests use it to find nodes.
+    canvas_origin: Pos2,
 }
 
 const NODE_W: f32 = 210.0;
@@ -262,6 +266,7 @@ impl App {
             earth: None,
             area_cache: Default::default(),
             last_project_save: Instant::now(),
+            canvas_origin: Pos2::ZERO,
         }
     }
 
@@ -292,7 +297,7 @@ impl App {
 
     fn add(&mut self, kind: Kind, pos: Pos2) -> NodeId {
         let id = self.graph.add(kind.default_label(), kind.spec());
-        self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default() });
+        self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default(), collapsed: false });
         id
     }
 
@@ -326,14 +331,15 @@ impl App {
 
     /// The project file's text: visible nodes (renumbered), Manual rows and wires, one per line.
     fn project_text(&self) -> String {
-        let mut text = String::from("# corroborate project: node|kind|x|y|label|param, row|node|key|value, wire|from|out|to|in\n");
+        let mut text = String::from("# corroborate project: node|kind|x|y|label|param[|collapsed], row|node|key|value, wire|from|out|to|in\n");
         // Only visible nodes, renumbered.
         let keep: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
         let new_id = |old: NodeId| keep.iter().position(|&k| k == old);
         for &i in &keep {
             let n = &self.nodes[i];
             let (k, param) = (n.kind.spec().name, n.kind.saved_param());
-            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
+            let folded = if n.collapsed { "|collapsed" } else { "" };
+            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}{folded}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
         for (ni, &i) in keep.iter().enumerate() {
             if let Kind::ManualData { rows } = &self.nodes[i].kind {
@@ -365,12 +371,13 @@ impl App {
         for line in text.lines() {
             let f: Vec<&str> = line.split('|').collect();
             match f.as_slice() {
-                ["node", k, x, y, label, param] => {
+                ["node", k, x, y, label, param, rest @ ..] if rest.len() <= 1 => {
                     let kind = Kind::from_saved(k, param.to_string());
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
                     if !label.trim().is_empty() {
                         self.nodes[id].label = label.to_string();
                     }
+                    self.nodes[id].collapsed = rest.first().is_some_and(|f| f.trim() == "collapsed");
                 }
                 ["row", n, k, v] => rows.push((n.parse().unwrap_or(usize::MAX), k.to_string(), v.to_string())),
                 ["wire", a, o, b, i] => wires.push((a.parse().unwrap_or(usize::MAX), o.to_string(), b.parse().unwrap_or(usize::MAX), i.to_string())),
@@ -644,8 +651,13 @@ impl App {
     }
 
     fn node_rect(&self, origin: Pos2, i: NodeId) -> Rect {
-        let standard = Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 26.0);
-        let size = look::of(&self.nodes[i].kind).size(self, i, standard);
+        let size = if self.nodes[i].collapsed {
+            // Title and one row per port, nothing else.
+            Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 6.0)
+        } else {
+            let standard = Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 26.0);
+            look::of(&self.nodes[i].kind).size(self, i, standard)
+        };
         Rect::from_min_size(origin + self.pan + self.nodes[i].pos.to_vec2() * self.zoom, size * self.zoom)
     }
 
@@ -660,6 +672,11 @@ impl App {
     /// spaced one row apart around the middle of the edge.
     fn port_pos(&self, origin: Pos2, i: NodeId, idx: usize, out: bool) -> Pos2 {
         let r = self.node_rect(origin, i);
+        if self.nodes[i].collapsed {
+            // Collapsed: rows from under the title, inputs left, outputs right.
+            let y = r.top() + (HEAD + 3.0 + (idx as f32 + 0.5) * ROW) * self.zoom;
+            return Pos2::new(if out { r.right() } else { r.left() }, y);
+        }
         let spec = &self.graph.nodes()[i].spec;
         let n = if out { spec.outputs.len() } else { spec.inputs.len() }.max(1) as f32;
         let y = r.center().y + (idx as f32 - (n - 1.0) / 2.0) * ROW * self.zoom;
@@ -728,6 +745,7 @@ impl App {
             self.selected = None;
         }
         let origin = area.min;
+        self.canvas_origin = origin;
         let menu_at = (bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));
 
@@ -771,17 +789,28 @@ impl App {
             if resp.clicked() {
                 clicked = Some(i);
             }
+            let mut fold = false;
+            let collapsed = self.nodes[i].collapsed;
             let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(label);
                 });
+                if ui.button(if collapsed { "Expand" } else { "Collapse" }).clicked() {
+                    fold = true;
+                    ui.close();
+                }
                 if ui.button("Delete node").clicked() {
                     delete = Some(i);
                     ui.close();
                 }
             });
+            if fold {
+                self.nodes[i].collapsed = !collapsed;
+                self.save_project();
+                continue;
+            }
             let spec = self.graph.nodes()[i].spec.clone();
             let is_sel = self.selected == Some(i);
             let in_trail = trail.contains(&i);
@@ -798,14 +827,14 @@ impl App {
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
             // The node's own drawing and controls, from its folder's `Look`.
             let body = self.body_rect(rect);
-            if body.width() > 0.0 && body.height() > 0.0 {
+            if !collapsed && body.width() > 0.0 && body.height() > 0.0 {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", i)));
                 child.set_clip_rect(body.intersect(area));
                 look::scale(&mut child, self.zoom);
                 nl.body(self, &mut child, i);
             }
             // Status line at the bottom of the node.
-            if nl.status() {
+            if !collapsed && nl.status() {
                 let (status, running) = {
                     let s = self.nodes[i].state.lock().unwrap();
                     let st = match &self.nodes[i].kind {
@@ -929,7 +958,7 @@ impl App {
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / rename / delete",
+            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / rename / collapse / delete",
             FontId::proportional(11.0),
             DIM,
         );

@@ -17,7 +17,8 @@ fn describe_project(app: &App) -> Vec<String> {
                 Kind::ManualData { rows } => format!(" rows={rows:?}"),
                 _ => String::new(),
             };
-            format!("node {} {} {:?} label={:?} at {:.0},{:.0}{rows}", idx(i), n.kind.spec().name, n.kind.saved_param(), n.label, n.pos.x, n.pos.y)
+            let folded = if n.collapsed { " collapsed" } else { "" };
+            format!("node {} {} {:?} label={:?} at {:.0},{:.0}{rows}{folded}", idx(i), n.kind.spec().name, n.kind.saved_param(), n.label, n.pos.x, n.pos.y)
         })
         .collect();
     let g = app.graph.nodes();
@@ -61,6 +62,8 @@ fn full_project() -> App {
     let rec = a.add(Kind::ResultRecord { folder: r"E:\Evidence\case 12".into() }, Pos2::new(1050.0, 40.0));
     a.nodes[src].label = "Field recorder — north gate".into();
     a.nodes[mic].label = "Mic 2".into();
+    a.nodes[inv].collapsed = true;
+    a.nodes[comb].collapsed = true;
 
     a.wire(src, "audio", planes, "audio");
     a.wire(src, "audio", enf, "audio");

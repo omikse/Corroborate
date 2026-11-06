@@ -112,6 +112,24 @@ impl Drive {
         self.frames(2);
     }
 
+    /// Right-clicks at a point on screen (opens a context menu).
+    pub fn right_click_at(&mut self, x: f32, y: f32) {
+        let pos = Pos2::new(x, y);
+        self.h.hover_at(pos);
+        for pressed in [true, false] {
+            self.h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+            self.frames(1);
+        }
+        self.frames(2);
+    }
+
+    /// Where node `i`'s title bar is on screen.
+    pub fn node_title(&mut self, i: NodeId) -> Pos2 {
+        let app = self.app();
+        let r = app.node_rect(app.canvas_origin, i);
+        Pos2::new(r.left() + 40.0, r.top() + 10.0)
+    }
+
     /// Every widget the screen exposes: role, label, value and where it is.
     pub fn dump(&mut self) -> String {
         let mut s = String::new();
@@ -242,6 +260,32 @@ fn area_timing() {
         }
         println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
+}
+
+/// Right-click → Collapse folds a node to its title and ports; wires stay; Expand brings it back.
+#[test]
+fn collapse_node() {
+    let mut d = Drive::new();
+    let a = d.app();
+    let man = a.add(Kind::ManualData { rows: corroborate::modules::manual_data::defaults() }, Pos2::new(30.0, 60.0));
+    let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(400.0, 60.0));
+    a.wire(man, "place", comb, "location 1");
+    d.frames(3);
+    let tall = { let a = d.app(); a.node_rect(a.canvas_origin, comb).height() };
+    let p = d.node_title(comb);
+    d.right_click_at(p.x, p.y);
+    d.click("Collapse");
+    let a = d.app();
+    assert!(a.nodes[comb].collapsed, "collapsed");
+    let short = a.node_rect(a.canvas_origin, comb).height();
+    assert!(short < tall, "shorter: {short} < {tall}");
+    assert_eq!(a.graph.wires().len(), 1, "the wire stays");
+    assert!(a.project_text().contains("|collapsed"), "saved");
+    d.shot("collapse_node");
+    let p = d.node_title(comb);
+    d.right_click_at(p.x, p.y);
+    d.click("Expand");
+    assert!(!d.app().nodes[comb].collapsed, "expanded again");
 }
 
 /// Add node, built from the modules' categories.
