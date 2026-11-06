@@ -25,6 +25,8 @@ use std::sync::Arc;
 
 crate::builtin_manifest!();
 
+pub mod log_match;
+
 /// The node's ports: the one definition, used by the workbench and by `Module::spec`.
 /// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {

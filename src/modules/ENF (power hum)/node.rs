@@ -4,6 +4,7 @@
 
 use super::*;
 use corroborate::module::{Finding, Module};
+use corroborate::modules::enf::log_match::{self, Dated};
 use corroborate::modules::enf::{quality, sections, Enf, EnfPoint, EnfSegment, Level, Quality};
 
 /// What an ENF node has produced so far.
@@ -18,6 +19,9 @@ pub struct EnfState {
     pub area: Option<Arc<WorldMask>>,
     /// How that area was reached: regions, data source, contradictions.
     pub area_note: String,
+    /// The hum matched against the grid log of the wired place around the wired time (at the
+    /// end of a file), or why not.
+    pub dated: Option<Result<Dated, String>>,
 }
 
 /// An ENF node in a run: its state, the grid map wired into it, and the location wired into it (if any).
@@ -25,6 +29,9 @@ pub struct EnfJob {
     pub state: Shared,
     pub grid: Result<Arc<GridMap>, String>,
     pub prior: Option<(WorldMask, String)>,
+    /// The wired time (claimed start of the audio, UTC s, and its error s) and place.
+    pub claimed: Option<(f64, f64)>,
+    pub place: Option<WorldMask>,
 }
 
 /// One ENF node running: the detector, its job, and the nominal frequency last decided.
@@ -98,6 +105,19 @@ pub fn flush(r: &mut EnfRun) {
     if let Some(f) = s.enf.nominal {
         s.status = format!("{f:.0} Hz grid, {} runs", s.enf.segments.len());
     }
+    // With a claimed time and place: match against that place's grid log.
+    let (Some((claimed, err)), Some(place)) = (r.job.claimed, &r.job.place) else { return };
+    let pts = s.enf.points.clone();
+    drop(s);
+    let dated = match log_match::source_for(place) {
+        None => Err("no grid log known for the wired place (only Great Britain for now)".to_string()),
+        Some(src) => {
+            let dur = pts.last().map_or(0.0, |p| p.t) + 60.0;
+            log_match::load(src, claimed - log_match::SEARCH_S - 60.0, claimed + log_match::SEARCH_S + dur)
+                .and_then(|log| log_match::date(&pts, &log, claimed, log_match::SEARCH_S, err.max(10.0)))
+        }
+    };
+    r.job.state.lock().unwrap().enf.dated = Some(dated);
 }
 
 /// The area on the node's location output.
@@ -171,6 +191,11 @@ pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data:
                 .map(|p| TrackPoint { clock: clock.to_string(), id: "hum".into(), t: p.t, value: p.hz, ok: p.ok })
                 .collect(),
         )),
+        "time of recording" => match &s.enf.dated {
+            Some(Ok(d)) => Ok(Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(d.start), error_s: 1.0, source: format!("ENF matched to {}: {}", d.log, d.verdict()) }),
+            Some(Err(e)) => Err(e.clone()),
+            None => Err("needs a wired time and location, and the whole file run".into()),
+        },
         _ => Err("nothing on this output yet".into()),
     }
 }
@@ -179,8 +204,13 @@ pub fn json(s: &NodeState) -> String {
     let p: Vec<String> = s.enf.segments.iter().map(|e| e.to_json(s.anchor.as_ref())).collect();
     let frac = s.enf.area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));
     let q = s.enf.quality.as_ref().map_or("null".to_string(), quality_json);
+    let dated = match &s.enf.dated {
+        Some(Ok(d)) => d.to_json(),
+        Some(Err(e)) => format!("{{\"error\":\"{}\"}}", json_escape(e)),
+        None => "null".into(),
+    };
     format!(
-        ",\"hum_runs\":[{}],\"quality\":{q},\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
+        ",\"hum_runs\":[{}],\"quality\":{q},\"dated\":{dated},\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
         p.join(","),
         json_escape(&s.enf.area_note)
     )
@@ -193,7 +223,16 @@ impl App {
             Kind::Enf { grid } => grid.clone(),
             _ => String::new(),
         };
-        EnfJob { state: self.nodes[i].state.clone(), grid: grid_frequencies_node::load(&path).map(Arc::new), prior: None }
+        use corroborate::data::Data;
+        let claimed = match self.graph.feeder(i, "time").map(|(f, o)| self.value_from(f, o)) {
+            Some(Ok(Data::Time { utc: Some(u), error_s, .. })) => Some((u, error_s)),
+            _ => None,
+        };
+        let place = match self.graph.feeder(i, "location").map(|(f, o)| self.value_from(f, o)) {
+            Some(Ok(Data::Location { area, .. })) => Some(area.allowed()),
+            _ => None,
+        };
+        EnfJob { state: self.nodes[i].state.clone(), grid: grid_frequencies_node::load(&path).map(Arc::new), prior: None, claimed, place }
     }
 }
 
@@ -388,6 +427,7 @@ impl crate::look::NodeLook for Look {
             (s.enf.area_note.clone(), if s.enf.area_note.starts_with("CONTRADICTION") { WARN } else { DIM }),
         ];
         let q = s.enf.quality.clone();
+        let dated = s.enf.dated.clone();
         drop(s);
         ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
             // The quality verdict first: is the hum good enough, and why.
@@ -406,6 +446,22 @@ impl crate::look::NodeLook for Look {
                 }
                 None => {
                     ui.label(egui::RichText::new("no readings yet").small().color(DIM));
+                }
+            }
+            // The time of recording matched against the grid log.
+            if let Some(d) = &dated {
+                ui.add_space(4.0 * z);
+                ui.label(egui::RichText::new("TIME CHECK").small().color(DIM));
+                match d {
+                    Ok(d) => {
+                        ui.add(egui::Label::new(egui::RichText::new(d.verdict()).color(if d.confirmed { GOOD } else { WARN })).wrap());
+                        for l in d.lines() {
+                            ui.add(egui::Label::new(egui::RichText::new(l).small().color(TEXT)).wrap());
+                        }
+                    }
+                    Err(e) => {
+                        ui.add(egui::Label::new(egui::RichText::new(e).small().color(WARN)).wrap());
+                    }
                 }
             }
             ui.add_space(4.0 * z);

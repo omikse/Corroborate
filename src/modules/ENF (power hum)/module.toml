@@ -12,6 +12,16 @@ name = "audio"
 kind = "audio"
 required = true
 
+# The claimed start of the audio and the claimed place: with both, the node looks for a grid log
+# of that place (only NESO Great Britain for now) and matches the hum against it at the end.
+[[input]]
+name = "time"
+kind = "time"
+
+[[input]]
+name = "location"
+kind = "location"
+
 # Each output is a use case of the hum (README "Use cases"). Built ones give values; planned and
 # possible ones are drawn greyed on the node with this text on hover, nothing to wire.
 # min_quality: the signal quality verdict the use case needs (none, weak, good).
@@ -61,10 +71,10 @@ min_quality = "good"
 
 [[output]]
 name = "time of recording"
-kind = "anchor"
-status = "planned"
-about = "UTC time of the recording: the hum track matched against a grid frequency log."
-needs = ["audio", "grid log"]
+at = 98
+kind = "time"
+about = "Start of the recording (UTC) found by matching the hum track against the grid log of the wired place, around the wired time. Says whether it confirms that time."
+needs = ["audio", "time", "location"]
 when = "a log of that grid covers the time"
 source = "Grigoras 2005; Hajj-Ahmad et al."
 min_quality = "good"
