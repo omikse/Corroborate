@@ -145,3 +145,54 @@ protocol = 2
     assert!((utc - 500.0).abs() < 1e-6 && (err - 0.2).abs() < 1e-6, "{utc} ± {err}");
     assert_eq!(app.ev.anchors[0].from, uid(&app, k));
 }
+
+/// Groups on the canvas: absolute first with the first colour, then relative (dashed), then
+/// unanchored (faint); linked sources share one group.
+#[test]
+fn canvas_groups_colours_and_styles() {
+    use crate::clock_view::{glow_style, PALETTE};
+    let mut app = App::empty();
+    let (a, b, c) = (source(&mut app, 40.0), source(&mut app, 300.0), source(&mut app, 560.0));
+    anchor(&app, a, 1000.0, 1.0);
+    let (ub, uc) = (uid(&app, b), uid(&app, c));
+    app.update_clocks();
+    let cg = app.canvas_groups();
+    assert_eq!(cg.groups.len(), 3);
+    assert_eq!((cg.groups[0].kind, cg.groups[0].color), (Ck::Absolute, PALETTE[0]));
+    assert_eq!(cg.groups[1].kind, Ck::None);
+    assert_ne!(cg.groups[1].color, cg.groups[2].color);
+    assert!(glow_style(Ck::Absolute).0 > glow_style(Ck::None).0);
+    assert!(glow_style(Ck::Relative).1 && !glow_style(Ck::Absolute).1);
+
+    app.ev.manual_links.push(corroborate::clock::Link { a: ub, t_a: 0.0, b: uc, t_b: 5.0, error_s: 0.5, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    let cg = app.canvas_groups();
+    assert_eq!(cg.groups.iter().map(|g| g.kind).collect::<Vec<_>>(), vec![Ck::Absolute, Ck::Relative]);
+    assert_eq!(cg.of_node[b], cg.of_node[c]);
+    assert_ne!(cg.of_node[a], cg.of_node[b]);
+}
+
+/// The wire box: UTC time, count and span, error at each confidence, red over the maximum.
+#[test]
+fn wire_box_text_and_confidence() {
+    use crate::clock_view::{wire_text, Confidence as Cf};
+    use corroborate::clock::Anchor as An;
+    use corroborate::data::Event;
+    let clocks = corroborate::clock::solve(&[An { clock: "s".into(), t: 0.0, utc: 45_000.0, error_s: 2.0, from: "n1".into(), enabled: true }], &[]);
+    let name = |c: &str| format!("clip {c}");
+    let ev = |t: f64, e: f64| Event { clock: "s".into(), t_start: t, t_end: t, error_s: e, ..Default::default() };
+    let events = Data::Events(vec![ev(60.0, 1.5), ev(540.0, 0.5)]);
+    let tx = |d: &Data, cf, max| wire_text(&clocks, d, cf, max, &name).unwrap();
+
+    let t = tx(&events, Cf::P95, None);
+    assert_eq!(t.top, "2 events, 12:31–12:39");
+    assert_eq!(t.bottom, "± 5.00 s"); // 2 sigma of sqrt(2² + 1.5²) = 2.5 s
+    assert_eq!(tx(&events, Cf::P68, None).bottom, "± 2.50 s");
+    assert_eq!(tx(&events, Cf::P997, None).bottom, "± 7.50 s");
+    assert!(!t.over && tx(&events, Cf::P95, Some(4.0)).over && !tx(&events, Cf::P95, Some(6.0)).over);
+
+    let rel = Data::Time { clock: "z".into(), t: 41.2, utc: None, error_s: 0.1, source: String::new() };
+    assert_eq!(tx(&rel, Cf::P68, None).top, "+00:41.2 on clip z");
+    let abs = Data::Time { clock: "s".into(), t: 0.0, utc: Some(45_003.0), error_s: 1.0, source: String::new() };
+    assert_eq!((tx(&abs, Cf::P68, None).top.as_str(), tx(&abs, Cf::P68, None).bottom.as_str()), ("12:30:03 UTC", "± 1.00 s"));
+}

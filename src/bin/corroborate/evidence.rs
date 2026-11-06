@@ -34,6 +34,11 @@ pub struct Evidence {
     pub anchors: Vec<ClockAnchor>,
     pub links: Vec<Link>,
     pub clocks: clock::Clocks,
+    /// How sure the shown errors are, and the largest error allowed (seconds, at that confidence).
+    pub conf: clock_view::Confidence,
+    pub max_error: Option<f64>,
+    /// The clock group last clicked on a wire box (the timeline shows its row).
+    pub focus: Option<String>,
 }
 
 impl App {

@@ -31,6 +31,7 @@ mod canvas_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
+mod clock_view;
 mod evidence;
 mod project;
 mod layout;
@@ -848,6 +849,7 @@ impl App {
         // Scripted looks of the nodes on screen, run again only when what they read changed.
         self.run_scripts(origin, area, ui.input(|i| i.time));
 
+        self.draw_glow(ui, &painter, origin);
         let trail = self.selected.and_then(|s| self.graph.trail(s).ok()).unwrap_or_default();
         // Wires out of a node fed by a running live stream pulse in the direction of flow.
         let live: Vec<bool> = self.nodes.iter().map(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false)).collect();
@@ -867,6 +869,7 @@ impl App {
             }
         }
 
+        self.draw_wire_boxes(ui, &painter, origin);
         let mut clicked: Option<(NodeId, egui::Modifiers)> = None;
         let mut move_by = Vec2::ZERO;
         let mut delete = None;
