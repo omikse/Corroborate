@@ -3,6 +3,8 @@
 #
 #   run.cmd                 build, update app\, start the workbench
 #   run.cmd -NoStart        build and update app\ only
+#   run.cmd -Release        ... with the full release build (slow: link-time optimisation);
+#                           otherwise the fast development build (Cargo.toml [profile.fast])
 #   run.cmd <path or URL>   ... and open that source (arguments go to the workbench)
 #
 # cargo only ever writes target\, so building never waits for a running app. A program in app\
@@ -12,6 +14,7 @@
 
 param(
     [switch]$NoStart,
+    [switch]$Release,
     [Parameter(ValueFromRemainingArguments = $true)] [string[]]$AppArgs
 )
 # Errors from cargo and git are judged by their exit codes; stderr is only progress.
@@ -25,8 +28,9 @@ $hash = (git rev-parse --short HEAD)
 $dirty = (git status --porcelain --untracked-files=no)
 $env:CORROBORATE_BUILD = if ($dirty) { "$hash+" } else { "$hash" }
 
-Write-Host "Building $env:CORROBORATE_BUILD (release)..."
-cargo build --release
+$profile = if ($Release) { 'release' } else { 'fast' }
+Write-Host "Building $env:CORROBORATE_BUILD ($profile)..."
+cargo build --profile $profile
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'Build failed: app\ is unchanged.'
     exit 1
@@ -41,7 +45,7 @@ Get-ChildItem $app -Recurse -Filter '*.old-*' | ForEach-Object {
 
 # Put a built program at $dst; one that is running is moved aside, not overwritten.
 function Deploy-Program([string]$exe, [string]$dst) {
-    $src = Join-Path $root "target\release\$exe"
+    $src = Join-Path $root "target\$profile\$exe"
     if (-not (Test-Path $src)) { return }
     if (Test-Path $dst) {
         if ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash) { return }

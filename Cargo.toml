@@ -55,3 +55,17 @@ path = "src/modules/ADS-B check/main.rs"
 
 [profile.release]
 lto = "thin"
+
+# Development builds (run.cmd and the tests, both into target\fast): our code incremental at low
+# optimisation, so a change rebuilds in seconds; libraries fully optimised, built once, so the
+# FFT, decoding and drawing stay fast. No link-time optimisation. Like release otherwise (no
+# console window, no debug assertions).
+[profile.fast]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 256
+opt-level = 1
+
+[profile.fast.package."*"]
+opt-level = 3

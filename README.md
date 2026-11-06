@@ -19,7 +19,8 @@ run.cmd                   # build, update app\, start the workbench (no console 
 run.cmd -NoStart          # build and update app\ only
 run.cmd --run             # ... start and press Run on the saved project
 run.cmd --new             # ... start with an empty canvas
-cargo test --release
+run.cmd -Release          # ... with the full release build (slow); otherwise the fast one
+cargo test --profile fast # same build profile as run.cmd: shares its compiled libraries
 ```
 
 cargo writes only `target\`; nothing runs from there, so building never waits for an open app.
