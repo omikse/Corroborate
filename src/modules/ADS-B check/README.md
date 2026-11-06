@@ -1,4 +1,4 @@
-# ADS-B check (plugin)
+# ADS-B check (module, protocol 2)
 
 A test plugin: it checks the planes detector against ADS-B (Automatic Dependent
 Surveillance–Broadcast) flight data. A separate program speaking the plugin protocol
@@ -17,8 +17,13 @@ then:
 Passes heard with no aircraft in the data are listed too (planes without ADS-B, or false detections). The
 status sums it up as heard/expected by distance: the detector's real range at that site.
 
+Ports: inputs `audio` (required), `place` (the site: a location) and `time` (when the audio
+starts: wire SOURCER's time); outputs `findings` (events), `facts` (JSON) and `anchors`: each heard
+pass matched to an aircraft anchors the audio's clock to UTC, with error √(pass error² + flight-log
+timing error²).
+
 To try it: a SOURCER on a live stream from a known site (for example the Cornell Lab FeederWatch
-stream, 42.4797, -76.4514, 335 m), wired into Planes and this plugin, with a Value node of type
+stream, 42.4797, -76.4514, 335 m), wired into Planes and this module, with a Value node of type
 location for the site wired into its `place` input.
 
 It needs:

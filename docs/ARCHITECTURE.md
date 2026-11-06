@@ -53,9 +53,14 @@ adds typed ports and `Value` fields to these messages.
 
 ## Timeline rule
 
-Anything with a time can be shown. An absolute time (UTC) sits at its real place with its error as a
-margin. A relative time (unknown offset) sits on its own clock, with a wide, faded margin until the
-solver places it.
+Every time says which clock it is on and how sure it is (1 sigma). Each source is a clock, named
+by its node's stable id (`n1`, `n2`, … kept in the project file, never reused; the settings log
+uses it too), or shared by several sources. `src/clock.rs` solves the project's evidence, anchors
+(a moment on a clock is at a UTC) and links (the same moment on two clocks), through `sync::solve`
+into each clock's kind (absolute, relative, unanchored), offset, error, group and each piece of
+evidence's share of the error; evidence over 3 sigma off is a contradiction. Absolute times sit at
+their UTC with the clock error as a margin; relative and unanchored rows float on their own offset
+until a link places them.
 
 ## Locations always carry a radius
 
@@ -93,8 +98,6 @@ colour, flow (value, list, stream) and fields give its dots and the Value node's
   needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
 
 - `src/bin/corroborate.rs`: the new workbench GUI (`cargo run --release --features gui --bin corroborate`).
-  Node graph (wheel zoom, drag pan, select shows the evidence trail, double-click opens the node window), timeline
-  lanes (wheel zoom, drag pan, blocks = time ± error, faded outline = own clock), map window for the
-  locator, offsets table for the sync solver. Runs the engine on a synthetic protest scenario.
-
-Not yet: real sources feeding the graph, editing wires in the GUI, saving projects.
+  Now `src/bin/corroborate/`: the node canvas, the clock glow and wire boxes (`clock_view.rs`), the
+  evidence and solve (`evidence.rs`), the timeline and Sync list (`timeline.rs`), linked playheads,
+  play and live (`playhead.rs`) and sound (`sound.rs`). See the README's Time section.

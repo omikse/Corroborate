@@ -1,3 +1,4 @@
+# A list of anchors: a moment on a clock is at a UTC. Every anchor output in the project is evidence for the clock solve (src/clock.rs).
 id = "anchor"
 label = "Anchor"
 color = "#5fb3a8"

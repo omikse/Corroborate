@@ -54,6 +54,10 @@ Canvas keys and mouse:
 | Frame | F or Home: the selection, else every node |
 | Wire | drag from an output dot to an input dot, or the other way; right-click an input to unwire |
 | Add a node already wired | drag from a dot onto empty canvas: pick from the modules that fit its type (from an input, a Value of its type comes first) |
+| Play, pause | Space (or Play in the top bar or the timeline): the selected node's playhead runs and its sound plays |
+| Playhead | click or drag in SOURCER's waveform, or click the timeline's ruler |
+| Same clock | select sources, right-click: Same clock (Separate clocks undoes it) |
+| Link two clocks | drag a floating timeline row onto an event on another row, then give the error |
 
 Copied nodes are project-file text, so they paste into another Corroborate window or a text
 editor. Keys go to a text box instead while you type in one. Undoing a setting is logged in the
@@ -152,6 +156,59 @@ To change one node, edit only its folder:
 | [Invert location](<src/modules/Invert location/README.md>) | `invert-location` | flips what a location adds and subtracts |
 | [Map](<src/modules/Map/README.md>) | `map` | a location on a world map |
 
+Time types: a **time** is `{"clock", "t", "utc"?, "error_s", "source"}`: moment `t` seconds on a
+clock, with `utc` (Unix seconds) only when that clock is tied to UTC; `{"utc": …}` alone is UTC. An
+**event** list and a **track** carry their `clock`; each event's `error_s` is its own measurement
+error. An **anchor** list (`{t, utc, error_s, clock?, source?}`) says a moment on a clock is at a
+UTC; a **link** (`{t_a, b, t_b, error_s, a?}`) says a moment on one clock is a moment on another.
+Any module may output anchors and links: they become evidence (below).
+
+## Time: clocks, evidence and the timeline
+
+Every source (file, stream, device) is its own **clock**; selected sources can share one (Same
+clock, e.g. photos from one camera). A clock is **absolute** (tied to UTC), **relative** (linked to
+other clocks, a group with no UTC) or **unanchored**. Drift is not handled yet, only the offset.
+
+**Evidence** ties clocks down: a source's own anchor (stream date-time, PC clock, file creation
+time, sidecar file, each with its error), a time wired into an input marked `anchors = "audio"`
+(Planes has one), every anchor and link output in the project (wired or not; ADS-B check gives one
+per matched pass), and manual links from the timeline. All of it is solved together by least
+squares each time it changes: one link to UTC anchors a whole group, more evidence tightens the
+error, and evidence over 3 sigma off the rest is a **contradiction**, shown red. Every piece can be
+switched off; the switches are saved in the project and logged in the result file.
+
+Errors are 1 sigma and combine as root-sum-square. Two kinds: the **clock error** (shared by
+everything on that clock, what the solve gives) and an event's **own error** (e.g. the Doppler fit's
+closest-approach time), which never adds up. Shown at 95 % by default; the timeline switches 68, 95
+or 99.7 %, and an optional maximum ± turns anything over it red.
+
+On the canvas each clock group has a soft **glow** behind its nodes and wires in the group's colour:
+solid absolute, dashed relative, faint unanchored, striped for a node on several. Wires carrying
+times (time, event, track, anchor, link) show a **box** at their middle: the time (UTC, or +mm:ss on
+its source; for lists the count and span) over ± the error. Hover it for what the error is made of;
+click it to open its row in the timeline.
+
+The **timeline** (panel under the canvas, resizable, collapsible) has one row per clock group,
+absolute first on the shared UTC axis, then relative, then unanchored, each opening into one row per
+source. Events are marks or bars, the clock error a margin fading out, the own error whiskers. Its
+**Sync list** shows every anchor and link: who gave it, its error, its share of the clock's error,
+its switch, contradictions in red; a click selects the node. Links are drawn between rows, anchors
+pinned to the axis. Drag a floating row so one of its events meets an event on another row: it asks
+for the error (filled in from the zoom) and makes a manual link, or an anchor when the other row is
+absolute, and the row joins that group.
+
+**Playheads** are linked: every absolute group shares one (UTC), each floating group has its own,
+and each view shows it on its own clock (SOURCER's waveform, Planes' view, the timeline). The
+selected node's group has the active one. Space plays it in real time, with the sound of the
+selected node's audio. A project with no live source is a **simulation**: every playhead is free.
+With a live source it is **live**: a live group's playhead stops at now (the newest audio), Live
+jumps back to it, and file sources stay free unless linked to a live group.
+
+The result file keeps the clocks (kind, group, offset, error and its breakdown), all evidence with
+its switches and contradictions, and each event with its clock and UTC ± error when known. Events
+on clock groups with no link between them are listed as `not_comparable`, and the Result record
+warns about them.
+
 Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, is a
 separate program that nothing opens by itself: [VIEWER.md](<src/modules/Planes (Doppler)/VIEWER.md>).
 
@@ -173,7 +230,8 @@ Every location signal either **adds** its cells (the place is here: green) or **
 
 - `src/`: `core` (values with error and source), `graph` (typed wires),
   `sync` (clock offsets from shared events), `locate` (TDOA, Time Difference of Arrival),
-  `timebase` (UTC anchors), `plugin` (protocol and JSON), `ingest` (ffmpeg, WAV).
+  `clock` (clocks solved from anchors and links), `timebase` (UTC anchors), `plugin` (protocol and
+  JSON), `ingest` (ffmpeg, WAV), `sound_out` (sound output).
 - `src/bin/corroborate/`: the workbench GUI. `src/main.rs`: the headless CLI (`corroborate-cli`).
 - `tools/adsb-log.py`: logs aircraft around a point while you record.
 
