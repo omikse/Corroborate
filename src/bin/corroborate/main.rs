@@ -17,6 +17,8 @@
 
 #[cfg(test)]
 mod drive;
+#[cfg(test)]
+mod project_tests;
 mod look;
 mod nodes;
 mod runtime;
@@ -306,7 +308,24 @@ impl App {
     // ---------------- project file
 
     fn save_project(&mut self) {
-        let Some(path) = project_file() else { return };
+        if let Some(path) = project_file() {
+            self.save_project_to(&path);
+        }
+        self.last_project_save = Instant::now();
+    }
+
+    /// Writes the project to `path`: first beside it as `<name>.tmp`, then renamed over it, so a
+    /// crash while saving leaves the previous project whole, never half a file.
+    fn save_project_to(&self, path: &std::path::Path) -> bool {
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, self.project_text()).is_ok() && std::fs::rename(&tmp, path).is_ok()
+    }
+
+    /// The project file's text: visible nodes (renumbered), Manual rows and wires, one per line.
+    fn project_text(&self) -> String {
         let mut text = String::from("# corroborate project: node|kind|x|y|label|param, row|node|key|value, wire|from|out|to|in\n");
         // Only visible nodes, renumbered.
         let keep: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
@@ -330,15 +349,17 @@ impl App {
                 text.push_str(&format!("wire|{a}|{out}|{b}|{inp}\n"));
             }
         }
-        if let Some(d) = path.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = std::fs::write(&path, text);
-        self.last_project_save = Instant::now();
+        text
     }
 
     fn load_project(&mut self) -> bool {
         let Some(text) = project_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
+        self.load_project_text(&text)
+    }
+
+    /// Adds the nodes, rows and wires of a project file's text. Lines it does not understand
+    /// are skipped. False when it held no nodes.
+    fn load_project_text(&mut self, text: &str) -> bool {
         let mut rows: Vec<(usize, String, String)> = Vec::new();
         let mut wires: Vec<(usize, String, usize, String)> = Vec::new();
         for line in text.lines() {
@@ -362,6 +383,18 @@ impl App {
         for (n, k, v) in rows {
             if let Some(Kind::Manual { rows }) = self.nodes.get_mut(n).map(|x| &mut x.kind) {
                 rows.push((k, v));
+            }
+        }
+        // A SOURCER saved with its box emptied had kept its outputs and wires (they come back to
+        // life with the next source); an empty one loads with none, so give back the outputs
+        // its saved wires use: the usual set, with video when a wire takes it.
+        for s in 0..self.nodes.len() {
+            if matches!(&self.nodes[s].kind, Kind::Source { input } if input.trim().is_empty()) {
+                let used: Vec<&str> = wires.iter().filter(|w| w.0 == s).map(|w| w.1.as_str()).collect();
+                if !used.is_empty() {
+                    let like = if used.contains(&"video") { "x.mkv" } else { "x.wav" };
+                    self.graph.set_outputs(s, corroborate::modules::source::outputs(like));
+                }
             }
         }
         for (a, o, b, i) in wires {
