@@ -32,3 +32,8 @@ label = "error"
 unit = "s"
 min = 0
 default = 0
+
+[[field]]
+name = "clock"
+type = "text"
+label = "clock"

@@ -409,8 +409,8 @@ mod tests {
         assert!(loc.json(&v(&[("lat", "95"), ("lon", "0")])).unwrap_err().contains("outside"));
         assert_eq!(loc.json(&v(&[("lat", "50")])).unwrap_err(), "fill in longitude");
         let time = lookup("time").unwrap();
-        assert_eq!(time.json(&v(&[("utc0", "1970-01-01 00:01:00")])).unwrap(), "{\"utc0\": 60}");
-        assert!(time.json(&v(&[("utc0", "yesterday")])).unwrap_err().contains("UTC"));
+        assert_eq!(time.json(&v(&[("utc", "1970-01-01 00:01:00")])).unwrap(), "{\"utc\": 60}");
+        assert!(time.json(&v(&[("utc", "yesterday")])).unwrap_err().contains("UTC"));
         assert_eq!(lookup("text").unwrap().json(&v(&[("value", "a \"b\"")])).unwrap(), "\"a \\\"b\\\"\"");
         assert_eq!(lookup("json").unwrap().json(&v(&[("value", "[1, 2]")])).unwrap(), "[1, 2]");
     }

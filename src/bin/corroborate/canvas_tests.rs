@@ -288,8 +288,8 @@ fn value_nodes() {
     d.frames(5);
     assert!(d.app().map_status(map).contains('%'), "the map shows the place: {}", d.app().map_status(map));
     let json = d.app().result_json(&[time, rec]);
-    assert!(json.contains("\"utc0\":1793822799"), "{json}");
-    assert!(json.contains("\"type\":\"time\",\"value\":{\"utc0\": 1793822799"), "{json}");
+    assert!(json.contains("\"utc\":1793822799"), "{json}");
+    assert!(json.contains("\"type\":\"time\",\"value\":{\"utc\": 1793822799"), "{json}");
     d.shot("value_place_and_time");
 
     // Types → Event adds a Value node of events.

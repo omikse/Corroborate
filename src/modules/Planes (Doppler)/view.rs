@@ -538,6 +538,7 @@ impl Recorder {
                 // Separate connection: approximate until the stream's own capture times resolve.
                 *anchor.lock().unwrap() = Some(Anchor {
                     utc0: timebase::now_unix(),
+                    error_s: 2.0,
                     source: "PC clock when REC was pressed (approximate: the copy uses its own connection)".into(),
                 });
                 timebase::upgrade_from_hls(url.clone(), raw.first_segment.clone(), anchor, 0.0);
@@ -565,6 +566,7 @@ impl Recorder {
         // The WAV is written from the analysed audio, so it shares the analysis timeline.
         *self.anchor.lock().unwrap() = analysis.map(|a| Anchor {
             utc0: a.utc(self.rel_start + self.secs),
+            error_s: a.error_s,
             source: format!("{} (WAV written from the analysed audio)", a.source),
         });
         // A fallback WAV starts now; earlier seconds went to the (failed) raw copy.
@@ -617,7 +619,7 @@ impl Recorder {
         j.push_str("  \"recorded_by\": \"planes-view (corroborate)\",\n");
         match &rec {
             Some(r) => {
-                j.push_str(&format!("  \"utc_start\": \"{}\",\n", timebase::fmt_utc(r.utc0)));
+                j.push_str(&format!("  \"utc_start\": \"{}\",\n  \"utc_error_s\": {},\n", timebase::fmt_utc(r.utc0), r.error_s));
                 j.push_str(&format!("  \"utc_source\": \"{}\",\n", timebase::json_escape(&r.source)));
             }
             None => j.push_str("  \"utc_start\": null,\n  \"utc_source\": \"none\",\n"),
@@ -688,7 +690,7 @@ fn worker(sh: Arc<Mutex<Shared>>, src: Source, ctl: Arc<Controls>, ring: Ring, p
         if !live {
             let start = if let Source::Ffmpeg(_, Some(s)) = &src { *s } else { 0.0 };
             *anchor.lock().unwrap() =
-                timebase::file_anchor(p).map(|a| Anchor { utc0: a.utc0 + start, source: a.source });
+                timebase::file_anchor(p).map(|a| Anchor { utc0: a.utc0 + start, ..a });
         }
     }
 
@@ -1029,7 +1031,12 @@ fn file_result_json(s: &Shared, path: &str, manual: &[(String, String)]) -> Stri
     j.push_str("  \"analysed_by\": \"planes-view (corroborate)\",\n");
     j.push_str(&format!("  \"analysed_utc\": \"{}\",\n", timebase::fmt_utc(timebase::now_unix())));
     match &s.anchor {
-        Some(a) => j.push_str(&format!("  \"utc_start\": \"{}\",\n  \"utc_source\": \"{}\",\n", timebase::fmt_utc(a.utc0), esc(&a.source))),
+        Some(a) => j.push_str(&format!(
+            "  \"utc_start\": \"{}\",\n  \"utc_error_s\": {},\n  \"utc_source\": \"{}\",\n",
+            timebase::fmt_utc(a.utc0),
+            a.error_s,
+            esc(&a.source)
+        )),
         None => j.push_str("  \"utc_start\": null,\n  \"utc_source\": \"none\",\n"),
     }
     j.push_str(&format!("  \"start_offset_s\": {:.3},\n", s.offset));

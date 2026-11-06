@@ -124,19 +124,6 @@ fn grade_color(g: &str) -> Color32 {
     }
 }
 
-/// The error of an anchor's clock, seconds, judged from where it came from. A labelled
-/// estimate, not a measurement: shown with the time on the timeline and in the result.
-fn anchor_error_s(a: &Anchor) -> f64 {
-    let s = a.source.to_ascii_lowercase();
-    if s.contains("program-date-time") || s.contains("hls") || s.contains("sidecar") || s.contains("recording") {
-        1.0
-    } else if s.contains("received") || s.contains("pc clock") || s.contains("clock") {
-        10.0
-    } else {
-        600.0
-    }
-}
-
 fn colormap() -> [[u8; 4]; 256] {
     const STOPS: [(f32, [f32; 3]); 6] = [
         (0.00, [4.0, 5.0, 8.0]),
@@ -182,7 +169,7 @@ struct Mark {
 
 /// A node's clock: source seconds to UTC (when anchored), and that clock's error in seconds.
 fn clock(a: &Option<Anchor>) -> (impl Fn(f64) -> f64 + '_, f64) {
-    let err = a.as_ref().map_or(0.0, anchor_error_s);
+    let err = a.as_ref().map_or(0.0, |a| a.error_s);
     (move |t: f64| a.as_ref().map_or(t, |a| a.utc(t)), err)
 }
 
@@ -694,7 +681,7 @@ impl App {
                     "{{\"utc0\":\"{}\",\"source\":\"{}\",\"error_s\":{}}}",
                     timebase::fmt_utc(a.utc0),
                     json_escape(&a.source),
-                    anchor_error_s(a)
+                    a.error_s
                 ),
                 None => "null".into(),
             };
@@ -1349,7 +1336,7 @@ fn source_info(ui: &mut egui::Ui, st: &Shared) {
     match &s.anchor {
         Some(a) => {
             look::line(ui, format!("time 0 = {} UTC", timebase::fmt_utc(a.utc0)), TEXT);
-            look::line(ui, format!("± {:.0} s · from {}", anchor_error_s(a), a.source), DIM);
+            look::line(ui, format!("± {:.0} s · from {}", a.error_s, a.source), DIM);
         }
         None => look::line(ui, "no UTC anchor yet", DIM),
     }

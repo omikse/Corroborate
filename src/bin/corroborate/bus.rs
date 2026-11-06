@@ -166,9 +166,13 @@ impl App {
                 drop(s);
                 self.area_from(from).map(|(area, note)| Data::Location { area, note })
             }
-            (PortKind::Time, _) => s.anchor.as_ref().map(|a| Data::Time { utc0: a.utc0, error_s: anchor_error_s(a), source: a.source.clone() }).ok_or("no time yet".into()),
+            (PortKind::Time, _) => s
+                .anchor
+                .as_ref()
+                .map(|a| Data::Time { clock: self.nodes[from].uid.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() })
+                .ok_or("no time yet".into()),
             (PortKind::Event, Kind::Plugin { .. }) => Ok(Data::Events(
-                s.plugin.findings.iter().map(|f| Event { t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: 0.0 }).collect(),
+                s.plugin.findings.iter().map(|f| Event { clock: String::new(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: 0.0 }).collect(),
             )),
             (PortKind::Json, Kind::Plugin { .. }) => Ok(Data::Json(json_object(&s.plugin.meta))),
             (PortKind::Audio | PortKind::Video, _) => Err("a stream, not a value".into()),
@@ -383,7 +387,8 @@ fn json_object(kv: &[(String, String)]) -> String {
 /// One line about an output's value, for the node.
 pub(crate) fn summary(d: &Data) -> String {
     match d {
-        Data::Time { utc0, error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*utc0)),
+        Data::Time { utc: Some(u), error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*u)),
+        Data::Time { clock, t, error_s, .. } => format!("{t:+.1} s on {clock} ± {error_s:.1} s"),
         Data::Location { area, note } => format!("{} {note}", map_node::area_status(area)),
         Data::Events(v) => match v.last() {
             Some(e) => format!("{} events, last: {}", v.len(), e.label),

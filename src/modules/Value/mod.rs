@@ -103,9 +103,9 @@ mod tests {
         assert!(types().iter().all(|t| !matches!(t.id, "audio" | "video" | "any")));
         let loc = data("location", &rows(&[("lat", "50"), ("lon", "15"), ("radius_km", "300"), ("add", "true")])).unwrap();
         assert!(matches!(&loc, Data::Location { area, .. } if area.add && area.allowed().fraction() > 0.0));
-        let time = data("time", &rows(&[("utc0", "2026-11-04 20:06:39"), ("error_s", "2")])).unwrap();
-        assert_eq!(time, Data::Time { utc0: 1793822799.0, error_s: 2.0, source: String::new() });
-        assert_eq!(data("time", &rows(&[("utc0", "")])).unwrap_err(), "fill in time (UTC)");
+        let time = data("time", &rows(&[("utc", "2026-11-04 20:06:39"), ("error_s", "2")])).unwrap();
+        assert_eq!(time, Data::Time { clock: "utc".into(), t: 1793822799.0, utc: Some(1793822799.0), error_s: 2.0, source: String::new() });
+        assert!(data("time", &rows(&[("utc", "")])).unwrap_err().contains("utc"));
         assert!(data("smell", &[]).unwrap_err().contains("not known"));
     }
 

@@ -2,11 +2,10 @@ id = "time"
 label = "Time"
 color = "#7aa7e0"
 flow = "value"
-description = "A moment in UTC (Coordinated Universal Time) with its error: when the recording started, or when something happened."
+description = "A moment on a clock, with its error and, when known, its UTC (Coordinated Universal Time): when the recording started, or when something happened. A time typed here is UTC."
 
 [[field]]
-name = "utc0"
-required = true
+name = "utc"
 type = "datetime"
 label = "time (UTC)"
 
@@ -17,6 +16,17 @@ label = "error"
 unit = "s"
 min = 0
 default = 0
+
+[[field]]
+name = "clock"
+type = "text"
+label = "clock (empty: UTC)"
+
+[[field]]
+name = "t"
+type = "number"
+label = "time on that clock"
+unit = "s"
 
 [[field]]
 name = "source"

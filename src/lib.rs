@@ -12,6 +12,7 @@
 //!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
 pub mod area;
+pub mod clock;
 pub mod core;
 pub mod data;
 pub mod ingest;

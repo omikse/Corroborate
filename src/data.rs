@@ -4,10 +4,10 @@
 //!
 //! | kind       | JSON                                                                          |
 //! |------------|-------------------------------------------------------------------------------|
-//! | `time`     | `{"utc0": 1793839234.0, "error_s": 0.5, "source": "file metadata"}`           |
+//! | `time`     | `{"clock": "n3", "t": 12.5, "utc": 1793839234.0, "error_s": 0.5, "source": "file metadata"}`: moment `t` on `clock` (see `clock`), `utc` only when known; `{"utc": …}` alone is on clock `"utc"` |
 //! | `location` | `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W); programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
-//! | `event`    | `[{"t_start": 12.0, "t_end": 14.5, "label": "…", "detail": "…", "error_s": 0.1}, …]` |
-//! | `track`    | `[{"id": "h1", "t": 12.0, "value": 59.993, "ok": true}, …]`                 |
+//! | `event`    | `[{"clock": "n3", "t_start": 12.0, "t_end": 14.5, "label": "…", "detail": "…", "error_s": 0.1}, …]` (`error_s`: the event's own measurement error) |
+//! | `track`    | `[{"clock": "n3", "id": "h1", "t": 12.0, "value": 59.993, "ok": true}, …]` |
 //! | `text`     | `"any text"`                                                                  |
 //! | `json`     | any JSON                                                                      |
 //! | `file`     | `"C:\\path\\to\\file"`                                                        |
@@ -21,9 +21,11 @@ use crate::plugin::{parse_json, Json};
 use crate::timebase::json_escape;
 use std::sync::Arc;
 
-/// A timed finding: seconds from the source's first sample.
-#[derive(Clone, Debug, PartialEq)]
+/// A timed finding: seconds on its clock (by default the source's, from its first sample).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Event {
+    /// The clock its times are on (`clock::ClockId`); empty when not known.
+    pub clock: String,
     pub t_start: f64,
     pub t_end: f64,
     pub label: String,
@@ -31,9 +33,11 @@ pub struct Event {
     pub error_s: f64,
 }
 
-/// One point of a measured line (a frequency, a level), seconds from the first sample.
-#[derive(Clone, Debug, PartialEq)]
+/// One point of a measured line (a frequency, a level), seconds on its clock.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrackPoint {
+    /// The clock `t` is on; empty when not known.
+    pub clock: String,
     pub id: String,
     pub t: f64,
     pub value: f64,
@@ -43,7 +47,8 @@ pub struct TrackPoint {
 /// A value on a port.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Data {
-    Time { utc0: f64, error_s: f64, source: String },
+    /// Moment `t` on `clock`; `utc` when known. `error_s` is the time's whole error (1 sigma).
+    Time { clock: String, t: f64, utc: Option<f64>, error_s: f64, source: String },
     Location { area: Arc<Area>, note: String },
     Events(Vec<Event>),
     Tracks(Vec<TrackPoint>),
@@ -87,14 +92,18 @@ impl Data {
     /// Its JSON form (see the table above).
     pub fn to_json(&self) -> String {
         match self {
-            Data::Time { utc0, error_s, source } => format!("{{\"utc0\":{utc0:.3},\"error_s\":{error_s},\"source\":\"{}\"}}", json_escape(source)),
+            Data::Time { clock, t, utc, error_s, source } => {
+                let utc = utc.map_or(String::new(), |u| format!(",\"utc\":{u:.3}"));
+                format!("{{\"clock\":\"{}\",\"t\":{t}{utc},\"error_s\":{error_s},\"source\":\"{}\"}}", json_escape(clock), json_escape(source))
+            }
             Data::Location { area, note } => format!("{{\"add\":{},\"cells\":{},\"note\":\"{}\"}}", area.add, area.cells.runs_json(), json_escape(note)),
             Data::Events(v) => {
                 let e: Vec<String> = v
                     .iter()
                     .map(|e| {
                         format!(
-                            "{{\"t_start\":{},\"t_end\":{},\"label\":\"{}\",\"detail\":\"{}\",\"error_s\":{}}}",
+                            "{{{}\"t_start\":{},\"t_end\":{},\"label\":\"{}\",\"detail\":\"{}\",\"error_s\":{}}}",
+                            clock_json(&e.clock),
                             e.t_start,
                             e.t_end,
                             json_escape(&e.label),
@@ -106,7 +115,10 @@ impl Data {
                 format!("[{}]", e.join(","))
             }
             Data::Tracks(v) => {
-                let p: Vec<String> = v.iter().map(|p| format!("{{\"id\":\"{}\",\"t\":{},\"value\":{},\"ok\":{}}}", json_escape(&p.id), p.t, p.value, p.ok)).collect();
+                let p: Vec<String> = v
+                    .iter()
+                    .map(|p| format!("{{{}\"id\":\"{}\",\"t\":{},\"value\":{},\"ok\":{}}}", clock_json(&p.clock), json_escape(&p.id), p.t, p.value, p.ok))
+                    .collect();
                 format!("[{}]", p.join(","))
             }
             Data::Text(s) | Data::File(s) => format!("\"{}\"", json_escape(s)),
@@ -121,8 +133,16 @@ impl Data {
         let text = |o: &Json, k: &str| o.get(k).and_then(Json::str).unwrap_or("").to_string();
         match kind {
             PortKind::Time => {
-                let utc0 = num(j, "utc0").ok_or("time needs \"utc0\" (Unix seconds)")?;
-                Ok(Data::Time { utc0, error_s: num(j, "error_s").unwrap_or(0.0), source: text(j, "source") })
+                // `{"utc": …}` alone is a time on the UTC clock.
+                let utc = num(j, "utc");
+                let clock = j.get("clock").and_then(Json::str).filter(|c| !c.is_empty()).unwrap_or(crate::clock::UTC).to_string();
+                let t = match (num(j, "t"), utc) {
+                    (Some(t), _) => t,
+                    (None, Some(u)) if clock == crate::clock::UTC => u,
+                    _ => return Err("time needs \"utc\" (Unix seconds), or \"clock\" and \"t\"".into()),
+                };
+                let utc = utc.or((clock == crate::clock::UTC).then_some(t));
+                Ok(Data::Time { clock, t, utc, error_s: num(j, "error_s").unwrap_or(0.0), source: text(j, "source") })
             }
             PortKind::Location => {
                 let add = !matches!(j.get("add"), Some(Json::Bool(false)));
@@ -156,7 +176,14 @@ impl Data {
                         .iter()
                         .map(|e| {
                             let t_start = num(e, "t_start").or(num(e, "t")).unwrap_or(0.0);
-                            Event { t_start, t_end: num(e, "t_end").unwrap_or(t_start), label: text(e, "label"), detail: text(e, "detail"), error_s: num(e, "error_s").unwrap_or(0.0) }
+                            Event {
+                                clock: text(e, "clock"),
+                                t_start,
+                                t_end: num(e, "t_end").unwrap_or(t_start),
+                                label: text(e, "label"),
+                                detail: text(e, "detail"),
+                                error_s: num(e, "error_s").unwrap_or(0.0),
+                            }
                         })
                         .collect(),
                 ))
@@ -164,7 +191,7 @@ impl Data {
             PortKind::Track => Ok(Data::Tracks(
                 list(j)
                     .iter()
-                    .map(|p| TrackPoint { id: text(p, "id"), t: num(p, "t").unwrap_or(0.0), value: num(p, "value").unwrap_or(f64::NAN), ok: !matches!(p.get("ok"), Some(Json::Bool(false))) })
+                    .map(|p| TrackPoint { clock: text(p, "clock"), id: text(p, "id"), t: num(p, "t").unwrap_or(0.0), value: num(p, "value").unwrap_or(f64::NAN), ok: !matches!(p.get("ok"), Some(Json::Bool(false))) })
                     .collect(),
             )),
             PortKind::Text => Ok(Data::Text(j.str().ok_or("text must be a string")?.to_string())),
@@ -233,6 +260,15 @@ fn list(j: &Json) -> Vec<Json> {
 }
 
 /// JSON text of a parsed document.
+/// `"clock":"…",` for an item that knows its clock, else nothing.
+fn clock_json(c: &str) -> String {
+    if c.is_empty() {
+        String::new()
+    } else {
+        format!("\"clock\":\"{}\",", json_escape(c))
+    }
+}
+
 pub fn write_json(j: &Json) -> String {
     match j {
         Json::Null => "null".into(),
@@ -293,10 +329,18 @@ mod tests {
         let mut cells = WorldMask::circle(50.0, 14.0, 300.0);
         cells.cells[0] = true;
         let values = [
-            Data::Time { utc0: 1_793_839_234.5, error_s: 0.25, source: "file \"metadata\"".into() },
+            Data::Time { clock: "utc".into(), t: 1_793_839_234.5, utc: Some(1_793_839_234.5), error_s: 0.25, source: "file \"metadata\"".into() },
+            Data::Time { clock: "n3".into(), t: 12.5, utc: None, error_s: 2.0, source: String::new() },
+            Data::Time { clock: "n3".into(), t: 12.5, utc: Some(1_793_839_234.5), error_s: 2.0, source: String::new() },
             Data::Location { area: Arc::new(Area { cells, add: false }), note: "not here".into() },
-            Data::Events(vec![Event { t_start: 12.0, t_end: 14.5, label: "clap".into(), detail: "loud\nshort".into(), error_s: 0.1 }]),
-            Data::Tracks(vec![TrackPoint { id: "h1".into(), t: 1.5, value: 59.993, ok: true }, TrackPoint { id: "h1".into(), t: 2.5, value: 60.001, ok: false }]),
+            Data::Events(vec![
+                Event { clock: "n2".into(), t_start: 12.0, t_end: 14.5, label: "clap".into(), detail: "loud\nshort".into(), error_s: 0.1 },
+                Event { t_start: 1.0, t_end: 1.0, ..Default::default() },
+            ]),
+            Data::Tracks(vec![
+                TrackPoint { clock: "n2".into(), id: "h1".into(), t: 1.5, value: 59.993, ok: true },
+                TrackPoint { id: "h1".into(), t: 2.5, value: 60.001, ok: false, ..Default::default() },
+            ]),
             Data::Text("Příbram ½".into()),
             Data::Json("{\"a\":[1,2,{\"b\":null}],\"c\":\"d\"}".into()),
             Data::File(r"C:\cases\12\a.wav".into()),
@@ -314,12 +358,15 @@ mod tests {
         assert!(area.add);
         assert!(Data::parse(PortKind::Location, r#"{"lat":95,"lon":0}"#).unwrap_err().contains("not on Earth"));
         assert!(Data::parse(PortKind::Location, r#"{"cells":[[200,0,1]]}"#).unwrap_err().contains("outside"));
-        assert!(Data::parse(PortKind::Time, r#"{"when":1}"#).unwrap_err().contains("utc0"));
+        assert!(Data::parse(PortKind::Time, r#"{"when":1}"#).unwrap_err().contains("utc"));
+        assert!(Data::parse(PortKind::Time, r#"{"clock":"n1"}"#).unwrap_err().contains("utc"));
+        let Ok(Data::Time { clock, t, utc, .. }) = Data::parse(PortKind::Time, r#"{"utc":60}"#) else { panic!() };
+        assert_eq!((clock.as_str(), t, utc), ("utc", 60.0, Some(60.0)));
     }
 
     #[test]
     fn lists_grow_and_states_are_replaced() {
-        let e = |l: &str| Data::Events(vec![Event { t_start: 0.0, t_end: 0.0, label: l.into(), detail: String::new(), error_s: 0.0 }]);
+        let e = |l: &str| Data::Events(vec![Event { label: l.into(), ..Default::default() }]);
         let mut a = e("one");
         a.merge(e("two"));
         assert!(matches!(&a, Data::Events(v) if v.len() == 2));

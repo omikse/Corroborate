@@ -24,3 +24,8 @@ type = "number"
 name = "ok"
 type = "bool"
 default = true
+
+[[field]]
+name = "clock"
+type = "text"
+label = "clock"

@@ -17,6 +17,8 @@ use std::process::Command;
 pub struct Anchor {
     /// UTC (Unix seconds) of relative time 0.
     pub utc0: f64,
+    /// Error of `utc0`, seconds (1 sigma), judged from where it came from.
+    pub error_s: f64,
     /// Where it came from, in words, for display and output.
     pub source: String,
 }
@@ -195,6 +197,7 @@ pub fn upgrade_from_hls(url: String, first: crate::ingest::FirstSegment, anchor:
                 if let Some(t) = hls_segment_utc(&url, &seg) {
                     *anchor.lock().unwrap() = Some(Anchor {
                         utc0: t - rel_of_segment,
+                        error_s: 1.0,
                         source: "stream PROGRAM-DATE-TIME, segment-exact (stamped by the broadcaster or platform)".into(),
                     });
                 }
@@ -207,16 +210,20 @@ pub fn upgrade_from_hls(url: String, first: crate::ingest::FirstSegment, anchor:
 
 /// PC-clock anchor for a live source: `rel` seconds of audio have arrived by now.
 pub fn received_anchor(rel: f64) -> Anchor {
-    Anchor { utc0: now_unix() - rel, source: "PC clock at reception (late by the stream's delay)".into() }
+    Anchor { utc0: now_unix() - rel, error_s: 1.0, source: "PC clock at reception (late by the stream's delay)".into() }
 }
 
-/// `creation_time` from container metadata (ffprobe), if any.
-pub fn file_creation_time(path: &str) -> Option<f64> {
+/// `creation_time` from container metadata (ffprobe), if any, and the media's length in
+/// seconds when known.
+pub fn file_creation_time(path: &str) -> Option<(f64, Option<f64>)> {
     let out = crate::no_window(&mut Command::new("ffprobe"))
-        .args(["-v", "error", "-show_entries", "format_tags=creation_time", "-of", "default=nw=1:nk=1", path])
+        .args(["-v", "error", "-show_entries", "format=duration:format_tags=creation_time", "-of", "default=nw=1", path])
         .output()
         .ok()?;
-    parse_iso8601(String::from_utf8_lossy(&out.stdout).lines().next()?)
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
+    let t = parse_iso8601(field("TAG:creation_time=")?)?;
+    Some((t, field("duration=").and_then(|d| d.parse().ok())))
 }
 
 /// Sidecar written by our recorder: `<file without extension>.json` with `"utc_start"`.
@@ -225,14 +232,29 @@ pub fn sidecar_anchor(path: &str) -> Option<Anchor> {
     let text = std::fs::read_to_string(format!("{stem}.json")).ok()?;
     let v = json_str(&text, "utc_start")?;
     let src = json_str(&text, "utc_source").unwrap_or_else(|| "unknown".into());
-    Some(Anchor { utc0: parse_iso8601(&v)?, source: format!("recording sidecar ({src})") })
+    // The error the file states; older sidecars do not state one.
+    let error_s = json_num(&text, "utc_error_s").unwrap_or(1.0);
+    Some(Anchor { utc0: parse_iso8601(&v)?, error_s, source: format!("recording sidecar ({src})") })
 }
 
 /// Best anchor for a file: our sidecar, else container creation_time (low confidence).
 pub fn file_anchor(path: &str) -> Option<Anchor> {
     sidecar_anchor(path).or_else(|| {
-        file_creation_time(path).map(|t| Anchor { utc0: t, source: "file creation_time (low confidence)".into() })
+        // Phones may stamp the end of the recording, so the error is about the media's length.
+        file_creation_time(path).map(|(t, len)| Anchor {
+            utc0: t,
+            error_s: len.unwrap_or(600.0).max(1.0),
+            source: "file creation_time (low confidence)".into(),
+        })
     })
+}
+
+/// Minimal number-field lookup in our own flat JSON (no serde).
+fn json_num(text: &str, key: &str) -> Option<f64> {
+    let pat = format!("\"{key}\"");
+    let rest = text[text.find(&pat)? + pat.len()..].trim_start().strip_prefix(':')?.trim_start();
+    let end = rest.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(rest.len());
+    rest[..end].parse().ok()
 }
 
 /// Minimal string-field lookup in our own flat JSON (no serde).
