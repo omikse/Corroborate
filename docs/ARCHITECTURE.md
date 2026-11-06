@@ -60,12 +60,16 @@ solver places it.
 ## Locations always carry a radius
 
 `Location` is a point, a radius in metres and the method that set the radius (GPS, IP, Doppler, shared
-sound, metadata, manual). Two locations that overlap agree; ones that do not overlap contradict each other.
+sound, metadata, typed in). Two locations that overlap agree; ones that do not overlap contradict each other.
 
 ## Implemented so far
 
 `src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
 `Port` (required or optional), `Role` and `NodeSpec` (connection and readiness checks). Covered by tests.
+
+`src/types.rs`: data types as folders (`src/types/<id>/type.toml`, the tool's `types\`, and a
+module's own `types\<id>.toml`), one shared list; a port's kind is a type's id, and a type's
+colour, flow (value, list, stream) and fields give its dots and the Value node's editor.
 
 ## Graph and timeline (in the library)
 

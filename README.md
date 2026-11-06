@@ -29,8 +29,8 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 `settings\` (the project, planes-view's settings), `results\` (result JSON, flight logs) and
 `recordings\`. Nothing goes to system folders.
 
-In the workbench: right-click to add nodes, drag from an output to an input to wire (types must
-match). Nodes have no windows: each shows its data and controls on the canvas.
+In the workbench: right-click (or **Add node**) to add nodes, drag from a dot to a dot to wire
+(types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
 Projects: the top bar shows the project's name beside **File**. **New** empties the canvas,
 **Open…** opens a project file and **Save as…** saves this one to a new file (both start in
@@ -51,24 +51,52 @@ Canvas keys and mouse:
 | Copy, cut, paste, duplicate | Ctrl+C, Ctrl+X, Ctrl+V (at the pointer), Ctrl+D |
 | Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z (moves, wires, settings, names, adding, deleting) |
 | Frame | F or Home: the selection, else every node |
+| Wire | drag from an output dot to an input dot, or the other way; right-click an input to unwire |
+| Add a node already wired | drag from a dot onto empty canvas: pick from the modules that fit its type (from an input, a Value of its type comes first) |
 
 Copied nodes are project-file text, so they paste into another Corroborate window or a text
 editor. Keys go to a text box instead while you type in one. Undoing a setting is logged in the
 result file like any other setting change.
+
+## Data types
+
+What travels on a wire has a type, and every type is a folder like a module: `src/types/<id>/type.toml`
+(in the tool, `app\types\<id>\`, read again every second; a change there wins over the built-in
+one). It says the type's `label`, `color`, `flow`, `description` and its `[[field]]`s (name, type
+number|text|datetime|bool|choice|file, label, unit, min, max, default, required); the format is at
+the top of `src/types.rs`. **Types** in the top bar lists them all with where each came from;
+hovering one names the modules that give and take it, clicking one adds a Value node of it.
+
+A dot on a node always means the same:
+
+| | means |
+|---|---|
+| colour | the type |
+| shape | how the data arrives: circle a value (the latest replaces the one before: time, location, text, file, JSON), square a list (items keep coming and are kept: event, track), diamond a stream (raw data, not a value: audio, video) |
+| filled | needed to run (a required input); optional inputs and every output are open |
+
+Hovering a dot shows its type, what it is, and the value on it now.
+
+**A module bringing a new type:** put `types\<id>.toml` (same format) in the module's folder and
+name `<id>` as the `kind` of its ports. Dropping that one folder in adds the module and its type.
+Another module that needs the same type reuses the id and need not define it again. If two places
+define the same id differently, the Types menu and every node using it say so, and wires of it are
+refused until one is changed. Values of a type are checked against its fields as they pass.
 
 ## Modules
 
 Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the
 tool, under `app\modules\`). Its `module.toml` says what it is: `id` (what project files keep),
 `label`, `category` (the Add node heading), `order`, `aliases` (names older files used), `role`,
-its ports (`[[input]]`, `[[output]]`: name, kind, required), its settings (`[[setting]]`: name,
+its ports (`[[input]]`, `[[output]]`: name, kind (a type's id), required), its settings (`[[setting]]`: name,
 type, default, range or choices) and, for a module that is a separate program,
 `[processing] program` and `protocol`. `node.rs` holds what a built-in module does in the
 workbench (state while running, canvas, status, timeline marks, result file). The app
 (`src/bin/corroborate/`) only draws the graph and calls into the modules.
 
-**Data between modules:** every output can be read as a value of its kind (time, location, event,
-track, text, json, file; audio is the stream itself), and any input of the same kind takes it.
+**Data between modules:** every output can be read as a value of its type (time, location, event,
+track, text, json, file, or a type a module brings; audio is the stream itself), and any input of
+the same type takes it.
 One JSON form per kind (`src/data.rs`) is what programs send and receive and what the Result
 record stores, so a module made by someone else feeds Map, Combine, Invert or the record like a
 built-in one. Settings are the only way the canvas changes processing: each value is checked
@@ -90,8 +118,8 @@ To change one node, edit only its folder:
   - `module.toml` `[look]`: the node's `size`, `fill`, corner `radius`, `status = false` to hide the
     status line; for each port (in its `[[input]]`/`[[output]]`, or `[look.ports.<name>]`): `side`
     (left, right, top, bottom), `at` (px along that edge), `label` (inside, outside, hidden),
-    `dot_size`. A dot's colour and shape are its type's (see Data types). Anything left out stays
-    as it was.
+    `dot_size`. A dot's colour, shape and fill always mean the same (see Data types). Anything
+    left out stays as it was.
   - `look.rhai` beside it (a [Rhai](https://rhai.rs) script): `layout(node)` changes the frame and
     ports while the node runs (for example hide a port until a setting is filled), `draw(node)`
     draws inside the node: text, rectangles, circles, lines, editors for the module's settings,
@@ -111,7 +139,7 @@ To change one node, edit only its folder:
 | Module (folder) | id | What it gives |
 |---|---|---|
 | [SOURCER](<src/modules/SOURCER/README.md>) | `sourcer` | audio, time, metadata and video from a file, a YouTube video or live stream, a stream URL, or an audio device |
-| [Manual data](<src/modules/Manual data/README.md>) | `manual-data` | facts typed in: date, time, place, coordinates, notes |
+| [Value](<src/modules/Value/README.md>) | `value` | one value of any type typed in: a place, a time, a note, events, … |
 | [Planes (Doppler)](<src/modules/Planes (Doppler)/README.md>) | `planes` | aircraft passes: speed, closest approach, distance |
 | [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | `enf` | mains hum runs, and the area where that grid frequency is used |
 | [Grid frequencies (50 or 60 Hz)](<src/modules/Grid frequencies (50 or 60 Hz)/README.md>) | `grid-frequencies` | 50/60 Hz zones by region, for ENF |
