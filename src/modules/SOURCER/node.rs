@@ -59,10 +59,7 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
         let file = DIRECT.iter().filter(|e| **e != ".m3u8").any(|e| path.split('?').next().unwrap_or("").ends_with(e));
         return Ok((url.to_string(), !file));
     }
-    let out = ytdlp()
-        .args(["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])
-        .output()
-        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
+    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
     let is_live = lines.next().map(str::trim) == Some("True");
@@ -91,11 +88,34 @@ fn ytdlp_extra() -> Vec<String> {
         .collect()
 }
 
-/// yt-dlp with no window and the user's extra options.
-fn ytdlp() -> std::process::Command {
-    let mut c = std::process::Command::new("yt-dlp");
-    corroborate::no_window(&mut c).args(ytdlp_extra());
-    c
+/// The browser whose cookies last got past YouTube's sign-in check, reused for later calls.
+static COOKIE_BROWSER: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Run yt-dlp (no window) with the user's extra options. When YouTube asks to sign in ("not a
+/// bot") and no options are set, try again with the cookies of the signed-in browsers (Firefox,
+/// Edge, Chrome, Brave: yt-dlp reads them locally) and keep the first that works.
+fn run_ytdlp(args: &[&str]) -> Result<std::process::Output, String> {
+    let run = |extra: &[String]| {
+        corroborate::no_window(&mut std::process::Command::new("yt-dlp")).args(extra).args(args).output().map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))
+    };
+    let extra = ytdlp_extra();
+    let known = *COOKIE_BROWSER.lock().unwrap();
+    let first = match (extra.is_empty(), known) {
+        (true, Some(b)) => run(&["--cookies-from-browser".into(), b.into()])?,
+        _ => run(&extra)?,
+    };
+    let signin = |o: &std::process::Output| !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("Sign in to confirm");
+    if !extra.is_empty() || !signin(&first) {
+        return Ok(first);
+    }
+    for b in ["firefox", "edge", "chrome", "brave"] {
+        let o = run(&["--cookies-from-browser".into(), b.into()])?;
+        if o.status.success() {
+            *COOKIE_BROWSER.lock().unwrap() = Some(b);
+            return Ok(o);
+        }
+    }
+    Ok(first)
 }
 
 /// yt-dlp's last error line; when YouTube asks to sign in, how to give yt-dlp the cookies.
@@ -104,7 +124,7 @@ fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
     let last = e.lines().last().unwrap_or(none).to_string();
     if last.contains("Sign in") || last.contains("cookies") {
         format!(
-            "{what}: {last} — put `--cookies-from-browser firefox` (or chrome, edge) or `--cookies <cookies.txt>` in {}",
+            "{what}: {last} — no signed-in browser's cookies worked (Firefox, Edge, Chrome, Brave; Chrome and Edge must be closed); sign in to YouTube in Firefox, or put `--cookies <cookies.txt>` in {}",
             corroborate::home().join("settings").join("yt-dlp.txt").display()
         )
     } else {
@@ -117,12 +137,8 @@ fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
 fn download(url: &str) -> Result<String, String> {
     let dir = corroborate::home().join("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-    let out = ytdlp()
-        .args(["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o"])
-        .arg(dir.join("%(extractor)s %(id)s.%(ext)s"))
-        .arg(url)
-        .output()
-        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
+    let template = dir.join("%(extractor)s %(id)s.%(ext)s").to_string_lossy().into_owned();
+    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o", &template, url])?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => Ok(p.trim().to_string()),

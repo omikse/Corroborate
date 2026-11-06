@@ -15,10 +15,11 @@ first audio). yt-dlp says whether a page is live. A video that is not live is do
 `recordings\` first (YouTube refuses its direct links to ffmpeg), with its picture (at most 480 lines),
 and kept there as evidence.
 
-When YouTube answers "Sign in to confirm you're not a bot", give yt-dlp cookies: put one option per
-line in `settings\yt-dlp.txt` next to the program, e.g. `--cookies-from-browser firefox` (or
-`chrome`, `edge`; the browser must be signed in to YouTube) or `--cookies C:\path\cookies.txt`.
-Every yt-dlp call of the SOURCER passes them; the error message says where the file goes.
+When YouTube answers "Sign in to confirm you're not a bot", the SOURCER asks again with the cookies
+of a browser signed in to YouTube (yt-dlp reads them locally: Firefox, then Edge, Chrome, Brave;
+Chromium browsers usually only while closed) and keeps using the first that works. To choose
+yourself, put yt-dlp options one per line in `settings\yt-dlp.txt` next to the program, e.g.
+`--cookies-from-browser firefox` or `--cookies C:\path\cookies.txt`; then only those are used.
 
 Ports:
 - input `text` (optional): text from another node replaces what is typed in the field. No node gives
