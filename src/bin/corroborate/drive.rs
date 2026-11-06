@@ -223,6 +223,46 @@ fn sourcer() {
     assert!(ok, "the file decoded");
 }
 
+/// The ENF node after synthetic hum: clear (good enough to date), weak, and noise only (no hum).
+/// The audio goes through the node's own run code (`enf_node::push`), as in a real run.
+#[test]
+fn enf_quality() {
+    for (name, noise, dur) in [("enf_good", 0.1f64, 240.0), ("enf_weak", 1.5, 150.0), ("enf_none", 5.0, 120.0)] {
+        let mut d = Drive::new();
+        let e = d.app().add(Kind::Enf { grid: String::new() }, Pos2::new(40.0, 40.0));
+        let job = d.app().enf_job(e);
+        let mut r = crate::enf_node::start(&job);
+        // 50 Hz hum drifting ±20 mHz a minute: harmonics 2, 3, 5 (and 1 when clear), in noise.
+        let sr = 16000.0;
+        let (mut ph, mut seed) = (0.0f64, 7u64);
+        let mut gauss = || {
+            let mut u = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((seed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+            };
+            let (a, b) = (u(), u());
+            (-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()
+        };
+        let amps = if noise < 1.0 { [0.02, 0.03, 0.01, 0.0, 0.01] } else { [0.0, 0.02, 0.015, 0.0, 0.01] };
+        let n = (dur * sr) as usize;
+        let mut block = Vec::with_capacity(1600);
+        for i in 0..n {
+            let t = i as f64 / sr;
+            ph += 2.0 * std::f64::consts::PI * (50.0 + 0.02 * (2.0 * std::f64::consts::PI * t / 60.0).sin()) / sr;
+            let v: f64 = amps.iter().enumerate().map(|(k, a)| a * ((k + 1) as f64 * ph).sin()).sum();
+            block.push((v + noise * gauss()) as f32);
+            if block.len() == 1600 || i + 1 == n {
+                crate::enf_node::push(&mut r, &block, &None, t);
+                block.clear();
+            }
+        }
+        crate::enf_node::flush(&mut r);
+        job.state.lock().unwrap().done = true;
+        d.frames(3);
+        d.shot(name);
+    }
+}
+
 /// One of every node kind; then the canvas editors: a Value field typed in, Combine switched
 /// to OR (its look.rhai's list), which is a logged setting change.
 #[test]

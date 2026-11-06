@@ -553,6 +553,138 @@ pub fn sections(pts: &[EnfPoint]) -> Vec<EnfPoint> {
     out
 }
 
+/// Shortest clean run, and largest typical error, for a recording to be matched against a grid
+/// log ("good enough to date"). Placeholders until tuned on real recordings and grid logs.
+pub const DATE_RUN_S: f64 = 180.0;
+pub const DATE_ERR_HZ: f64 = 0.010;
+/// Clean readings that vary less than this (standard deviation, Hz) over a minute or more look
+/// like a steady tone (a fan, a whine), not a grid, which always wanders.
+const STEADY_HZ: f64 = 0.0005;
+
+/// How good the hum is, from best to worst.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// No reading counts.
+    None,
+    /// Some readings count (grid and hum track), too few or too rough to match a log.
+    Weak,
+    /// A clean run long and exact enough to match against a grid log.
+    Good,
+}
+
+impl Level {
+    pub fn word(self) -> &'static str {
+        match self {
+            Level::None => "none",
+            Level::Weak => "weak",
+            Level::Good => "good",
+        }
+    }
+}
+
+/// The signal quality verdict and the numbers it rests on, each with what it needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Quality {
+    pub level: Level,
+    /// Readings that count (after the section rule), of all readings.
+    pub kept: usize,
+    pub total: usize,
+    /// Median score of the readings that count (of all readings when none counts), dB.
+    pub score_db: f64,
+    /// Harmonics that stood out in the readings that count.
+    pub harmonics: Vec<u32>,
+    /// Longest run of readings that count, s.
+    pub longest_run_s: f64,
+    /// Median error of the readings that count, Hz (NaN when none counts).
+    pub err_hz: f64,
+    /// Readings not used, per reason, in `Reject` order.
+    pub rejected: Vec<(Reject, usize)>,
+    /// The clean readings barely move: possibly a steady tone, not a grid.
+    pub steady: bool,
+}
+
+impl Quality {
+    /// One line: the verdict in words.
+    pub fn verdict(&self) -> &'static str {
+        match self.level {
+            Level::Good => "good enough to date",
+            Level::Weak => "weak: grid and hum track only",
+            Level::None if self.total == 0 => "listening",
+            Level::None => "no hum",
+        }
+    }
+
+    /// The numbers, each with what it needs.
+    pub fn lines(&self) -> Vec<String> {
+        let mmss = |s: f64| format!("{}:{:02}", (s / 60.0) as u64, (s % 60.0) as u64);
+        let mut v = vec![
+            format!("score {:.1} dB (need {SNR_MIN_DB:.0})", self.score_db),
+            format!("readings kept {} of {}", self.kept, self.total),
+            format!("longest run {} (need {})", mmss(self.longest_run_s), mmss(DATE_RUN_S)),
+        ];
+        if self.err_hz.is_finite() {
+            v.push(format!("error ±{:.1} mHz (need <{:.0})", self.err_hz * 1000.0, DATE_ERR_HZ * 1000.0));
+        }
+        if !self.harmonics.is_empty() {
+            let h: Vec<String> = self.harmonics.iter().map(|h| h.to_string()).collect();
+            v.push(format!("harmonics {}", h.join(", ")));
+        }
+        for (r, n) in &self.rejected {
+            v.push(format!("{n} {}", r.label()));
+        }
+        if self.steady {
+            v.push("very steady: may be a fan or tone, not the grid".into());
+        }
+        v
+    }
+}
+
+/// The verdict over all readings so far.
+pub fn quality(pts: &[EnfPoint]) -> Quality {
+    let pts = sections(pts);
+    let ok: Vec<&EnfPoint> = pts.iter().filter(|p| p.ok).collect();
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    let score_db = median(if ok.is_empty() { pts.iter().map(|p| p.snr_db).collect() } else { ok.iter().map(|p| p.snr_db).collect() });
+    let err_hz = median(ok.iter().map(|p| p.err_hz).collect());
+    // Longest run of counted readings (gaps up to 2 s bridged), and how much it moves.
+    let (mut longest, mut steady) = (0.0f64, false);
+    let mut i = 0;
+    while i < ok.len() {
+        let mut j = i;
+        while j + 1 < ok.len() && ok[j + 1].t - ok[j].t <= 2.0 + 1e-6 {
+            j += 1;
+        }
+        let span = ok[j].t - ok[i].t;
+        longest = longest.max(span);
+        if span >= 60.0 {
+            let n = (j - i + 1) as f64;
+            let mean = ok[i..=j].iter().map(|p| p.hz).sum::<f64>() / n;
+            let sd = (ok[i..=j].iter().map(|p| (p.hz - mean).powi(2)).sum::<f64>() / n).sqrt();
+            steady |= sd < STEADY_HZ;
+        }
+        i = j + 1;
+    }
+    // A harmonic counts if it stood out in at least half the counted readings (noise pokes
+    // over 3 dB now and then in any band).
+    let harmonics = (1..=HARMONICS).filter(|h| 2 * ok.iter().filter(|p| p.used & (1 << (h - 1)) != 0).count() >= ok.len().max(1)).collect();
+    let rejected = [Reject::Weak, Reject::Undecided, Reject::Slope, Reject::Section]
+        .into_iter()
+        .map(|r| (r, pts.iter().filter(|p| p.reject == Some(r)).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    let level = if ok.is_empty() {
+        Level::None
+    } else if longest >= DATE_RUN_S && err_hz <= DATE_ERR_HZ && !steady {
+        Level::Good
+    } else {
+        Level::Weak
+    };
+    Quality { level, kept: ok.len(), total: pts.len(), score_db, harmonics, longest_run_s: longest, err_hz, rejected, steady }
+}
+
 impl Module for Enf {
     fn name(&self) -> &'static str {
         manifest().id
@@ -752,6 +884,39 @@ mod tests {
             assert_eq!(p.ok, p.reject.is_none(), "{p:?}");
         }
         assert!(pts.iter().all(|p| p.err_hz >= 0.0005 && p.err_hz <= 0.02));
+    }
+
+    #[test]
+    fn quality_levels() {
+        // Clear hum for 4 minutes: good enough to date.
+        let (x, _) = hum(50.0, 240.0, 0.1);
+        let q = quality(&run(&x).1);
+        assert_eq!(q.level, Level::Good, "{q:?}");
+        assert!(q.longest_run_s >= DATE_RUN_S && q.err_hz < DATE_ERR_HZ && !q.steady);
+        assert!(q.harmonics.contains(&2), "{q:?}");
+        // Weak hum: counted, but too few to date.
+        let (x, _) = mix(WEAK, 0.0, 2.0);
+        let q = quality(&run(&x).1);
+        assert_eq!(q.level, Level::Weak, "{q:?}");
+        assert!(q.kept > 0 && q.kept < q.total);
+        assert!(q.lines().iter().any(|l| l.contains("too weak")));
+        // Noise: no hum, and the score shows how far off it is.
+        let (x, _) = mix(WEAK, 0.0, 5.0);
+        let q = quality(&run(&x).1);
+        assert_eq!((q.level, q.kept, q.verdict()), (Level::None, 0, "no hum"));
+        assert!(q.score_db < SNR_MIN_DB);
+        // Nothing yet.
+        assert_eq!(quality(&[]).verdict(), "listening");
+    }
+
+    /// A steady 60 Hz tone alone reads as hum (nothing else tells it apart), but the verdict
+    /// says it barely moves and does not call it good enough to date.
+    #[test]
+    fn steady_tone_is_flagged() {
+        let (x, _) = mix([0.0; 5], 0.035, 0.3);
+        let q = quality(&run(&x).1);
+        assert!(q.steady, "{q:?}");
+        assert_ne!(q.level, Level::Good);
     }
 }
 

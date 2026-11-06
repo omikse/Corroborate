@@ -4,7 +4,7 @@
 
 use super::*;
 use corroborate::module::{Finding, Module};
-use corroborate::modules::enf::{Enf, EnfPoint, EnfSegment};
+use corroborate::modules::enf::{quality, sections, Enf, EnfPoint, EnfSegment, Level, Quality};
 
 /// What an ENF node has produced so far.
 #[derive(Default)]
@@ -12,6 +12,8 @@ pub struct EnfState {
     pub points: Vec<EnfPoint>,
     pub segments: Vec<EnfSegment>,
     pub nominal: Option<f64>,
+    /// The signal quality verdict over all readings so far.
+    pub quality: Option<Quality>,
     /// Where the measured grid frequency is used (AND the location wired in), once decided.
     pub area: Option<Arc<WorldMask>>,
     /// How that area was reached: regions, data source, contradictions.
@@ -66,7 +68,10 @@ pub fn push(r: &mut EnfRun, x: &[f32], anchor: &Option<Anchor>, audio_s: f64) {
     let found = r.enf.push(x);
     let pts = r.enf.take_points();
     let mut s = r.job.state.lock().unwrap();
-    s.enf.points.extend(pts);
+    if !pts.is_empty() {
+        s.enf.points.extend(pts);
+        s.enf.quality = Some(quality(&s.enf.points));
+    }
     s.enf.segments.extend(segments(found));
     s.enf.nominal = r.enf.nominal();
     s.anchor = anchor.clone();
@@ -88,12 +93,23 @@ pub fn push(r: &mut EnfRun, x: &[f32], anchor: &Option<Anchor>, audio_s: f64) {
 /// End of input: runs still open are reported.
 pub fn flush(r: &mut EnfRun) {
     let found = r.enf.flush();
-    r.job.state.lock().unwrap().enf.segments.extend(segments(found));
+    let mut s = r.job.state.lock().unwrap();
+    s.enf.segments.extend(segments(found));
+    if let Some(f) = s.enf.nominal {
+        s.status = format!("{f:.0} Hz grid, {} runs", s.enf.segments.len());
+    }
 }
 
 /// The area on the node's location output.
 pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
     let s = st.lock().unwrap();
+    // The output follows the verdict: no area while no reading counts, even if the grid vote
+    // already settled on 50 or 60 Hz.
+    if let Some(q) = &s.enf.quality {
+        if q.level == Level::None && s.enf.area.is_some() {
+            return Err(format!("no hum counted yet ({}): no area", q.verdict()));
+        }
+    }
     match &s.enf.area {
         Some(a) => Ok((Arc::new(Area::add((**a).clone())), s.enf.area_note.clone())),
         None if !s.enf.area_note.is_empty() => Err(s.enf.area_note.clone()),
@@ -104,7 +120,28 @@ pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
 pub fn json(s: &NodeState) -> String {
     let p: Vec<String> = s.enf.segments.iter().map(|e| e.to_json(s.anchor.as_ref())).collect();
     let frac = s.enf.area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));
-    format!(",\"hum_runs\":[{}],\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"", p.join(","), json_escape(&s.enf.area_note))
+    let q = s.enf.quality.as_ref().map_or("null".to_string(), |q| {
+        let num = |v: f64| if v.is_finite() { format!("{v:.5}") } else { "null".into() };
+        let rej: Vec<String> = q.rejected.iter().map(|(r, n)| format!("\"{}\":{n}", r.label())).collect();
+        format!(
+            "{{\"level\":\"{}\",\"verdict\":\"{}\",\"kept\":{},\"total\":{},\"score_db\":{},\"longest_run_s\":{:.1},\"err_hz\":{},\"harmonics\":{:?},\"steady\":{},\"rejected\":{{{}}}}}",
+            q.level.word(),
+            q.verdict(),
+            q.kept,
+            q.total,
+            num(q.score_db),
+            q.longest_run_s,
+            num(q.err_hz),
+            q.harmonics,
+            q.steady,
+            rej.join(",")
+        )
+    });
+    format!(
+        ",\"hum_runs\":[{}],\"quality\":{q},\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
+        p.join(","),
+        json_escape(&s.enf.area_note)
+    )
 }
 
 impl App {
@@ -229,7 +266,8 @@ impl crate::look::NodeLook for Look {
         let (pts, ran) = {
             let s = st.lock().unwrap();
             let from = s.enf.points.len().saturating_sub(600);
-            (s.enf.points[from..].iter().map(|q| (q.t, q.hz, q.ok)).collect::<Vec<_>>(), s.running || s.done)
+            // The section rule applied, so the line shows only readings that count.
+            (sections(&s.enf.points[from..]).iter().map(|q| (q.t, q.hz, q.ok)).collect::<Vec<_>>(), s.running || s.done)
         };
         trace(&p, band, z, &pts, ran);
 
@@ -260,11 +298,38 @@ impl crate::look::NodeLook for Look {
             (s.enf.nominal.map_or("grid: deciding".into(), |f| format!("grid: {f:.0} Hz")), TEXT),
             (format!("hum runs: {}", s.enf.segments.len()), TEXT),
             (format!("audio: {:.0} s", s.audio_s), DIM),
-            (s.enf.area.as_ref().map_or("area: none yet".into(), |a| format!("area: {:.1} % of Earth", a.fraction() * 100.0)), TEXT),
+            (
+                match (&s.enf.area, s.enf.quality.as_ref().map(|q| q.level)) {
+                    (Some(_), Some(Level::None)) => "area: none (no hum counted)".into(),
+                    (Some(a), _) => format!("area: {:.1} % of Earth", a.fraction() * 100.0),
+                    (None, _) => "area: none yet".into(),
+                },
+                TEXT,
+            ),
             (s.enf.area_note.clone(), if s.enf.area_note.starts_with("CONTRADICTION") { WARN } else { DIM }),
         ];
+        let q = s.enf.quality.clone();
         drop(s);
         ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+            // The quality verdict first: is the hum good enough, and why.
+            ui.label(egui::RichText::new("QUALITY").small().color(DIM));
+            match &q {
+                Some(q) => {
+                    let c = match q.level {
+                        Level::Good => GOOD,
+                        Level::Weak => WARN,
+                        Level::None => DIM,
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(q.verdict()).color(c)).wrap());
+                    for l in q.lines() {
+                        ui.add(egui::Label::new(egui::RichText::new(l).small().color(TEXT)).wrap());
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new("no readings yet").small().color(DIM));
+                }
+            }
+            ui.add_space(4.0 * z);
             ui.label(egui::RichText::new("STATUS").small().color(DIM));
             for (t, c) in lines.into_iter().filter(|(t, _)| !t.is_empty()) {
                 ui.add(egui::Label::new(egui::RichText::new(t).small().color(c)).wrap());
