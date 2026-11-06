@@ -44,8 +44,9 @@ Canvas keys and mouse:
 | Do | How |
 |---|---|
 | Zoom | scroll wheel |
-| Pan | middle-drag, or hold Space and drag |
-| Select | click a node; Shift- or Ctrl-click adds or removes; drag a box on empty canvas; Ctrl+A all; Escape none |
+| Pan | middle-drag |
+| Select | click a node; Shift- or Ctrl-click adds or removes; right-drag a box on empty canvas (with Shift or Ctrl it adds or removes what it touches); Ctrl+A all; Escape none |
+| Menus | right-click without moving: on a node, its menu; on empty canvas, Add node |
 | Move | drag a selected node: all selected nodes move |
 | Delete | Delete or Backspace |
 | Copy, cut, paste, duplicate | Ctrl+C, Ctrl+X, Ctrl+V (at the pointer), Ctrl+D |

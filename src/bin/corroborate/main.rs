@@ -3,7 +3,7 @@
 //! the timeline shows every finding on one clock with its time error; the Record node keeps
 //! a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
 //!
-//! Graph: scroll to zoom, drag a node to move it, middle-drag (or Space and drag) to pan, drag
+//! Graph: scroll to zoom, drag a node to move it, middle-drag to pan, right-drag a box to select, drag
 //! from an output port to an input port to wire them (types must match), right-click an input
 //! to unwire it, right-click a node or empty space for more (rename, delete). Selecting several
 //! nodes, delete, copy and paste, undo: canvas.rs. Nodes have no windows: each shows its data and
@@ -795,9 +795,8 @@ impl App {
             y += step;
         }
         painter.add(egui::Shape::mesh(dots));
-        // Pan: middle-drag, or Space and drag. A plain drag on empty canvas draws a selection box.
-        let space = ui.input(|i| i.key_down(egui::Key::Space));
-        if self.wiring.is_none() && (bg.dragged_by(egui::PointerButton::Middle) || (space && bg.dragged_by(egui::PointerButton::Primary))) {
+        // Pan: middle-drag only. A right-drag on empty canvas draws a selection box.
+        if self.wiring.is_none() && bg.dragged_by(egui::PointerButton::Middle) {
             self.pan += bg.drag_delta();
         }
         if bg.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
@@ -847,8 +846,7 @@ impl App {
             let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD * self.zoom));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
             if self.wiring.is_none() && self.wiring_in.is_none() {
-                let space = ui.input(|i| i.key_down(egui::Key::Space));
-                if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
+                if resp.dragged_by(egui::PointerButton::Middle) {
                     self.pan += resp.drag_delta();
                 } else if resp.dragged_by(egui::PointerButton::Primary) {
                     // Dragging a node not selected selects it alone (Shift/Ctrl: adds it); then
@@ -1092,7 +1090,7 @@ impl App {
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag node: move · drag empty: select · middle-drag or Space+drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
+            "scroll: zoom · drag node: move · right-drag: select · middle-drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
             FontId::proportional(11.0),
             DIM,
         );

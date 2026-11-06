@@ -1,5 +1,5 @@
 //! Canvas editing driven like a user would (canvas.rs): box select, Shift-click, moving several
-//! nodes, middle-drag pan, Delete, copy/cut/paste/duplicate, undo/redo, frame all. Headless;
+//! nodes, middle-drag pan, right-click menus, Delete, copy/cut/paste/duplicate, undo/redo, frame all. Headless;
 //! screenshots in target/drive/.
 
 use super::drive::Drive;
@@ -22,13 +22,13 @@ fn three() -> (Drive, NodeId, NodeId, NodeId) {
 /// Presses `button` at `from`, moves to `to` in steps, releases.
 fn drag(d: &mut Drive, from: Pos2, to: Pos2, button: PointerButton, modifiers: Modifiers) {
     d.h.hover_at(from);
-    d.h.event(Event::PointerButton { pos: from, button, pressed: true, modifiers });
+    d.h.event_modifiers(Event::PointerButton { pos: from, button, pressed: true, modifiers }, modifiers);
     d.frames(1);
     for k in 1..=6 {
         d.h.hover_at(from + (to - from) * (k as f32 / 6.0));
         d.frames(1);
     }
-    d.h.event(Event::PointerButton { pos: to, button, pressed: false, modifiers });
+    d.h.event_modifiers(Event::PointerButton { pos: to, button, pressed: false, modifiers }, modifiers);
     d.frames(2);
 }
 
@@ -50,11 +50,12 @@ fn visible(d: &mut Drive) -> usize {
 fn box_select_delete_undo_redo() {
     let (mut d, inv, comb, map) = three();
     settle(&mut d);
-    // A box over the two nodes on the left, starting on empty canvas.
+    // A box over the two nodes on the left, right-dragged from empty canvas.
     let o = d.app().canvas_origin;
-    drag(&mut d, o + Vec2::new(10.0, 20.0), o + Vec2::new(300.0, 500.0), PointerButton::Primary, Modifiers::NONE);
+    drag(&mut d, o + Vec2::new(10.0, 20.0), o + Vec2::new(300.0, 500.0), PointerButton::Secondary, Modifiers::NONE);
     assert_eq!(d.app().picked(), vec![inv, comb], "box picks the two it touches");
-    assert_eq!(d.app().pan, Vec2::ZERO, "a plain drag on empty canvas does not pan");
+    assert_eq!(d.app().pan, Vec2::ZERO, "a right-drag does not pan");
+    assert!(d.h.query_by_label(MENU).is_none(), "a right-drag opens no menu");
     d.shot("canvas_box_selected");
     key(&mut d, Modifiers::NONE, Key::Delete);
     assert_eq!(visible(&mut d), 1, "Delete removes both");
@@ -105,6 +106,59 @@ fn middle_drag_pans() {
     let pan = d.app().pan;
     assert!((pan - Vec2::new(50.0, 30.0)).length() < 2.0, "pan {pan:?}");
     assert!(d.app().picked().is_empty(), "no box from a middle drag");
+}
+
+/// An entry only the background menu has.
+const MENU: &str = "Plugin from file…";
+
+#[test]
+fn right_click_opens_the_menu() {
+    let (mut d, ..) = three();
+    let o = d.app().canvas_origin;
+    d.right_click_at(o.x + 400.0, o.y + 600.0);
+    d.frames(2);
+    assert!(d.h.query_by_label(MENU).is_some(), "a right-click without moving opens the menu");
+}
+
+#[test]
+fn box_with_shift_toggles() {
+    let (mut d, inv, comb, map) = three();
+    let o = d.app().canvas_origin;
+    drag(&mut d, o + Vec2::new(10.0, 20.0), o + Vec2::new(300.0, 500.0), PointerButton::Secondary, Modifiers::NONE);
+    assert_eq!(d.app().picked(), vec![inv, comb]);
+    // Shift-boxes: one round Combine (picked, so it goes), one round Map (not picked, so it comes).
+    let around = |d: &mut Drive, n: NodeId| {
+        let o = d.app().canvas_origin;
+        let r = d.app().node_rect(o, n);
+        (r.left_top() - Vec2::splat(15.0), r.left_top() + Vec2::splat(20.0))
+    };
+    for n in [comb, map] {
+        let (a, b) = around(&mut d, n);
+        drag(&mut d, a, b, PointerButton::Secondary, Modifiers::SHIFT);
+    }
+    assert_eq!(d.app().picked(), vec![inv, map], "Shift toggles what the box touches");
+}
+
+#[test]
+fn left_drag_on_empty_canvas_does_nothing() {
+    let (mut d, inv, ..) = three();
+    let a = d.node_title(inv);
+    d.click_at(a.x, a.y);
+    let o = d.app().canvas_origin;
+    drag(&mut d, o + Vec2::new(400.0, 600.0), o + Vec2::new(500.0, 680.0), PointerButton::Primary, Modifiers::NONE);
+    assert_eq!(d.app().pan, Vec2::ZERO, "no pan");
+    assert_eq!(d.app().picked(), vec![inv], "no box, selection kept");
+}
+
+#[test]
+fn space_drag_no_longer_pans() {
+    let (mut d, ..) = three();
+    let o = d.app().canvas_origin;
+    d.h.key_down(Key::Space);
+    drag(&mut d, o + Vec2::new(400.0, 600.0), o + Vec2::new(500.0, 680.0), PointerButton::Primary, Modifiers::NONE);
+    d.h.key_up(Key::Space);
+    d.frames(1);
+    assert_eq!(d.app().pan, Vec2::ZERO);
 }
 
 #[test]

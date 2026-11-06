@@ -390,27 +390,35 @@ impl App {
         self.pan = area.center() - area.min - bounds.center().to_vec2() * self.zoom;
     }
 
-    /// The selection box: started by dragging empty canvas, drawn while dragging, applied on
-    /// release to every node it touches.
+    /// The selection box: started by right-dragging empty canvas, drawn while dragging, applied
+    /// on release to every node it touches. With Shift or Ctrl those nodes are toggled; with
+    /// neither, they replace the selection.
     pub(crate) fn box_select(&mut self, ui: &egui::Ui, bg: &egui::Response, painter: &egui::Painter, origin: Pos2) {
-        let space = ui.input(|i| i.key_down(egui::Key::Space));
-        if bg.drag_started_by(egui::PointerButton::Primary) && !space && self.wiring.is_none() && self.wiring_in.is_none() {
+        if bg.drag_started_by(egui::PointerButton::Secondary) && self.wiring.is_none() && self.wiring_in.is_none() {
             self.sel.boxing = ui.input(|i| i.pointer.press_origin());
         }
         let Some(start) = self.sel.boxing else { return };
         let Some(now) = ui.ctx().pointer_latest_pos() else { return };
         let r = Rect::from_two_pos(start, now);
         painter.rect(r, 2.0, alpha(SEL, 0.08), Stroke::new(1.0, alpha(SEL, 0.7)), StrokeKind::Inside);
-        if bg.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+        if bg.drag_stopped() || !ui.input(|i| i.pointer.secondary_down()) {
             self.sel.boxing = None;
             let m = ui.input(|i| i.modifiers);
-            if !(m.shift || m.command) {
+            let toggle = m.shift || m.command;
+            if !toggle {
                 self.pick_none();
             }
             for i in 0..self.nodes.len() {
                 if !self.nodes[i].hidden && self.node_rect(origin, i).intersects(r) {
-                    self.sel.picked.insert(i);
-                    self.selected = Some(i);
+                    if toggle && self.sel.picked.contains(&i) {
+                        self.sel.picked.remove(&i);
+                        if self.selected == Some(i) {
+                            self.selected = self.sel.picked.iter().next().copied();
+                        }
+                    } else {
+                        self.sel.picked.insert(i);
+                        self.selected = Some(i);
+                    }
                 }
             }
         }
