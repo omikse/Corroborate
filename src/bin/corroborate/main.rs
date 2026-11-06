@@ -34,6 +34,7 @@ mod look;
 mod nodes;
 mod runtime;
 mod script;
+mod types_menu;
 
 // Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
 #[path = "../../modules/Combine locations/node.rs"]
@@ -94,13 +95,7 @@ fn kind_color(k: PortKind) -> Color32 {
 
 /// A kind's dot: how its data arrives (a value, a list, a stream).
 fn kind_shape(k: PortKind) -> corroborate::module_manifest::DotShape {
-    use corroborate::module_manifest::DotShape;
-    use corroborate::types::Flow;
-    match corroborate::types::of(k).flow {
-        Flow::Value => DotShape::Circle,
-        Flow::List => DotShape::Square,
-        Flow::Stream => DotShape::Diamond,
-    }
+    types_menu::flow_shape(corroborate::types::of(k).flow)
 }
 
 fn role_text(r: Role) -> &'static str {
@@ -1194,6 +1189,9 @@ impl App {
                 ui.menu_button("Add node", |ui| {
                     let at = Pos2::new(400.0, 300.0) - self.pan;
                     self.add_menu(ui, at);
+                });
+                ui.menu_button("Types", |ui| {
+                    let _ = self.types_menu(ui);
                 });
                 if ui.button("Results folder").clicked() {
                     let d = results_dir();

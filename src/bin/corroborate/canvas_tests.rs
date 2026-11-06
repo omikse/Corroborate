@@ -5,6 +5,7 @@
 use super::drive::Drive;
 use super::*;
 use egui::{Event, Key, Modifiers, PointerButton};
+use egui_kittest::kittest::Queryable;
 
 /// Three nodes: Invert location → Combine locations → Map.
 fn three() -> (Drive, NodeId, NodeId, NodeId) {
@@ -197,4 +198,19 @@ fn a_dot_says_its_type() {
     d.h.hover_at(c);
     d.frames(30);
     d.shot("canvas_dot_hover");
+}
+
+#[test]
+fn types_menu() {
+    let (mut d, ..) = three();
+    d.click("Types");
+    for t in ["Audio", "Location", "Event", "JSON"] {
+        assert!(d.h.query_by_label(t).is_some(), "{t} is listed");
+    }
+    let loc = d.h.get_by_label("Location").rect().center();
+    d.h.hover_at(loc);
+    d.frames(30);
+    d.shot("types_menu");
+    let (give, take) = types_menu::users("location");
+    assert!(give.iter().any(|m| m == "Combine locations") && take.iter().any(|m| m == "Map"), "{give:?} {take:?}");
 }
