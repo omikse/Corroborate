@@ -253,3 +253,59 @@ fn sync_list_entries_share_and_contradictions() {
     assert!(e[0].contradiction.is_some() && e[1].contradiction.is_some());
     assert!(!e[2].enabled && e[2].share == 0.0 && e[2].contradiction.is_none());
 }
+
+/// A dragged row's event meets the closest event on another row within the tolerance; an absolute
+/// row gives an anchor in UTC, a floating one a link in its own clock's time.
+#[test]
+fn drop_match_finds_the_closest_pair() {
+    use crate::timeline::{build_rows, drop_match};
+    use corroborate::clock::Anchor as An;
+    use corroborate::data::Event;
+    let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }], &[]);
+    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, ..Default::default() });
+    let rows = build_rows(&clocks, &[ev("a", 10.0), ev("a", 20.0), ev("z", 3.0)], &|c| c.to_string());
+    let off = |c: &str| clocks.get(c).offset;
+    // z's event at 3 is drawn at 3 + shift: 1018 is 2 s short of a's event at 20 s (UTC 1020).
+    let m = drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0).unwrap();
+    assert!(m.absolute && m.a == "z" && m.t_a == 3.0 && m.t_b == 1020.0 && (m.gap - 2.0).abs() < 1e-9, "{m:?}");
+    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 1.0).is_none());
+}
+
+/// Dragging a floating row so its event meets another floating row's event asks for the error;
+/// confirming makes a manual link and the row joins that group.
+#[test]
+fn drag_a_row_onto_an_event_links_it() {
+    use corroborate::data::Event;
+    let mut d = crate::drive::Drive::new();
+    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, label: c.into(), ..Default::default() });
+    let app = d.app();
+    app.tls.extra = vec![ev("c1", 10.0), ev("c2", 5.0)];
+    app.follow = false;
+    app.tl = (0.0, 60.0);
+    d.frames(3);
+    let (track, v0, span) = d.app().tls.geom.unwrap();
+    let y = d.app().tls.row_y.iter().find(|(g, _)| g == "c2").unwrap().1;
+    let x = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
+    let (from, to) = (Pos2::new(x(5.0), y), Pos2::new(x(10.0) + 2.0, y));
+    d.h.hover_at(from);
+    d.h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    d.frames(1);
+    for k in 1..=6 {
+        d.h.hover_at(from + (to - from) * (k as f32 / 6.0));
+        d.frames(1);
+    }
+    d.h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    d.frames(3);
+    let p = d.app().tls.pending.clone().expect("the drop asks for the link's error");
+    assert!(!p.absolute && p.a == "c2" && p.t_a == 5.0 && p.b == "c1" && p.t_b == 10.0 && p.error_s > 0.0, "{p:?}");
+    d.shot("timeline_link_box");
+    d.click("Link");
+    d.frames(3);
+    let app = d.app();
+    assert_eq!(app.ev.manual_links.len(), 1);
+    assert_eq!(app.ev.manual_links[0].from, "manual");
+    let (g1, g2) = (app.ev.clocks.get("c1").group.clone(), app.ev.clocks.get("c2").group.clone());
+    assert_eq!(g1, g2, "c2 joined c1's group");
+    assert!(app.tls.pending.is_none() && !app.tls.shift.contains_key("c2"));
+    d.shot("timeline_linked");
+}

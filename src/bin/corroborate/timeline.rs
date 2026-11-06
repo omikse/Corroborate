@@ -117,12 +117,84 @@ pub struct TlState {
     pub picked: Option<String>,
     /// Floating row (group id) → seconds added to its times.
     pub shift: BTreeMap<String, f64>,
+    /// The floating row being dragged (group id).
+    pub drag: Option<String>,
+    /// A dropped row waiting for the user to confirm the link (or anchor) and its error.
+    pub pending: Option<Pending>,
+    /// Where the rows were last drawn: the track, the view start and span, each group row's centre y.
+    pub geom: Option<(Rect, f64, f64)>,
+    pub row_y: Vec<(String, f32)>,
+    /// Events tests put on the timeline.
+    #[cfg(test)]
+    pub extra: Vec<(NodeId, Event)>,
 }
 
 impl Default for TlState {
     fn default() -> Self {
-        TlState { open: true, expanded: BTreeSet::new(), picked: None, shift: BTreeMap::new() }
+        TlState {
+            open: true,
+            expanded: BTreeSet::new(),
+            picked: None,
+            shift: BTreeMap::new(),
+            drag: None,
+            pending: None,
+            geom: None,
+            row_y: Vec::new(),
+            #[cfg(test)]
+            extra: Vec::new(),
+        }
     }
+}
+
+/// Where a dragged row's event met another row's event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    /// The dragged row's group.
+    pub group: String,
+    /// Moment `t_a` on clock `a` (the dragged row) …
+    pub a: String,
+    pub t_a: f64,
+    /// … is moment `t_b` on clock `b`, or UTC `t_b` when the other row is absolute.
+    pub b: String,
+    pub t_b: f64,
+    pub absolute: bool,
+    pub error_s: f64,
+    /// Seconds the dragged row still has to move so the two events meet.
+    pub gap: f64,
+}
+
+/// The closest pair of events, one on the dragged row `moving` and one on another row, less than
+/// `tol` seconds apart as drawn. `shift` gives each row's shift, `offset` each clock's offset.
+pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, offset: &dyn Fn(&str) -> f64, tol: f64) -> Option<Pending> {
+    let m = rows.iter().find(|r| r.group.id == moving)?;
+    let sm = shift(m);
+    let mut best: Option<Pending> = None;
+    for o in rows.iter().filter(|r| r.group.id != moving) {
+        let so = shift(o);
+        for sa in &m.subs {
+            for ea in &sa.events {
+                for sb in &o.subs {
+                    for eb in &sb.events {
+                        let gap = (eb.t0 + so) - (ea.t0 + sm);
+                        if gap.abs() < tol && best.as_ref().is_none_or(|b| gap.abs() < b.gap.abs()) {
+                            let absolute = o.group.kind == Ck::Absolute;
+                            best = Some(Pending {
+                                group: moving.to_string(),
+                                a: sa.clock.clone(),
+                                t_a: ea.t0 - offset(&sa.clock),
+                                b: if absolute { corroborate::clock::UTC.to_string() } else { sb.clock.clone() },
+                                t_b: if absolute { eb.t0 } else { eb.t0 - offset(&sb.clock) },
+                                absolute,
+                                error_s: 0.0,
+                                gap,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 /// One line of the Sync list: a piece of evidence.
@@ -234,7 +306,50 @@ impl App {
                 }));
             }
         }
+        #[cfg(test)]
+        out.extend(self.tls.extra.iter().cloned());
         (out, end)
+    }
+
+    /// Makes the pending link (or anchor) manual evidence; the solve runs again next frame and
+    /// the dragged row joins the other row's group.
+    pub(crate) fn confirm_link(&mut self) {
+        let Some(p) = self.tls.pending.take() else { return };
+        if p.absolute {
+            self.ev.manual_anchors.push(ClockAnchor { clock: p.a, t: p.t_a, utc: p.t_b, error_s: p.error_s, from: "manual".into(), enabled: true });
+        } else {
+            self.ev.manual_links.push(Link { a: p.a, t_a: p.t_a, b: p.b, t_b: p.t_b, error_s: p.error_s, from: "manual".into(), enabled: true });
+        }
+        self.tls.shift.remove(&p.group);
+        self.update_clocks();
+    }
+
+    /// The box asking for a dropped row's link error.
+    fn pending_box(&mut self, ctx: &egui::Context) {
+        let Some(pd) = &self.tls.pending else { return };
+        let (na, nb) = (self.clock_name(&pd.a), if pd.absolute { "UTC".to_string() } else { self.clock_name(&pd.b) });
+        let Some(p) = &mut self.tls.pending else { return };
+        let (mut ok, mut cancel) = (false, false);
+        egui::Window::new("Manual link").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            if p.absolute {
+                ui.label(format!("{na} {} is {} UTC", clock_view::rel_text(p.t_a), fmt_clock(p.t_b)));
+            } else {
+                ui.label(format!("{na} {} is {nb} {}", clock_view::rel_text(p.t_a), clock_view::rel_text(p.t_b)));
+            }
+            ui.horizontal(|ui| {
+                ui.label("error ± (1 sigma)");
+                ui.add(egui::DragValue::new(&mut p.error_s).range(0.0001..=86_400.0).speed(0.01).suffix(" s"));
+            });
+            ui.horizontal(|ui| {
+                ok = ui.button(if p.absolute { "Anchor" } else { "Link" }).clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if ok {
+            self.confirm_link();
+        } else if cancel {
+            self.tls.pending = None;
+        }
     }
 
     /// The Sync list: every anchor and link with an on/off switch.
@@ -313,7 +428,7 @@ impl App {
         // Header: title, confidence, maximum error.
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            if ui.small_button(if self.tls.open { "▼" } else { "▲" }).on_hover_text("show or hide the timeline").clicked() {
+            if ui.small_button(if self.tls.open { "v" } else { "^" }).on_hover_text("show or hide the timeline").clicked() {
                 self.tls.open = !self.tls.open;
             }
             ui.label(egui::RichText::new("Timeline").strong().color(TEXT));
@@ -390,13 +505,62 @@ impl App {
                     self.tl = (at - (at - self.tl.0) * f, at + (self.tl.1 - at) * f);
                 }
             }
+            // A drag on a floating row moves that row; elsewhere it pans.
+            let line_at = |y: f32| -> Option<&Row> {
+                let li = ((y - area.top() - ruler_h) / lane_h).floor();
+                (li >= 0.0).then(|| lines.get(li as usize)).flatten().map(|l| match l {
+                    Line::Group(r) | Line::Sub(r, _) => *r,
+                })
+            };
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                let at = ui.input(|i| i.pointer.press_origin());
+                self.tls.drag = at.and_then(|h| line_at(h.y)).filter(|r| r.group.kind != Ck::Absolute).map(|r| r.group.id.clone());
+            }
             if resp.dragged() {
-                let dt = -(resp.drag_delta().x / track.width()) as f64 * span;
-                self.tl = (self.tl.0 + dt, self.tl.1 + dt);
-                self.follow = false;
+                let dt = (resp.drag_delta().x / track.width()) as f64 * span;
+                match self.tls.drag.clone().and_then(|g| rows.iter().find(|r| r.group.id == g)) {
+                    Some(r) => {
+                        let cur = shift_of(&self.tls, r, self.tl.0);
+                        self.tls.shift.insert(r.group.id.clone(), cur + dt);
+                    }
+                    None => {
+                        self.tl = (self.tl.0 - dt, self.tl.1 - dt);
+                        self.follow = false;
+                    }
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some(g) = self.tls.drag.take() {
+                    let per_px = span / track.width() as f64;
+                    let v0 = self.tl.0;
+                    let clocks = &self.ev.clocks;
+                    let found = drop_match(&rows, &g, &|r| shift_of(&self.tls, r, v0), &|c| clocks.get(c).offset, 8.0 * per_px);
+                    if let Some(mut m) = found {
+                        // Snap the row so the two events meet; the error starts at what a few
+                        // pixels are worth at this zoom.
+                        let snapped = rows.iter().find(|r| r.group.id == g).map(|r| shift_of(&self.tls, r, v0) + m.gap);
+                        if let Some(sh) = snapped {
+                            self.tls.shift.insert(g.clone(), sh);
+                        }
+                        let e = 4.0 * per_px;
+                        let mag = 10f64.powf(e.log10().floor());
+                        m.error_s = (e / mag).ceil() * mag;
+                        m.gap = 0.0;
+                        self.tls.pending = Some(m);
+                    }
+                }
             }
             let (v0, span) = (self.tl.0, (self.tl.1 - self.tl.0).max(1e-3));
             let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
+            self.tls.geom = Some((track, v0, span));
+            self.tls.row_y = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(li, l)| match l {
+                    Line::Group(r) => Some((r.group.id.clone(), area.top() + ruler_h + li as f32 * lane_h + lane_h * 0.5)),
+                    Line::Sub(..) => None,
+                })
+                .collect();
 
             // Ruler.
             let raw = span / 8.0;
@@ -416,6 +580,7 @@ impl App {
             let mut pick_node: Option<NodeId> = None;
             let mut toggle: Option<String> = None;
             let mut prev_kind: Option<Ck> = None;
+            let floating_hover = resp.hover_pos().and_then(|h| line_at(h.y)).is_some_and(|r| r.group.kind != Ck::Absolute);
             for (li, line) in lines.iter().enumerate() {
                 let top = area.top() + ruler_h + li as f32 * lane_h;
                 let row_rect = Rect::from_min_max(Pos2::new(area.left(), top), Pos2::new(area.right(), top + lane_h));
@@ -458,7 +623,7 @@ impl App {
                             Ck::None => "no anchor, no link".to_string(),
                         };
                         let who = if r.subs.len() == 1 { r.subs[0].name.clone() } else { format!("{} sources", r.subs.len()) };
-                        (format!("{} {who}", if self.tls.expanded.contains(&r.group.id) { "▾" } else { "▸" }), kind)
+                        (format!("{} {who}", if self.tls.expanded.contains(&r.group.id) { "v" } else { ">" }), kind)
                     }
                     Some(s) => (format!("   {}", s.name), format!("   {} events", s.events.len())),
                 };
@@ -623,9 +788,12 @@ impl App {
             }
             if let Some(t) = hover {
                 resp.on_hover_text(t);
+            } else if floating_hover {
+                resp.on_hover_text("drag the row onto an event on another row to link them");
             }
         });
             });
         });
+        self.pending_box(ui.ctx());
     }
 }
