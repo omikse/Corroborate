@@ -229,7 +229,7 @@ impl crate::look::NodeLook for Look {
         let (pts, ran) = {
             let s = st.lock().unwrap();
             let from = s.enf.points.len().saturating_sub(600);
-            (s.enf.points[from..].iter().map(|q| (q.t, q.hz / q.harmonic as f64, q.ok)).collect::<Vec<_>>(), s.running || s.done)
+            (s.enf.points[from..].iter().map(|q| (q.t, q.hz, q.ok)).collect::<Vec<_>>(), s.running || s.done)
         };
         trace(&p, band, z, &pts, ran);
 

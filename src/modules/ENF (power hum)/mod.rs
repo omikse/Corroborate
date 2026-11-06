@@ -7,11 +7,13 @@
 //! logs, the time of recording.
 //!
 //! Method: downsample the shared 16 kHz stream to 4 kHz; every second, take the last 16 s,
-//! Hann window, zero-pad to 262 144 points (0.015 Hz bins), and find the strongest peak near
-//! each harmonic h = 1..4 of 50 Hz and 60 Hz. The harmonic with the best SNR (signal-to-noise
-//! ratio) gives the estimate f = peak / h, refined by parabolic interpolation. The nominal
-//! frequency is decided by vote once the hum is clear. Runs of clear readings of at least
-//! 30 s become findings.
+//! Hann window, zero-pad to 262 144 points (0.015 Hz bins). For 50 Hz and 60 Hz, take the band
+//! around each harmonic h = 1..8, divide it by its own noise, rescale it to the fundamental and
+//! sum: the combined spectrum. Its peak, refined by parabolic interpolation, is the reading; its
+//! excess over noise is the score. The nominal frequency is decided by vote between the two
+//! sums (each harmonic capped, so one loud tone can't win). Readings that jump faster than a
+//! grid can (slope rule) are rejected and kept with the reason. Runs of clear readings of at
+//! least 30 s become findings. Rejection rules after libhum (github.com/RaphaelJ/libhum).
 
 use crate::core::NodeSpec;
 use crate::ingest::Resampler;
@@ -33,28 +35,102 @@ const SR: f64 = 4000.0;
 const WIN_S: f64 = 16.0;
 const HOP_S: f64 = 1.0;
 const NFFT: usize = 262_144;
-const HARMONICS: u32 = 4;
-/// Search ± this much around each harmonic (scaled by h).
+/// Harmonics 1..=HARMONICS of the nominal are combined (8 × 60 Hz = 480 Hz, well under 2 kHz).
+pub const HARMONICS: u32 = 8;
+/// Search ± this much around the nominal (in the fundamental's frequency).
 const SEARCH_HZ: f64 = 0.25;
-/// Readings at or above this SNR (dB) count as clear hum.
-const SNR_MIN_DB: f64 = 10.0;
+/// Grid step of the combined spectrum, in bins of the fundamental.
+const GRID_STEP: f64 = 0.25;
+/// One harmonic's power over its noise is capped at this (20 dB) in the score, so one strong
+/// tone (a fan, a whine) can't outscore hum spread over many harmonics.
+const CAP: f64 = 100.0;
+/// Weight of one window in the running average of each band (about 5 s memory: the grid
+/// moves at most ~2.5 mHz/s, so the average lags by ~12 mHz at worst).
+const AVG_ALPHA: f64 = 0.2;
+/// The current reading is searched this far either side of the averaged spectrum's peak.
+const TRACK_HZ: f64 = 0.025;
+/// Weight of one window in each harmonic's running power at the reading (about 20 s memory).
+const HIT_ALPHA: f64 = 0.05;
+/// A harmonic's weight: its running power at the reading over noise, beyond this (noise alone
+/// averages 1).
+const WEIGHT_FLOOR: f64 = 1.3;
+/// What a band's own peak over noise × ln 2 averages with no hum: the largest of ~33 noise
+/// bins (each averaging 1), about ln 33 + 0.58, plus a margin.
+const NOISE_PEAK: f64 = 4.6;
+/// Readings at or above this score (dB) count as clear hum. The score is the combined
+/// spectrum's excess over what noise alone gives, in units of its spread (see `combined`).
+pub const SNR_MIN_DB: f64 = 7.0;
 /// Shortest run reported as a finding, and the longest gap bridged within a run.
 const MIN_SEG_S: f64 = 30.0;
 const MAX_GAP_S: f64 = 5.0;
-/// A reading further than this from the recent median is an outlier (real grids drift
-/// slowly: tens of millihertz over minutes).
-const MAX_JUMP_HZ: f64 = 0.03;
+/// Section rule: a clear reading counts only inside a run of at least this long.
+pub const MIN_SECTION_S: f64 = 8.0;
+/// Slope rule: a grid can't change faster than this (Hz per second). A reading further from
+/// its clear neighbours than the slope allows (plus three times both errors) is rejected.
+pub const MAX_SLOPE_HZ_S: f64 = 0.0025;
+
+/// Why a reading is not used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reject {
+    /// Score under SNR_MIN_DB: no clear hum in this window.
+    Weak,
+    /// Clear, but the grid (50 or 60 Hz) is not decided yet.
+    Undecided,
+    /// Clear, but jumps faster than a grid can (slope rule).
+    Slope,
+    /// Clear, but not inside a run of at least MIN_SECTION_S (section rule).
+    Section,
+}
+
+impl Reject {
+    pub fn label(self) -> &'static str {
+        match self {
+            Reject::Weak => "too weak",
+            Reject::Undecided => "grid not decided yet",
+            Reject::Slope => "slope rule",
+            Reject::Section => "section rule",
+        }
+    }
+}
 
 /// One reading: the grid frequency estimate at time `t` (relative seconds, window centre).
 #[derive(Clone, Copy, Debug)]
 pub struct EnfPoint {
     pub t: f64,
+    /// The fundamental's frequency (not the harmonic's).
     pub hz: f64,
     pub nominal: f64,
+    /// The harmonic that contributed most, for display.
     pub harmonic: u32,
+    /// Detection score, dB (see `SNR_MIN_DB`).
     pub snr_db: f64,
+    /// Estimated error of `hz` (1 sigma), Hz.
+    pub err_hz: f64,
+    /// Bit h-1 set: harmonic h stood 3 dB above its noise at the peak.
+    pub used: u8,
     /// Clear and continuous: used in findings. False readings are shown, not used.
     pub ok: bool,
+    /// Why not `ok`.
+    pub reject: Option<Reject>,
+}
+
+impl EnfPoint {
+    /// The harmonics that stood out, as a list ("2, 3, 5").
+    pub fn used_list(&self) -> Vec<u32> {
+        (1..=HARMONICS).filter(|h| self.used & (1 << (h - 1)) != 0).collect()
+    }
+}
+
+/// The combined spectrum's best peak for one nominal.
+#[derive(Clone, Copy, Debug)]
+struct Peak {
+    hz: f64,
+    score_db: f64,
+    /// Capped excess, for comparing nominals.
+    excess: f64,
+    harmonic: u32,
+    used: u8,
+    err_hz: f64,
 }
 
 /// A run of clear hum readings.
@@ -122,9 +198,21 @@ pub struct Enf {
     scratch: Vec<Complex<f32>>,
     power: Vec<f32>,
     votes: [u32; 2],
+    /// Before the grid is decided, per nominal: the run of clear readings that keep to the
+    /// slope rule (last t, last hz, length). Only readings in such a run of MIN_SECTION_S vote.
+    pre: [(f64, f64, f64); 2],
     nominal: Option<f64>,
-    /// Harmonic used by the current run.
-    harmonic: Option<u32>,
+    /// Per nominal (50, 60) and harmonic: the band over its noise, averaged over recent
+    /// windows. Sets the harmonic's weight and where the current reading is searched.
+    band_avg: [Vec<Vec<f64>>; 2],
+    /// Per nominal and harmonic: running mean of the band over its noise at the reading's
+    /// frequency, × ln 2 (1 for noise alone). Sets the harmonic's weight.
+    hit_avg: [[f64; HARMONICS as usize]; 2],
+    /// Per nominal and harmonic: running mean of the band's own peak over noise × ln 2. Starts
+    /// the weights before any reading is locked.
+    peak_avg: [[f64; HARMONICS as usize]; 2],
+    /// Recent clear readings (on the decided grid), for the slope rule: (t, hz, err).
+    recent: Vec<(f64, f64, f64)>,
     /// Readings not yet collected by `take_points`.
     new_points: Vec<EnfPoint>,
     run: Option<Run>,
@@ -159,8 +247,12 @@ impl Enf {
             power: vec![0.0; NFFT / 2 + 1],
             fft,
             votes: [0, 0],
+            pre: [(f64::NEG_INFINITY, 0.0, 0.0); 2],
             nominal: None,
-            harmonic: None,
+            band_avg: [Vec::new(), Vec::new()],
+            hit_avg: [[1.0; HARMONICS as usize]; 2],
+            peak_avg: [[NOISE_PEAK; HARMONICS as usize]; 2],
+            recent: Vec::new(),
             new_points: Vec::new(),
             run: None,
             next_id: 1,
@@ -181,22 +273,19 @@ impl Enf {
         f * NFFT as f64 / SR
     }
 
-    /// Peak near `fc`: (interpolated frequency, SNR dB).
-    fn peak(&self, fc: f64, h: f64) -> Option<(f64, f64)> {
-        let lo = Self::bin(fc - SEARCH_HZ * h).floor().max(1.0) as usize;
-        let hi = (Self::bin(fc + SEARCH_HZ * h).ceil() as usize).min(self.power.len() - 2);
-        let (mut k, mut best) = (lo, 0.0f32);
-        for i in lo..=hi {
-            if self.power[i] > best {
-                best = self.power[i];
-                k = i;
-            }
+    /// Power at frequency `f`, linearly interpolated between bins.
+    fn power_at(&self, f: f64) -> f64 {
+        let b = Self::bin(f);
+        let i = b.floor() as usize;
+        if i + 1 >= self.power.len() {
+            return 0.0;
         }
-        // A maximum on the edge of the search range is the slope of something else, not a peak.
-        if best <= 0.0 || k == lo || k == hi {
-            return None;
-        }
-        // Noise: median power 1–3 Hz either side (×h), clear of the peak.
+        let w = b - i as f64;
+        self.power[i] as f64 * (1.0 - w) + self.power[i + 1] as f64 * w
+    }
+
+    /// Noise near harmonic `fc`: median power 1–3 Hz either side (×h), clear of the peak.
+    fn noise(&self, fc: f64, h: f64) -> Option<f64> {
         let mut noise: Vec<f32> = Vec::new();
         for (a, b) in [(fc - 3.0 * h, fc - 1.0 * h), (fc + 1.0 * h, fc + 3.0 * h)] {
             let (ia, ib) = (Self::bin(a).max(1.0) as usize, (Self::bin(b) as usize).min(self.power.len() - 1));
@@ -207,16 +296,109 @@ impl Enf {
         }
         let m = noise.len() / 2;
         let (_, med, _) = noise.select_nth_unstable_by(m, |a, b| a.total_cmp(b));
-        let snr_db = 10.0 * ((best / med.max(1e-30)) as f64).log10();
-        // Parabolic interpolation on log power.
-        let (a, b, c) = (
-            (self.power[k - 1].max(1e-30) as f64).ln(),
-            (best as f64).ln(),
-            (self.power[k + 1].max(1e-30) as f64).ln(),
-        );
+        Some((*med as f64).max(1e-30))
+    }
+
+    /// The combined spectrum for nominal `nom`: every harmonic's band, divided by its own noise
+    /// and rescaled to the fundamental, summed. Its peak is the reading. The score is how far the
+    /// sum at the peak (each harmonic capped at CAP) stands above what noise alone gives there:
+    /// noise power over its median averages 1/ln 2 per harmonic, with the same spread.
+    ///
+    /// Each harmonic is weighted by how far its band's peak has stood above noise lately (a
+    /// matched weighting): harmonics with no hum get no weight, so they don't drown the ones
+    /// that have it. With no harmonic standing out yet, all weigh the same.
+    fn combined(&mut self, ni: usize, nom: f64) -> Option<Peak> {
+        use std::f64::consts::LN_2;
+        let df = SR / NFFT as f64;
+        let step = GRID_STEP * df;
+        let n = (2.0 * SEARCH_HZ / step) as usize + 1;
+        let f0 = nom - SEARCH_HZ;
+        let mut rows: Vec<(u32, Vec<f64>)> = Vec::new();
+        for h in 1..=HARMONICS {
+            let hf = h as f64;
+            if (nom + SEARCH_HZ + 3.0) * hf >= SR / 2.0 - 1.0 {
+                break;
+            }
+            let Some(noise) = self.noise(nom * hf, hf) else { continue };
+            let r: Vec<f64> = (0..n).map(|i| self.power_at((f0 + i as f64 * step) * hf) / noise).collect();
+            rows.push((h, r));
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        // Running average of each band: noise averages out, the hum (moving slowly) stays.
+        let avg = &mut self.band_avg[ni];
+        if avg.len() != rows.len() {
+            *avg = rows.iter().map(|(_, r)| r.clone()).collect();
+        } else {
+            for (a, (_, r)) in avg.iter_mut().zip(&rows) {
+                for (x, v) in a.iter_mut().zip(r) {
+                    *x += AVG_ALPHA * (v - *x);
+                }
+            }
+        }
+        let argmax = |v: &[f64]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i);
+        let pk = &mut self.peak_avg[ni];
+        for (h, r) in &rows {
+            let top = r.iter().fold(0.0f64, |m, &b| m.max(b)) * LN_2;
+            let x = &mut pk[*h as usize - 1];
+            *x += HIT_ALPHA * (top - *x);
+        }
+        let hit = &mut self.hit_avg[ni];
+        let mut w: Vec<f64> = rows
+            .iter()
+            .map(|(h, _)| {
+                let i = *h as usize - 1;
+                (hit[i] - WEIGHT_FLOOR).max(0.0) + (self.peak_avg[ni][i] - NOISE_PEAK).max(0.0)
+            })
+            .collect();
+        if w.iter().all(|&x| x == 0.0) {
+            w.iter_mut().for_each(|x| *x = 1.0);
+        }
+        // Where the averaged combined spectrum peaks: the current reading is searched near it.
+        let asum: Vec<f64> = (0..n).map(|i| avg.iter().zip(&w).map(|(a, wh)| wh * a[i]).sum()).collect();
+        let c = argmax(&asum)?;
+        // A maximum on the edge of the search range is the slope of something else, not a peak.
+        if c == 0 || c == n - 1 {
+            return None;
+        }
+        let half = (TRACK_HZ / step) as usize;
+        let (lo, hi) = (c.saturating_sub(half).max(1), (c + half).min(n - 2));
+        let mut sum = vec![0.0f64; n];
+        for ((_, r), &wh) in rows.iter().zip(&w) {
+            for (s, v) in sum.iter_mut().zip(r) {
+                *s += wh * v;
+            }
+        }
+        let k = lo + argmax(&sum[lo..=hi])?;
+        for (h, r) in &rows {
+            let x = &mut hit[*h as usize - 1];
+            *x += HIT_ALPHA * (r[k] * LN_2 - *x);
+        }
+        // Parabolic interpolation on the log of the sum.
+        let (a, b, c) = (sum[k - 1].max(1e-30).ln(), sum[k].max(1e-30).ln(), sum[k + 1].max(1e-30).ln());
         let den = a - 2.0 * b + c;
         let d = if den < 0.0 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) } else { 0.0 };
-        Some(((k as f64 + d) * SR / NFFT as f64, snr_db))
+        let sw: f64 = w.iter().sum();
+        let sw2: f64 = w.iter().map(|x| x * x).sum();
+        let capped: f64 = rows.iter().zip(&w).map(|((_, r), wh)| wh * r[k].min(CAP)).sum();
+        let z = (capped - sw / LN_2) / (sw2.sqrt() / LN_2);
+        let excess = z;
+        let (mut harmonic, mut top, mut used) = (1, 0.0, 0u8);
+        for (h, r) in &rows {
+            if r[k] > top {
+                top = r[k];
+                harmonic = *h;
+            }
+            if r[k] * LN_2 >= 2.0 {
+                used |= 1 << (h - 1);
+            }
+        }
+        // Error: a peak's frequency error is about bin / (π √(2 SNR)); SNR here is the summed
+        // signal power over the summed noise.
+        let snr = ((sum[k] * LN_2 - sw) / sw).max(1e-3);
+        let err_hz = (df / (std::f64::consts::PI * (2.0 * snr).sqrt())).clamp(0.0005, 0.02);
+        Some(Peak { hz: f0 + (k as f64 + d) * step, score_db: 10.0 * z.max(1e-3).log10(), excess, harmonic, used, err_hz })
     }
 
     fn analyse(&mut self) -> Option<EnfPoint> {
@@ -235,31 +417,38 @@ impl Enf {
             Some(n) => vec![n],
             None => vec![50.0, 60.0],
         };
-        let mut best: Option<EnfPoint> = None;
-        let mut current: Option<EnfPoint> = None;
-        for &nom in &nominals {
-            for h in 1..=HARMONICS {
-                let fc = nom * h as f64;
-                if let Some((f, snr)) = self.peak(fc, h as f64) {
-                    let p = EnfPoint { t: 0.0, hz: f / h as f64, nominal: nom, harmonic: h, snr_db: snr, ok: false };
-                    if best.is_none_or(|b| snr > b.snr_db) {
-                        best = Some(p);
-                    }
-                    if self.harmonic == Some(h) && self.nominal == Some(nom) {
-                        current = Some(p);
-                    }
-                }
+        // 50 or 60 Hz: the nominal whose capped excess is larger. Hum has energy at many
+        // multiples; a fan or whine is usually one strong tone, which the cap holds down.
+        let mut peaks = Vec::new();
+        for &n in &nominals {
+            if let Some(p) = self.combined(if n == 50.0 { 0 } else { 1 }, n) {
+                peaks.push((n, p));
             }
         }
-        // Stay on the harmonic in use unless another is clearly (3 dB) better: switching
-        // harmonics mid-run adds jumps that are not in the grid.
-        let mut p = match (current, best) {
-            (Some(c), Some(b)) if c.snr_db + 3.0 >= b.snr_db => c,
-            (_, b) => b?,
+        let (nom, pk) = peaks.into_iter().max_by(|a, b| a.1.excess.total_cmp(&b.1.excess))?;
+        let mut p = EnfPoint {
+            t: (self.total as f64 - win as f64 / 2.0) / SR,
+            hz: pk.hz,
+            nominal: nom,
+            harmonic: pk.harmonic,
+            snr_db: pk.score_db,
+            err_hz: pk.err_hz,
+            used: pk.used,
+            ok: false,
+            reject: None,
         };
-        p.t = (self.total as f64 - win as f64 / 2.0) / SR;
+        if p.snr_db < SNR_MIN_DB {
+            p.reject = Some(Reject::Weak);
+        }
         if self.nominal.is_none() && p.snr_db >= SNR_MIN_DB {
             let i = if p.nominal == 50.0 { 0 } else { 1 };
+            let (lt, lhz, len) = self.pre[i];
+            let dt = p.t - lt;
+            let len = if dt <= 2.0 + 1e-6 && (p.hz - lhz).abs() <= MAX_SLOPE_HZ_S * dt + 6.0 * p.err_hz { len + dt } else { 0.0 };
+            self.pre[i] = (p.t, p.hz, len);
+            if len < MIN_SECTION_S {
+                return Some(p);
+            }
             self.votes[i] += 1;
             let (a, b) = (self.votes[i], self.votes[1 - i]);
             if a >= 10 && a >= 3 * b {
@@ -270,10 +459,11 @@ impl Enf {
     }
 
     /// Judge a reading and add it to the current run; close the run if the hum went away.
-    /// A reading counts (`ok`) if it is clear (SNR) and continuous: within MAX_JUMP_HZ of the
-    /// median of the run's last readings. Others are kept for display, flagged, not used.
+    /// A reading counts (`ok`) if it is clear (score), on the decided grid, and keeps to the
+    /// slope rule against the median of the recent clear readings. Those recent readings
+    /// include rejected ones, so a track that really moved is followed again after a few
+    /// seconds. Others are kept for display, flagged with why, not used.
     fn track(&mut self, p: &mut EnfPoint) -> Option<EnfSegment> {
-        let clear = p.snr_db >= SNR_MIN_DB && self.nominal == Some(p.nominal);
         let mut out = None;
         if let Some(run) = &self.run {
             let last = run.pts.last().map_or(p.t, |q| q.t);
@@ -281,18 +471,30 @@ impl Enf {
                 out = self.close();
             }
         }
-        let continuous = match &self.run {
-            Some(run) if run.pts.len() >= 5 => {
-                let mut tail: Vec<f64> = run.pts.iter().rev().take(9).map(|q| q.hz).collect();
-                tail.sort_by(f64::total_cmp);
-                (p.hz - tail[tail.len() / 2]).abs() <= MAX_JUMP_HZ
+        if p.reject.is_none() && self.nominal != Some(p.nominal) {
+            p.reject = Some(Reject::Undecided);
+        }
+        if p.reject.is_none() {
+            if self.recent.len() >= 5 {
+                let med = |v: &mut Vec<f64>| {
+                    v.sort_by(f64::total_cmp);
+                    v[v.len() / 2]
+                };
+                let hz = med(&mut self.recent.iter().map(|r| r.1).collect());
+                let t = med(&mut self.recent.iter().map(|r| r.0).collect());
+                let err = med(&mut self.recent.iter().map(|r| r.2).collect());
+                if (p.hz - hz).abs() > MAX_SLOPE_HZ_S * (p.t - t).abs() + 3.0 * (p.err_hz + err) {
+                    p.reject = Some(Reject::Slope);
+                }
             }
-            _ => true,
-        };
-        p.ok = clear && continuous;
+            self.recent.push((p.t, p.hz, p.err_hz));
+            if self.recent.len() > 9 {
+                self.recent.remove(0);
+            }
+        }
+        p.ok = p.reject.is_none();
         if p.ok {
             self.run.get_or_insert(Run { pts: Vec::new() }).pts.push(*p);
-            self.harmonic = Some(p.harmonic);
         }
         out
     }
@@ -326,6 +528,31 @@ impl Enf {
     }
 }
 
+/// Section rule: readings marked `ok` that are not inside a run of at least MIN_SECTION_S of
+/// `ok` readings (gaps up to 2 s bridged) lose `ok` and get `Reject::Section`.
+pub fn sections(pts: &[EnfPoint]) -> Vec<EnfPoint> {
+    let mut out = pts.to_vec();
+    let mut i = 0;
+    while i < out.len() {
+        if !out[i].ok {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < out.len() && out[j + 1].ok && out[j + 1].t - out[j].t <= 2.0 + 1e-6 {
+            j += 1;
+        }
+        if out[j].t - out[i].t < MIN_SECTION_S {
+            for p in &mut out[i..=j] {
+                p.ok = false;
+                p.reject = Some(Reject::Section);
+            }
+        }
+        i = j + 1;
+    }
+    out
+}
+
 impl Module for Enf {
     fn name(&self) -> &'static str {
         manifest().id
@@ -338,9 +565,11 @@ impl Module for Enf {
     fn describe(&self) -> String {
         format!(
             "enf: 16 kHz → {SR:.0} Hz (FIR lowpass 1.3 kHz); every {HOP_S:.0} s a {WIN_S:.0} s Hann window, \
-             zero-padded FFT {NFFT} points ({:.4} Hz bins) + parabolic peak; harmonics 1–{HARMONICS} of 50/60 Hz, \
-             best SNR wins; clear hum = SNR ≥ {SNR_MIN_DB} dB; findings = runs ≥ {MIN_SEG_S:.0} s",
-            SR / NFFT as f64
+             zero-padded FFT {NFFT} points ({:.4} Hz bins); harmonics 1–{HARMONICS} of 50/60 Hz, each over its \
+             noise, summed (combined spectrum) + parabolic peak; clear hum = score ≥ {SNR_MIN_DB} dB; slope rule \
+             {:.1} mHz/s; findings = runs ≥ {MIN_SEG_S:.0} s",
+            SR / NFFT as f64,
+            MAX_SLOPE_HZ_S * 1000.0
         )
     }
 
@@ -442,4 +671,87 @@ mod tests {
         assert_eq!(m.nominal(), None);
         assert!(found.is_empty());
     }
+
+    /// Hum at 50 Hz drifting ±20 mHz over a minute: harmonic k+1 at `amps[k]`, plus a steady
+    /// 60 Hz tone (a fan) at `fan`, in white noise. 150 s.
+    fn mix(amps: [f64; 5], fan: f64, noise: f32) -> (Vec<f32>, impl Fn(f64) -> f64) {
+        let sr = INPUT_SR;
+        let f = |t: f64| 50.0 + 0.02 * (2.0 * std::f64::consts::PI * t / 60.0).sin();
+        let mut rng = Rng::new(3);
+        let mut ph = 0.0f64;
+        let x = (0..(150.0 * sr) as usize)
+            .map(|i| {
+                let t = i as f64 / sr;
+                ph += 2.0 * std::f64::consts::PI * f(t) / sr;
+                let mut v = fan * (2.0 * std::f64::consts::PI * 60.0 * t).sin();
+                for (k, a) in amps.iter().enumerate() {
+                    v += a * ((k + 1) as f64 * ph).sin();
+                }
+                v as f32 + noise * rng.normal() as f32
+            })
+            .collect();
+        (x, f)
+    }
+
+    /// Errors (Hz) of the readings that count after the section rule, sorted.
+    fn ok_errors(pts: &[EnfPoint], f: impl Fn(f64) -> f64) -> Vec<f64> {
+        let mut e: Vec<f64> = sections(pts)
+            .iter()
+            .filter(|p| p.ok)
+            .map(|p| (p.hz - (0..160).map(|k| f(p.t - 8.0 + k as f64 * 0.1)).sum::<f64>() / 160.0).abs())
+            .collect();
+        e.sort_by(f64::total_cmp);
+        e
+    }
+
+    /// No fundamental, weak 2nd, 3rd and 5th harmonics.
+    const WEAK: [f64; 5] = [0.0, 0.02, 0.015, 0.0, 0.01];
+
+    /// Weak hum deep in noise (measured: 22 readings, median 4.0 mHz, worst 9.7 mHz; the
+    /// detector before this one gave 33 at 6.5 mHz median, libhum 12 at 1.6 mHz).
+    #[test]
+    fn weak_hum_in_noise() {
+        let (x, f) = mix(WEAK, 0.0, 2.0);
+        let (m, pts, _) = run(&x);
+        assert_eq!(m.nominal(), Some(50.0));
+        let e = ok_errors(&pts, f);
+        assert!(e.len() >= 15, "readings {}", e.len());
+        assert!(e[e.len() / 2] < 0.005, "median {}", e[e.len() / 2]);
+        assert!(e[e.len() - 1] < 0.012, "worst {}", e[e.len() - 1]);
+    }
+
+    /// Weaker still: nothing wrong is reported (the detector before this one gave readings
+    /// ~108 mHz off here).
+    #[test]
+    fn weaker_hum_no_wrong_readings() {
+        for noise in [3.0, 5.0] {
+            let (x, f) = mix(WEAK, 0.0, noise);
+            let (_, pts, found) = run(&x);
+            let e = ok_errors(&pts, f);
+            assert!(e.iter().all(|&v| v < 0.01), "noise {noise}: {e:?}");
+            assert!(found.is_empty(), "noise {noise}");
+        }
+    }
+
+    /// A steady 60 Hz fan louder than any one harmonic of a 50 Hz hum: the hum's grid wins.
+    #[test]
+    fn fan_does_not_win_over_hum() {
+        let (x, f) = mix([0.02, 0.03, 0.01, 0.015, 0.01], 0.035, 0.3);
+        let (m, pts, _) = run(&x);
+        assert_eq!(m.nominal(), Some(50.0));
+        let e = ok_errors(&pts, f);
+        assert!(e.len() > 100 && e[e.len() / 2] < 0.002, "{} readings", e.len());
+    }
+
+    /// Every reading that doesn't count says why.
+    #[test]
+    fn rejected_readings_say_why() {
+        let (x, _) = mix(WEAK, 0.0, 2.0);
+        let (_, pts, _) = run(&x);
+        for p in sections(&pts) {
+            assert_eq!(p.ok, p.reject.is_none(), "{p:?}");
+        }
+        assert!(pts.iter().all(|p| p.err_hz >= 0.0005 && p.err_hz <= 0.02));
+    }
 }
+
