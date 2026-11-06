@@ -30,8 +30,14 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 `recordings\`. Nothing goes to system folders.
 
 In the workbench: right-click to add nodes, drag from an output to an input to wire (types must
-match). Nodes have no windows: each shows its data and controls on the canvas. With no saved project the
-canvas starts empty; `--new` opens an empty one (the old project is copied to `settings\project.bak.txt`).
+match). Nodes have no windows: each shows its data and controls on the canvas.
+
+Projects: the top bar shows the project's name beside **File**. **New** empties the canvas,
+**Open…** opens a project file and **Save as…** saves this one to a new file (both start in
+`app\projects\`); every project saves itself to its own file as you work. Until it is saved
+somewhere, the project is "untitled" and lives in `settings\project.txt`; New keeps a non-empty
+untitled one as `settings\project.bak.txt`. The project last opened opens at the next start
+(`settings\last_project.txt` says which). `--new` starts with an empty untitled project.
 
 Canvas keys and mouse:
 

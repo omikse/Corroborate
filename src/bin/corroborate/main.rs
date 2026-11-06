@@ -28,6 +28,7 @@ mod look_tests;
 mod canvas_tests;
 mod bus;
 mod canvas;
+mod project;
 mod layout;
 mod look;
 mod nodes;
@@ -199,13 +200,6 @@ struct NodeData {
     collapsed: bool,
 }
 
-fn project_file() -> Option<PathBuf> {
-    // Tests drive the workbench headless (see drive.rs) and never read or write a project.
-    if cfg!(test) {
-        return None;
-    }
-    Some(corroborate::home().join("settings").join("project.txt"))
-}
 
 fn results_dir() -> PathBuf {
     corroborate::home().join("results")
@@ -266,6 +260,9 @@ struct App {
     sel: canvas::Selection,
     /// Undo and redo steps (canvas.rs).
     history: canvas::History,
+    /// The project file chosen with Open or Save as; None is the untitled one,
+    /// settings\project.txt (project.rs).
+    project_path: Option<PathBuf>,
 }
 
 const NODE_W: f32 = 210.0;
@@ -308,6 +305,7 @@ impl App {
             scripts: Default::default(),
             sel: Default::default(),
             history: Default::default(),
+            project_path: None,
         }
     }
 
@@ -317,7 +315,9 @@ impl App {
             // --new: an empty canvas (the old project file is kept as project.bak.txt).
             let dir = corroborate::home().join("settings");
             let _ = std::fs::copy(dir.join("project.txt"), dir.join("project.bak.txt"));
+            project::remember(None);
         } else {
+            app.project_path = project::last_used();
             app.load_project();
         }
         if let Some(src) = start {
@@ -354,7 +354,7 @@ impl App {
     // ---------------- project file
 
     fn save_project(&mut self) {
-        if let Some(path) = project_file() {
+        if let Some(path) = self.project_file() {
             self.save_project_to(&path);
         }
         self.last_project_save = Instant::now();
@@ -404,7 +404,7 @@ impl App {
     }
 
     fn load_project(&mut self) -> bool {
-        let Some(text) = project_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
+        let Some(text) = self.project_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
         self.load_project_text(&text)
     }
 
@@ -1178,6 +1178,7 @@ impl App {
             ui.separator();
             {
                 // The graph runs always: changes restart it. Recording is in the Result record node.
+                self.file_menu(ui);
                 if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
                     self.run();
                 }

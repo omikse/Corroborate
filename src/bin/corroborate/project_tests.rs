@@ -241,3 +241,36 @@ fn old_names_are_saved_as_ids() {
         assert!(t.contains(want), "{want} not in\n{t}");
     }
 }
+
+/// File → Save as, New, Open: the project moves to its own file, New empties the canvas, Open
+/// brings the saved project back, and changes autosave to the opened file.
+#[test]
+fn new_open_save_as() {
+    let dir = out_dir().join("project_menu");
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("case one.txt");
+    let _ = std::fs::remove_file(&file);
+    let mut d = Drive::new();
+    let inv = d.app().add(Kind::InvertLocation, Pos2::new(40.0, 60.0));
+    let map = d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
+    d.app().wire(inv, "location", map, "location");
+    d.frames(3);
+    assert_eq!(d.app().project_name(), "untitled");
+    let before = describe_project(d.app());
+    d.app().save_project_as(file.clone());
+    assert_eq!(d.app().project_name(), "case one");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("wire|0|location|1|location"));
+    d.app().new_project();
+    d.frames(3);
+    assert!(d.app().nodes.is_empty(), "New empties the canvas");
+    assert_eq!(d.app().project_name(), "untitled");
+    d.shot("project_new");
+    d.app().open_project(file.clone());
+    d.frames(3);
+    assert_eq!(describe_project(d.app()), before, "Open brings it back");
+    assert_eq!(d.app().project_name(), "case one");
+    d.app().add(Kind::Map, Pos2::new(400.0, 400.0));
+    d.app().save_project();
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().filter(|l| l.starts_with("node|")).count(), 3, "saves go to the opened file");
+    d.shot("project_opened");
+}
