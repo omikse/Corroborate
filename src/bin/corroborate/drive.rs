@@ -250,3 +250,25 @@ fn area_timing() {
         println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
 }
+
+/// The default project's nodes do not overlap (at zoom 1, the canvas as a new user sees it).
+#[test]
+fn default_layout() {
+    let mut app = App::empty();
+    app.default_project();
+    // A bundled ADS-B check is only found next to a release build; lay one out as if it were.
+    if !app.nodes.iter().any(|n| matches!(n.kind, Kind::Plugin { .. })) {
+        app.add(Kind::Plugin { path: "adsb-check.exe".into() }, App::DEFAULT_ADSB_POS);
+    }
+    let rects: Vec<(String, Rect)> = (0..app.nodes.len()).map(|i| (app.nodes[i].label.clone(), app.node_rect(Pos2::ZERO, i))).collect();
+    for (l, r) in &rects {
+        println!("{l}: {:.0},{:.0} {:.0}x{:.0}", r.min.x, r.min.y, r.width(), r.height());
+    }
+    for (a, (la, ra)) in rects.iter().enumerate() {
+        for (lb, rb) in &rects[a + 1..] {
+            assert!(!ra.expand(8.0).intersects(*rb), "{la} and {lb} overlap");
+        }
+    }
+    let mut d = Drive::with(app);
+    d.shot("default_layout");
+}

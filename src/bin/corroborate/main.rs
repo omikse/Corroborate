@@ -389,14 +389,19 @@ impl App {
         );
     }
 
+    /// Where the default project puts the bundled ADS-B check (when there is one): under the
+    /// other sources. The layout reads left to right, sources then detectors then the record;
+    /// Planes, the widest, sits under ENF (the `default_layout` test keeps nodes apart).
+    const DEFAULT_ADSB_POS: Pos2 = Pos2::new(30.0, 440.0);
+
     fn default_project(&mut self) {
         let src = self.add(Kind::Source { input: String::new() }, Pos2::new(30.0, 40.0));
         let mut rows = corroborate::modules::manual::defaults();
         rows.push(("elevation".into(), String::new()));
-        let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 300.0));
-        let planes = self.add(Kind::Planes, Pos2::new(300.0, 30.0));
-        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(300.0, 140.0));
-        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(880.0, 60.0));
+        let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 200.0));
+        let planes = self.add(Kind::Planes, Pos2::new(460.0, 400.0));
+        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(460.0, 40.0));
+        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
 
         // Wire Planes
         self.wire(src, "audio", planes, "audio");
@@ -412,7 +417,7 @@ impl App {
         // ADS-B check if available
         let bundled = plugin_node::bundled();
         if let Some(adsb) = bundled.iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) {
-            let a = self.add(Kind::Plugin { path: adsb.clone() }, Pos2::new(300.0, 510.0));
+            let a = self.add(Kind::Plugin { path: adsb.clone() }, Self::DEFAULT_ADSB_POS);
             self.wire(src, "audio", a, "audio");
             self.wire(src, "time", a, "time");
             self.wire(man, "place", a, "place");

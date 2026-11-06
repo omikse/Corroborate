@@ -69,7 +69,7 @@ impl App {
 /// Height of one row on the canvas, unzoomed.
 const ROW_H: f32 = 22.0;
 
-/// The Manual data node on the canvas: one row per fact (key, value, ✕) and "+ field". Wired
+/// The Manual data node on the canvas: one row per fact (key, value, 🗙 to remove) and "+ field". Wired
 /// into a plugin, the facts are passed to it when it starts (coordinates as lat, lon; elevation
 /// in m).
 pub struct Look;
@@ -95,7 +95,7 @@ impl crate::look::NodeLook for Look {
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(k).hint_text("key").desired_width(key_w));
                     ui.add(egui::TextEdit::singleline(v).hint_text("value").desired_width(val_w));
-                    if ui.small_button("✕").clicked() {
+                    if ui.small_button("🗙").on_hover_text("remove this row").clicked() {
                         remove = Some(n);
                     }
                 });
