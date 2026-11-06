@@ -296,3 +296,49 @@ fn drag_from_a_dot_to_empty_canvas() {
     assert_eq!(d.app().graph.feeder(map, "location"), Some((inv, "location")), "{}", d.msg());
     d.shot("drop_menu_wired");
 }
+
+/// The Result record's inputs grow as they are wired: a free input dragged onto empty canvas
+/// adds a Value wired into it and a new free input appears; an output dragged onto empty canvas
+/// offers the record; each wired input takes its type's colour, shape and name, and stays open
+/// (optional).
+#[test]
+fn record_inputs_grow_with_the_new_wiring() {
+    let mut d = Drive::new();
+    let rec = d.app().add(Kind::ResultRecord { folder: String::new() }, Pos2::new(700.0, 60.0));
+    d.frames(3);
+    let ins = |d: &mut Drive| d.app().graph.nodes()[rec].spec.inputs.len();
+    assert_eq!(ins(&mut d), 1, "one free input");
+    let free = |d: &mut Drive| { let a = d.app(); let k = a.graph.nodes()[rec].spec.inputs.len() - 1; a.port_place(a.canvas_origin, rec, k, false).0 };
+    let c = free(&mut d);
+    drag(&mut d, c, c - Vec2::new(300.0, -200.0), PointerButton::Primary, Modifiers::NONE);
+    d.click("Value");
+    let v = d.app().nodes.len() - 1;
+    assert_eq!(d.app().graph.feeder(rec, "location"), None);
+    assert_eq!(d.app().graph.connected_inputs(rec).len(), 1, "the Value is wired into the record");
+    assert_eq!(ins(&mut d), 2, "a new free input appeared");
+    let p0 = d.app().graph.nodes()[rec].spec.inputs[0].clone();
+    let t = d.app().port_hover(rec, &p0, false);
+    assert!(t.contains("Location (value, input, optional)"), "{t}");
+
+    // From the Value's output onto empty canvas: the record is offered, and takes it again.
+    d.frames(3);
+    let (c, _) = { let a = d.app(); a.port_place(a.canvas_origin, v, 0, true) };
+    let offered: Vec<String> = d.app().drop_choices(crate::drop_menu::End::Out(v, 0)).into_iter().map(|(l, _)| l).collect();
+    assert!(offered.iter().any(|l| l == "Result record"), "{offered:?}");
+    drag(&mut d, c, c + Vec2::new(150.0, 60.0), PointerButton::Primary, Modifiers::NONE);
+    d.click("Result record");
+    let rec2 = d.app().nodes.len() - 1;
+    assert_eq!(d.app().graph.connected_inputs(rec2).len(), 1);
+    assert_eq!(d.app().graph.nodes()[rec2].spec.inputs.len(), 2);
+
+    // A third wire into the first record, from a list type: its own input, and one more free.
+    let ev = d.app().add(Kind::Value { ty: "event".into(), rows: vec![("1.t_start".into(), "2".into()), ("1.label".into(), "clap".into())] }, Pos2::new(30.0, 420.0));
+    d.frames(3);
+    let (a, b) = { let x = d.app(); (x.port_place(x.canvas_origin, ev, 0, true).0, x.port_place(x.canvas_origin, rec, 1, false).0) };
+    drag(&mut d, a, b, PointerButton::Primary, Modifiers::NONE);
+    assert_eq!(d.app().graph.connected_inputs(rec).len(), 2, "{}", d.msg());
+    assert_eq!(ins(&mut d), 3);
+    let json = d.app().result_json(&[v, ev, rec]);
+    assert!(json.contains("\"label\":\"clap\""), "{json}");
+    d.shot("record_inputs_grow");
+}
