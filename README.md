@@ -73,7 +73,7 @@ Every location signal either **adds** its cells (the place is here: green) or **
 
 ## Other code
 
-- `src/`: `core` (values with error and source), `graph` (typed wires), `timeline`,
+- `src/`: `core` (values with error and source), `graph` (typed wires),
   `sync` (clock offsets from shared events), `locate` (TDOA, Time Difference of Arrival),
   `timebase` (UTC anchors), `plugin` (protocol and JSON), `ingest` (ffmpeg, WAV).
 - `src/bin/corroborate/`: the workbench GUI. `src/main.rs`: the headless CLI (`corroborate-cli`).
