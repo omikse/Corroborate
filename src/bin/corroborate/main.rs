@@ -1253,7 +1253,7 @@ impl App {
         egui::Panel::bottom(if open { "timeline" } else { "timeline-closed" })
             .frame(egui::Frame::new().fill(PANEL).inner_margin(0.0))
             .resizable(open)
-            .default_size(170.0)
+            .default_size(125.0)
             .size_range(if open { 80.0..=700.0 } else { 0.0..=f32::INFINITY })
             .show(ui, |ui| {
             self.timeline_view(ui);

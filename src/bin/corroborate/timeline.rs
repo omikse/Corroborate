@@ -8,11 +8,14 @@
 //! - **Events**: a moment is a mark, a span is a bar. The clock's error is the margin around it,
 //!   fading out from the centre; the event's own measurement error is the whisker. Both at the
 //!   chosen confidence; red when the combined error is over the maximum.
+//! - **Sync list** (right of the rows): every anchor and link with who gave it, its error, its share
+//!   of the clock's error and an on/off switch; contradictions in red; a click picks the node.
+//!   Links are drawn between rows (offset ± error), anchors are pinned to the axis.
 //! - A click on a wire box on the canvas (`Evidence.focus`) opens and highlights that group's row.
 
 use super::*;
 use crate::clock_view::{groups_of, Confidence, Group};
-use corroborate::clock::{Clocks, Kind as Ck};
+use corroborate::clock::{Anchor as ClockAnchor, Clocks, Ev, Kind as Ck, Link};
 use corroborate::data::{Data, Event};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,6 +125,71 @@ impl Default for TlState {
     }
 }
 
+/// One line of the Sync list: a piece of evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncEntry {
+    pub ev: Ev,
+    pub key: String,
+    pub enabled: bool,
+    /// Over 3 sigma off the solution (with its residual in sigmas).
+    pub contradiction: Option<f64>,
+    pub title: String,
+    /// Who gave it, its error and its share of the clock's error.
+    pub detail: String,
+    /// Share of the variance of the clock it ties down (0..1); 0 when switched off.
+    pub share: f64,
+    /// Stable id of the node that gave it (`"manual"` for hand-made evidence).
+    pub from: String,
+}
+
+/// The Sync list: anchors, then links. `sig` is the display confidence in sigmas.
+pub fn sync_entries(anchors: &[ClockAnchor], links: &[Link], clocks: &Clocks, sig: f64, clock_name: &dyn Fn(&str) -> String, who: &dyn Fn(&str) -> String) -> Vec<SyncEntry> {
+    let share = |ev: Ev, clock: &str| -> f64 {
+        let info = clocks.get(clock);
+        let total: f64 = info.breakdown.iter().map(|b| b.1).sum();
+        info.breakdown.iter().find(|b| b.0 == ev).map_or(0.0, |b| if total > 0.0 { b.1 / total } else { 0.0 })
+    };
+    let mut out = Vec::new();
+    for (i, a) in anchors.iter().enumerate() {
+        let ev = Ev::Anchor(i);
+        let at = if a.t == 0.0 { String::new() } else { format!(" at {}", clock_view::rel_text(a.t)) };
+        let sh = share(ev, &a.clock);
+        out.push(SyncEntry {
+            ev,
+            key: a.key(),
+            enabled: a.enabled,
+            contradiction: clocks.contradictions.iter().find(|c| c.0 == ev).map(|c| c.1),
+            title: format!("anchor · {}{at} = {} UTC", clock_name(&a.clock), timebase::fmt_utc_clock(a.utc)),
+            detail: format!("{} · ± {} · {:.0}%", who(&a.from), clock_view::err_text(a.error_s * sig), sh * 100.0),
+            share: sh,
+            from: a.from.clone(),
+        });
+    }
+    for (i, l) in links.iter().enumerate() {
+        let ev = Ev::Link(i);
+        let sh = share(ev, if l.a == corroborate::clock::UTC { &l.b } else { &l.a });
+        out.push(SyncEntry {
+            ev,
+            key: l.key(),
+            enabled: l.enabled,
+            contradiction: clocks.contradictions.iter().find(|c| c.0 == ev).map(|c| c.1),
+            title: format!("link · {} {} = {} {}", clock_name(&l.a), clock_view::rel_text(l.t_a), clock_name(&l.b), clock_view::rel_text(l.t_b)),
+            detail: format!("{} · offset {:+.2} s ± {} · {:.0}%", who(&l.from), l.t_b - l.t_a, clock_view::err_text(l.error_s * sig), sh * 100.0),
+            share: sh,
+            from: l.from.clone(),
+        });
+    }
+    out
+}
+
+/// Distance from point `p` to the segment `a`–`b`.
+fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let (ab, ap) = (b - a, p - a);
+    let l2 = ab.length_sq();
+    let t = if l2 > 0.0 { (ap.dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (a + ab * t)).length()
+}
+
 impl App {
     /// Every event on an output of the project, with the node it came from, and the end of the
     /// audio heard so far on the timeline's axis.
@@ -169,6 +237,63 @@ impl App {
         (out, end)
     }
 
+    /// The Sync list: every anchor and link with an on/off switch.
+    fn sync_list(&mut self, ui: &mut egui::Ui, height: f32) {
+        let sig = self.ev.conf.sigmas();
+        let entries = {
+            let cn = |c: &str| self.clock_name(c);
+            let who = |f: &str| match (0..self.nodes.len()).find(|&i| self.nodes[i].uid == f) {
+                Some(i) => self.node_name(i),
+                None => f.to_string(),
+            };
+            sync_entries(&self.ev.anchors, &self.ev.links, &self.ev.clocks, sig, &cn, &who)
+        };
+        let bad = entries.iter().filter(|e| e.contradiction.is_some()).count();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Sync").strong().color(TEXT));
+            ui.colored_label(DIM, format!("{} anchors, {} links", self.ev.anchors.len(), self.ev.links.len()));
+            if bad > 0 {
+                ui.colored_label(Color32::from_rgb(235, 80, 80), format!("{bad} contradict"));
+            }
+        });
+        let mut toggle: Option<(String, bool)> = None;
+        let mut pick: Option<String> = None;
+        egui::ScrollArea::vertical().id_salt("sync-list").max_height((height - 20.0).max(50.0)).auto_shrink([false, true]).show(ui, |ui| {
+            if entries.is_empty() {
+                ui.colored_label(DIM, "no anchors or links yet: a source's time, a time wired into Planes, ADS-B matches");
+            }
+            for e in &entries {
+                ui.horizontal(|ui| {
+                    let mut on = e.enabled;
+                    if ui.checkbox(&mut on, "").on_hover_text("use this piece of evidence").changed() {
+                        toggle = Some((e.key.clone(), on));
+                    }
+                    let col = if e.contradiction.is_some() { Color32::from_rgb(235, 80, 80) } else if e.enabled { TEXT } else { DIM };
+                    ui.vertical(|ui| {
+                        let r = ui.add(egui::Label::new(egui::RichText::new(&e.title).size(11.5).color(col)).sense(Sense::click()));
+                        ui.label(egui::RichText::new(&e.detail).size(9.5).color(DIM));
+                        if let Some(z) = e.contradiction {
+                            ui.label(egui::RichText::new(format!("contradicts the rest ({z:+.1} sigma)")).size(9.5).color(Color32::from_rgb(235, 80, 80)));
+                        }
+                        if r.clicked() {
+                            pick = Some(e.from.clone());
+                        }
+                        r.on_hover_text("click to select the node that gave it");
+                    });
+                });
+                ui.separator();
+            }
+        });
+        if let Some((k, on)) = toggle {
+            self.set_evidence(&k, on);
+        }
+        if let Some(f) = pick {
+            if let Some(i) = (0..self.nodes.len()).find(|&i| self.nodes[i].uid == f) {
+                self.pick_only(i);
+            }
+        }
+    }
+
     /// The timeline panel's contents.
     pub(crate) fn timeline_view(&mut self, ui: &mut egui::Ui) {
         let (events, end) = self.timeline_events();
@@ -214,7 +339,6 @@ impl App {
             return;
         }
         ui.separator();
-
         // The visible rows: a group row, then its sources when open.
         enum Line<'a> {
             Group(&'a Row),
@@ -240,6 +364,13 @@ impl App {
         };
 
         let h = ruler_h + lane_h * lines.len().max(1) as f32 + 4.0;
+        let sync_w = (ui.available_width() * 0.4).min(320.0);
+        let rows_w = ui.available_width() - sync_w - 8.0;
+        let sync_h = h.max(70.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui(Vec2::new(sync_w, sync_h), |ui| self.sync_list(ui, sync_h));
+            ui.separator();
+            ui.allocate_ui(Vec2::new(rows_w, 0.0), |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             let (area, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click_and_drag());
             let p = ui.painter_at(area);
@@ -403,6 +534,81 @@ impl App {
                     }
                 }
             }
+            // Evidence on the rows: links between them, anchors pinned to the axis.
+            let mut ypos: BTreeMap<&str, (f32, f64)> = BTreeMap::new();
+            for (li, line) in lines.iter().enumerate() {
+                let cy = area.top() + ruler_h + li as f32 * lane_h + lane_h * 0.5;
+                match line {
+                    Line::Group(r) => {
+                        let sh = shift_of(&self.tls, r, v0);
+                        for s in &r.subs {
+                            ypos.entry(s.clock.as_str()).or_insert((cy, sh));
+                        }
+                    }
+                    Line::Sub(r, s) => {
+                        ypos.insert(s.clock.as_str(), (cy, shift_of(&self.tls, r, v0)));
+                    }
+                }
+            }
+            let red = Color32::from_rgb(235, 80, 80);
+            let mut ev_hover: Option<String> = None;
+            let hp = resp.hover_pos();
+            let pin = |p: &egui::Painter, x: f32, y: f32, c: Color32, err_px: f32| {
+                p.line_segment([Pos2::new(x - err_px, y), Pos2::new(x + err_px, y)], Stroke::new(1.0, c));
+                p.add(egui::Shape::convex_polygon(vec![Pos2::new(x, y - 5.0), Pos2::new(x + 5.0, y), Pos2::new(x, y + 5.0), Pos2::new(x - 5.0, y)], c, Stroke::NONE));
+            };
+            for (i, a) in self.ev.anchors.iter().enumerate() {
+                let (true, Some(&(y, _))) = (a.enabled, ypos.get(a.clock.as_str())) else { continue };
+                let c = if self.ev.clocks.is_contradiction(Ev::Anchor(i)) { red } else { Color32::from_rgb(240, 220, 120) };
+                let x = tx(a.utc);
+                if x < track.left() || x > track.right() {
+                    continue;
+                }
+                pin(&p, x, y, c, (tx(a.utc + a.error_s * sig) - x).max(2.0));
+                if hp.is_some_and(|h| (h - Pos2::new(x, y)).length() < 8.0) {
+                    ev_hover = Some(format!("anchor: {} at {} UTC ± {} ({})", self.clock_name(&a.clock), fmt_clock(a.utc), clock_view::err_text(a.error_s * sig), self.ev.conf.label()));
+                }
+            }
+            for (i, l) in self.ev.links.iter().enumerate() {
+                if !l.enabled {
+                    continue;
+                }
+                let c = if self.ev.clocks.is_contradiction(Ev::Link(i)) { red } else { Color32::from_rgb(150, 210, 255) };
+                let end = |clock: &str, t: f64| ypos.get(clock).map(|&(y, sh)| (tx(self.ev.clocks.get(clock).offset + t + sh), y));
+                let (ea, eb) = if l.a == corroborate::clock::UTC {
+                    (None, end(&l.b, l.t_b))
+                } else if l.b == corroborate::clock::UTC {
+                    (end(&l.a, l.t_a), None)
+                } else {
+                    (end(&l.a, l.t_a), end(&l.b, l.t_b))
+                };
+                // A link to UTC is an anchor on the other clock: pin it.
+                if let (Some((x, y)), None) | (None, Some((x, y))) = (ea, eb) {
+                    pin(&p, x, y, c, 3.0);
+                    continue;
+                }
+                let (Some(a), Some(b)) = (ea, eb) else { continue };
+                let err_px = (tx(v0 + l.error_s * sig) - tx(v0)).max(2.0);
+                p.line_segment([Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)], Stroke::new(1.5, alpha(c, 0.8)));
+                for (x, y) in [a, b] {
+                    pin(&p, x, y, c, err_px);
+                }
+                if hp.is_some_and(|h| seg_dist(h, Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)) < 5.0) {
+                    ev_hover = Some(format!(
+                        "link: {} {} = {} {}\noffset {:+.2} s ± {} ({})",
+                        self.clock_name(&l.a),
+                        clock_view::rel_text(l.t_a),
+                        self.clock_name(&l.b),
+                        clock_view::rel_text(l.t_b),
+                        l.t_b - l.t_a,
+                        clock_view::err_text(l.error_s * sig),
+                        self.ev.conf.label()
+                    ));
+                }
+            }
+            if ev_hover.is_some() && hover.is_none() {
+                hover = ev_hover;
+            }
             if rows.is_empty() {
                 p.text(Pos2::new(track.left() + 8.0, area.top() + ruler_h + 14.0), Align2::LEFT_CENTER, "findings from detectors and plugins appear here", FontId::proportional(11.0), DIM);
             }
@@ -418,6 +624,8 @@ impl App {
             if let Some(t) = hover {
                 resp.on_hover_text(t);
             }
+        });
+            });
         });
     }
 }

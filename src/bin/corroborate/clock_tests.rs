@@ -227,3 +227,29 @@ fn timeline_rows_order_and_placement() {
     assert!((rows[2].first().unwrap() + s - 1030.0).abs() < 1e-9);
     assert_eq!(default_shift(&rows, &rows[0], 0.0), 0.0);
 }
+
+#[test]
+fn sync_list_entries_share_and_contradictions() {
+    use corroborate::clock::{solve, Anchor, Link};
+    let an = |t: f64, utc: f64, from: &str, enabled: bool| Anchor { clock: "a".into(), t, utc, error_s: 1.0, from: from.into(), enabled };
+    let name = |c: &str| c.to_string();
+    let who = |f: &str| f.to_string();
+
+    // Two agreeing anchors share the error evenly; the link ties b to a.
+    let anchors = vec![an(0.0, 1000.0, "n1", true), an(10.0, 1010.0, "n2", true)];
+    let links = vec![Link { a: "a".into(), t_a: 5.0, b: "b".into(), t_b: 2.0, error_s: 1.0, from: "manual".into(), enabled: true }];
+    let clocks = solve(&anchors, &links);
+    let e = crate::timeline::sync_entries(&anchors, &links, &clocks, 2.0, &name, &who);
+    assert_eq!(e.len(), 3);
+    assert!(e.iter().all(|x| x.contradiction.is_none()));
+    assert!((e[0].share - e[1].share).abs() < 1e-6 && e[0].share > 0.0);
+    assert_eq!(e[2].from, "manual");
+    assert!(e[2].title.starts_with("link"));
+
+    // Disagreeing anchors are flagged; a switched-off one has no share.
+    let anchors = vec![an(0.0, 1000.0, "n1", true), an(0.0, 1100.0, "n2", true), an(0.0, 5000.0, "n3", false)];
+    let clocks = solve(&anchors, &[]);
+    let e = crate::timeline::sync_entries(&anchors, &[], &clocks, 2.0, &name, &who);
+    assert!(e[0].contradiction.is_some() && e[1].contradiction.is_some());
+    assert!(!e[2].enabled && e[2].share == 0.0 && e[2].contradiction.is_none());
+}

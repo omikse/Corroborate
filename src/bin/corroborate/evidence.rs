@@ -137,7 +137,6 @@ impl App {
 
     /// Switches a piece of evidence on or off (by its key); kept in the project and logged in the
     /// result file's setting changes.
-    #[allow(dead_code)] // the Sync list (timeline) uses it
     pub(crate) fn set_evidence(&mut self, key: &str, on: bool) {
         let was = !self.ev.off.contains(key);
         if was == on {

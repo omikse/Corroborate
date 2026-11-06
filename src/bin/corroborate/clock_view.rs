@@ -252,7 +252,7 @@ impl App {
         clock.to_string()
     }
 
-    fn node_name(&self, i: NodeId) -> String {
+    pub(crate) fn node_name(&self, i: NodeId) -> String {
         if self.nodes[i].label.is_empty() { self.graph.nodes()[i].spec.name.to_string() } else { self.nodes[i].label.clone() }
     }
 
