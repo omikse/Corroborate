@@ -439,18 +439,6 @@ impl App {
             self.graph.set_inputs(s, ins);
             self.graph.set_outputs(s, outs);
         }
-        // A SOURCER saved with its box emptied had kept its outputs and wires (they come back to
-        // life with the next source); an empty one loads with none, so give back the outputs
-        // its saved wires use: the usual set, with video when a wire takes it.
-        for s in 0..self.nodes.len() {
-            if matches!(&self.nodes[s].kind, Kind::Sourcer { input } if input.trim().is_empty()) {
-                let used: Vec<&str> = wires.iter().filter(|w| w.0 == s).map(|w| w.1.as_str()).collect();
-                if !used.is_empty() {
-                    let like = if used.contains(&"video") { "x.mkv" } else { "x.wav" };
-                    self.graph.set_outputs(s, corroborate::modules::sourcer::outputs(like));
-                }
-            }
-        }
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
                 if matches!(self.nodes[b].kind, Kind::ResultRecord { .. }) {

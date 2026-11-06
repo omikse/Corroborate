@@ -6,4 +6,38 @@ order = 1
 # Names older project files used for this module.
 aliases = ["source", "file", "stream", "mic"]
 role = "source-live"
-# Its outputs follow what it opens (audio, video, time, metadata…): made in code.
+
+# Text from another node replaces what is typed in the source box.
+[[input]]
+name = "text"
+kind = "text"
+
+# All four always exist; look.rhai shows them once a source is chosen, and video only for
+# sources with pictures (each output's `on`). A wired output is always shown.
+[[output]]
+name = "audio"
+kind = "audio"
+required = true
+
+[[output]]
+name = "time"
+kind = "time"
+required = true
+
+[[output]]
+name = "metadata"
+kind = "json"
+required = true
+
+[[output]]
+name = "video"
+kind = "video"
+required = true
+
+# A file, web page or stream URL, or `mic:<device>`.
+[[setting]]
+name = "source"
+type = "text"
+
+[look]
+status = false

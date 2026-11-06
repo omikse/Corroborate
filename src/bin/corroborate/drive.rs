@@ -192,13 +192,17 @@ pub fn tone_wav() -> PathBuf {
 
 // ---------------------------------------------------------------- scenarios
 
-/// SOURCER: a new node is two boxes with no outputs; typing a file gives outputs and a waveform.
+/// SOURCER: a new node is two boxes with its outputs hidden (look.rhai); typing a file shows
+/// audio, time and metadata (no video) and a waveform.
 #[test]
 fn sourcer() {
     let mut d = Drive::new();
     let s = d.app().add(Kind::Sourcer { input: String::new() }, Pos2::new(40.0, 40.0));
     d.frames(3);
-    assert!(d.app().graph.nodes()[s].spec.outputs.is_empty(), "a new SOURCER has no outputs");
+    let shown = |a: &App| -> Vec<&'static str> {
+        a.graph.nodes()[s].spec.outputs.iter().filter(|p| a.port_shown(s, p, true, &a.port_look(s, p))).map(|p| p.name).collect()
+    };
+    assert!(shown(d.app()).is_empty(), "a new SOURCER shows no outputs");
     println!("{}", d.dump());
     d.shot("sourcer_new");
 
@@ -206,12 +210,12 @@ fn sourcer() {
     d.type_into(0, &wav.to_string_lossy());
     let ok = d.wait_until(30.0, |app| app.nodes[s].state.lock().map(|st| st.audio_s > 2.0).unwrap_or(false));
     d.shot("sourcer_file");
-    assert!(!d.app().graph.nodes()[s].spec.outputs.is_empty(), "outputs appear with a source");
+    assert_eq!(shown(d.app()), ["audio", "time", "metadata"], "outputs appear with a source");
     assert!(ok, "the file decoded");
 }
 
 /// One of every node kind; then the canvas editors: a Manual field typed in, Combine switched
-/// to OR.
+/// to OR (its look.rhai's list), which is a logged setting change.
 #[test]
 fn all_nodes() {
     let mut d = Drive::new();
@@ -243,8 +247,12 @@ fn all_nodes() {
     d.type_into(new_value, "typed on the canvas");
     assert!(rows(&mut d).last().is_some_and(|(_, v)| v == "typed on the canvas"), "typing edits the new row: {:?}", rows(&mut d));
 
-    d.click("any may hold (OR)");
+    let r = { let a = d.app(); a.node_rect(a.canvas_origin, comb) };
+    d.h.query_all_by_role(A11y::ComboBox).find(|n| r.contains(n.rect().center())).expect("Combine's mode list").click();
+    d.frames(2);
+    d.click("any");
     assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: true }), "Combine switched to OR");
+    assert!(d.app().changes.iter().any(|c| c.node == comb && c.name == "mode" && c.new == "any"), "the change is logged");
     d.shot("all_nodes_edited");
 }
 

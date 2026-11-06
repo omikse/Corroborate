@@ -61,8 +61,8 @@ it as a grey placeholder with its settings and wires, and saves it back unchange
 
 To change one node, edit only its folder:
 - **Name, menu place:** `module.toml` (in `app\modules\<label>\` it takes effect while the program runs).
-- **Ports, settings:** `module.toml` (SOURCER's and Result record's ports follow what is opened or
-  wired, so theirs are made in `mod.rs`).
+- **Ports, settings:** `module.toml` (Result record's inputs follow what is wired, so they are
+  made in `mod.rs`).
 - **Look on the canvas, without touching code:**
   - `module.toml` `[look]`: the node's `size`, `fill`, corner `radius`, `status = false` to hide the
     status line; for each port (in its `[[input]]`/`[[output]]`, or `[look.ports.<name>]`): `side`
@@ -74,8 +74,8 @@ To change one node, edit only its folder:
     a map view, and `native()` for the module's own Rust drawing. Scripts only draw: they cannot
     add, remove or wire ports, and a wired port is always shown. A script runs only when what it
     reads changes, never while the canvas pans or zooms; one that fails shows its error on its own
-    node. The full list is at the top of `src/bin/corroborate/script.rs`; Invert location and Map
-    have one each.
+    node. The full list is at the top of `src/bin/corroborate/script.rs`; SOURCER, Combine
+    locations, Invert location and Map have one each.
   - In `app\modules\<label>\` both files take effect within a second of saving.
 - **Look in Rust:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
   `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls

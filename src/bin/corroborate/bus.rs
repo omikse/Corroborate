@@ -246,16 +246,13 @@ impl App {
     /// value changes nothing. A change is kept for the result file and saved with the project.
     pub(crate) fn set_setting(&mut self, i: NodeId, name: &str, value: &str) -> Result<(), String> {
         let label = self.nodes[i].label.clone();
-        let Kind::Module { m, settings } = &mut self.nodes[i].kind else { return Err(format!("{label} has no settings")) };
+        let m = self.manifest_of(i).ok_or(format!("{label} has no settings"))?;
         let v = m.setting(name).ok_or(format!("{} has no setting {name}", m.label))?.check(value)?;
-        let old = match settings.iter_mut().find(|(k, _)| k == name) {
-            Some((_, x)) if *x == v => return Ok(()),
-            Some((_, x)) => std::mem::replace(x, v.clone()),
-            None => {
-                settings.push((name.to_string(), v.clone()));
-                String::new()
-            }
-        };
+        let old = self.nodes[i].kind.settings().into_iter().find(|(k, _)| k == name).map(|(_, x)| x).unwrap_or_default();
+        if old == v {
+            return Ok(());
+        }
+        self.nodes[i].kind.put_setting(name, v.clone());
         self.changes.push(SettingChange { utc: timebase::now_unix(), node: i, label, name: name.to_string(), old, new: v });
         self.save_project();
         Ok(())

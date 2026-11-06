@@ -1,4 +1,4 @@
-//! The Combine locations node in the workbench: the area it gives and its AND / OR choice on the canvas.
+//! The Combine locations node in the workbench: the area it gives. Its look is look.rhai.
 //! Compiled into the `corroborate` program.
 
 use super::*;
@@ -31,21 +31,8 @@ impl App {
     }
 }
 
-/// The Combine node on the canvas: all must hold (AND) or any may (OR). The status line says
-/// what is left, or CONTRADICTION.
+/// The Combine node on the canvas: drawn by its look.rhai (the mode to pick); the status line
+/// says what is left, or CONTRADICTION.
 pub struct Look;
 
-impl crate::look::NodeLook for Look {
-    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
-        Vec2::new(standard.x + 130.0, standard.y)
-    }
-
-    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
-        let r = crate::look::content(app, ui, i);
-        let Kind::CombineLocations { any } = &mut app.nodes[i].kind else { return };
-        crate::look::area(ui, r, |ui| {
-            ui.radio_value(any, false, "all must hold (AND)");
-            ui.radio_value(any, true, "any may hold (OR)");
-        });
-    }
-}
+impl crate::look::NodeLook for Look {}

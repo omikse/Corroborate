@@ -5,8 +5,6 @@
 //! timeline marks, result file); it is compiled into the `corroborate` program, not this library.
 //! Plugin folders (adsb-check, meta) hold a separate program each, built as its own binary (see Cargo.toml).
 
-use crate::core::{Port, PortKind};
-
 // Folders are named by each module's label; the Rust module is its id in snake_case.
 #[path = "modules/Combine locations/mod.rs"]
 pub mod combine_locations;
@@ -51,9 +49,4 @@ pub fn builtin() -> Vec<&'static crate::module_manifest::Manifest> {
         embedded(&METADATA, include_str!("modules/Metadata/module.toml")),
         embedded(&ADSB_CHECK, include_str!("modules/ADS-B check/module.toml")),
     ]
-}
-
-/// Outputs of every source node: audio and time.
-pub fn source_outputs() -> Vec<Port> {
-    vec![Port::req("audio", PortKind::Audio), Port::req("time", PortKind::Time)]
 }

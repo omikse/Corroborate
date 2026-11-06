@@ -1,11 +1,11 @@
 //! SOURCER node: any source in one node. A file on disk (mp3, wav, video, anything ffmpeg reads),
 //! a web page (YouTube video or live stream, and the other sites yt-dlp knows), a direct stream
-//! URL (http, rtmp, rtsp, hls…) or a microphone. Its outputs follow what it opens: audio, time
-//! and metadata always, video when the source has pictures.
+//! URL (http, rtmp, rtsp, hls…) or a microphone. Its outputs (module.toml) are audio, time,
+//! metadata and video; it gives video only when the source has pictures.
 
-use crate::core::{NodeSpec, Port, PortKind, Role, SourceKind};
+use crate::core::NodeSpec;
 
-crate::builtin_manifest!();
+crate::builtin_manifest!(look);
 
 /// File endings that carry pictures.
 pub const VIDEO_EXT: [&str; 9] = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".ts", ".m3u8"];
@@ -27,33 +27,18 @@ pub fn has_video(text: &str) -> bool {
         || t.contains("youtu.be/")
 }
 
-/// Outputs for this source: audio, time, metadata, and video when it has pictures. Video is last
-/// so the other outputs keep their place when it comes and goes.
-pub fn outputs(text: &str) -> Vec<Port> {
-    // Nothing chosen yet: no outputs. They appear once a source is picked.
+/// Whether the source gives output `port` now: nothing until a source is chosen, video only
+/// when it has pictures. The ports are always there (module.toml); look.rhai hides those off.
+pub fn gives(text: &str, port: &str) -> bool {
     if text.trim().trim_matches('"').is_empty() {
-        return Vec::new();
+        return false;
     }
-    let mut v = crate::modules::source_outputs();
-    v.push(Port::req("metadata", PortKind::Json));
-    if has_video(text) {
-        v.push(Port::req("video", PortKind::Video));
-    }
-    v
+    port != "video" || has_video(text)
 }
 
-pub fn spec_for(text: &str) -> NodeSpec {
-    NodeSpec {
-        name: manifest().id,
-        role: Role::Source(SourceKind::Live),
-        // Text from another node replaces what is typed in the field.
-        inputs: vec![Port::opt("text", PortKind::Text)],
-        outputs: outputs(text),
-    }
-}
-
+/// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {
-    spec_for("")
+    manifest().spec()
 }
 
 #[cfg(test)]
@@ -67,10 +52,11 @@ mod tests {
         assert!(has_video(r"C:\a\clip.MP4"));
         assert!(has_video("https://www.youtube.com/watch?v=abc"));
         assert!(!has_video("https://radio.example/stream.mp3"));
-        assert!(outputs("").is_empty());
-        assert!(outputs("  ").is_empty());
-        assert!(spec().outputs.is_empty());
-        assert_eq!(outputs("x.wav").len(), 3);
-        assert_eq!(outputs("x.mkv").last().unwrap().name, "video");
+        assert!(!gives("", "audio") && !gives("  ", "time"));
+        assert!(gives("x.wav", "audio") && gives("x.wav", "metadata") && !gives("x.wav", "video"));
+        assert!(gives("x.mkv", "video"));
+        let names: Vec<&str> = spec().outputs.iter().map(|p| p.name).collect();
+        assert_eq!(names, ["audio", "time", "metadata", "video"], "video last, as older projects have it");
+        assert_eq!(spec().inputs[0].name, "text");
     }
 }

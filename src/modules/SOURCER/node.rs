@@ -1,11 +1,11 @@
 //! The SOURCER node in the workbench: on the canvas, a source box (file, web page or stream URL,
 //! with Browse) and a system streams box (microphones, virtual mics, capture cards), then what it
-//! gave so far, a waveform of the audio and, for sources with pictures, a video viewer. A new
-//! node shows only the two boxes and has no outputs until a source is chosen. Web pages are
+//! gave so far, a waveform of the audio and, for sources with pictures, a video viewer. Its size
+//! and which outputs show are its look.rhai: a new node is just the two boxes, outputs hidden. Web pages are
 //! resolved with yt-dlp. Compiled into the `corroborate` program.
 
 use super::*;
-use corroborate::modules::sourcer::{has_video, outputs};
+use corroborate::modules::sourcer::has_video;
 use std::io::Read;
 
 /// Direct media URLs ffmpeg opens itself; every other http(s) link is a page for yt-dlp.
@@ -252,18 +252,6 @@ const WAVE: Color32 = Color32::from_rgb(224, 164, 88);
 pub struct Look;
 
 impl crate::look::NodeLook for Look {
-    fn size(&self, app: &App, i: NodeId, _standard: Vec2) -> Vec2 {
-        let (empty, video) = match &app.nodes[i].kind {
-            Kind::Sourcer { input } => (input.trim().is_empty(), has_video(input)),
-            _ => (true, false),
-        };
-        // New default: just the two source boxes. Waveform and video come with a source.
-        if empty {
-            return Vec2::new(420.0, 130.0);
-        }
-        Vec2::new(420.0, 270.0 + if video { VIDEO_H + 8.0 } else { 0.0 })
-    }
-
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
         let r = crate::look::content(app, ui, i);
         let z = app.zoom;
@@ -335,18 +323,9 @@ impl crate::look::NodeLook for Look {
                 Err(e) => app.msg = e,
             }
         }
-        // Outputs follow the source once one is chosen. Emptying the field keeps the outputs as
-        // they are, so the wires stay and come back to life with the next source.
-        if !input.trim().is_empty() {
-            app.graph.set_outputs(i, outputs(&input));
-        }
         if let Kind::Sourcer { input: d } = &mut app.nodes[i].kind {
             *d = input;
         }
-    }
-
-    fn status(&self) -> bool {
-        false
     }
 }
 

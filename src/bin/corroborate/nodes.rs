@@ -87,7 +87,7 @@ impl Kind {
 
     pub fn spec(&self) -> NodeSpec {
         match self {
-            Kind::Sourcer { input } => sourcer::spec_for(input),
+            Kind::Sourcer { .. } => sourcer::spec(),
             Kind::ManualData { .. } => manual_data::spec(),
             Kind::Planes => planes::spec(),
             Kind::Enf { .. } => enf::spec(),
@@ -148,6 +148,30 @@ impl Kind {
         match self {
             Kind::ManualData { rows } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } => rows,
             _ => &[],
+        }
+    }
+
+    /// The node's settings by the names its module.toml declares (SOURCER's `source`, Combine's
+    /// `mode`, a bus module's own), as look.rhai and the setting editors see them. Manual's rows
+    /// are given too, for a script to read.
+    pub fn settings(&self) -> Vec<(String, String)> {
+        match self {
+            Kind::Sourcer { input } => vec![("source".into(), input.clone())],
+            Kind::CombineLocations { any } => vec![("mode".into(), combine_locations::mode(*any).into())],
+            _ => self.rows().to_vec(),
+        }
+    }
+
+    /// Set a declared setting to a value its check already passed.
+    pub fn put_setting(&mut self, name: &str, v: String) {
+        match (self, name) {
+            (Kind::Sourcer { input }, "source") => *input = v,
+            (Kind::CombineLocations { any }, "mode") => *any = combine_locations::is_any(&v),
+            (Kind::Module { settings, .. }, _) => match settings.iter_mut().find(|(k, _)| k == name) {
+                Some((_, x)) => *x = v,
+                None => settings.push((name.to_string(), v)),
+            },
+            _ => {}
         }
     }
 

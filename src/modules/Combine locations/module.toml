@@ -33,3 +33,13 @@ kind = "location"
 [[output]]
 name = "location"
 kind = "location"
+
+# all: every wired location must hold (AND). any: at least one may (OR).
+[[setting]]
+name = "mode"
+type = "choice"
+choices = ["all", "any"]
+default = "all"
+
+[look]
+size = [340, 132]

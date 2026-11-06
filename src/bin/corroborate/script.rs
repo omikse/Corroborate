@@ -32,7 +32,7 @@
 //!
 //! `node`: `label`, `collapsed`, `width`, `height` (the body, unzoomed), `settings` (name → value),
 //! `inputs` and `outputs` (each `name`, `kind`, `wired`; outputs also `value`, a line about what
-//! they hold, or `()`), `status`, `running`, `time` (seconds; read it only with `redraw`).
+//! they hold, or `()`, and `on`: whether the module gives it now), `status`, `running`, `time` (seconds; read it only with `redraw`).
 //!
 //! **Speed:** a script runs when what it reads changes (settings, wires, status, outputs,
 //! collapse), or at the `redraw` interval it asks for; its result is kept and drawn natively, so
@@ -262,9 +262,9 @@ impl App {
         node.insert("time".into(), t.into());
         (&n.label, n.collapsed, body.x.round() as i64, body.y.round() as i64).hash(&mut h);
         let mut settings = Map::new();
-        for (k, v) in n.kind.rows() {
-            settings.insert(k.as_str().into(), v.clone().into());
-            (k, v).hash(&mut h);
+        for (k, v) in n.kind.settings() {
+            (&k, &v).hash(&mut h);
+            settings.insert(k.into(), v.into());
         }
         node.insert("settings".into(), settings.into());
         let (status, running, rev) = {
@@ -300,8 +300,10 @@ impl App {
             .iter()
             .map(|p| {
                 let w = !self.graph.targets(i, p.name).is_empty();
-                (p.name, w).hash(&mut h);
+                let on = self.gives(i, p.name);
+                (p.name, w, on).hash(&mut h);
                 let mut m = port(p, w);
+                m.insert("on".into(), on.into());
                 let v = s.outbox.iter().find(|(o, _)| *o == p.name).map_or(Dynamic::UNIT, |(_, d)| bus::summary(d).into());
                 m.insert("value".into(), v);
                 m.into()
@@ -443,6 +445,15 @@ impl App {
         true
     }
 
+    /// Whether node `i` gives output `port` now (its `on` in look.rhai): a SOURCER gives nothing
+    /// until a source is chosen and video only for sources with pictures; others give every one.
+    pub(crate) fn gives(&self, i: NodeId, port: &str) -> bool {
+        match &self.nodes[i].kind {
+            Kind::Sourcer { input } => corroborate::modules::sourcer::gives(input, port),
+            _ => true,
+        }
+    }
+
     /// The location a node's map view shows: what is wired into its first location input, else
     /// its own.
     fn view_area(&self, i: NodeId) -> Option<Arc<Area>> {
@@ -457,15 +468,11 @@ impl App {
     /// A setting's editor at `r`: 0 a text box, 1 a checkbox, 2 a list of its choices. Values go
     /// through `set_setting` (checked) like the module's own editors.
     fn setting_widget(&mut self, ui: &mut egui::Ui, i: NodeId, name: &str, r: Rect, how: u8) {
-        let Kind::Module { m, settings } = &self.nodes[i].kind else {
+        let Some(s) = self.manifest_of(i).and_then(|m| m.setting(name).cloned()) else {
             ui.painter().text(r.min, Align2::LEFT_TOP, format!("no setting {name}"), FontId::proportional(10.5 * self.zoom), WARN);
             return;
         };
-        let Some(s) = m.setting(name).cloned() else {
-            ui.painter().text(r.min, Align2::LEFT_TOP, format!("no setting {name}"), FontId::proportional(10.5 * self.zoom), WARN);
-            return;
-        };
-        let cur = settings.iter().find(|(k, _)| k == name).map_or(s.default.clone(), |(_, v)| v.clone());
+        let cur = self.nodes[i].kind.settings().into_iter().find(|(k, _)| k == name).map_or(s.default.clone(), |(_, v)| v);
         let mut set = None;
         match how {
             1 => {

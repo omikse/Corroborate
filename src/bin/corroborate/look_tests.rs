@@ -38,7 +38,6 @@ fn manifest_moves_a_port() {
     let a = d.app();
     let src = a.add(Kind::Sourcer { input: crate::drive::tone_wav().to_string_lossy().into_owned() }, Pos2::new(30.0, 40.0));
     let n = a.add(module("bottom-audio", "[look]\nfill = \"#203040\"\nradius = 14\n[look.ports.audio]\nside = \"bottom\"\nat = 40\ndot = \"square\"\nlabel = \"outside\"", None), Pos2::new(560.0, 60.0));
-    assert!(d.wait_until(30.0, |a| !a.graph.nodes()[src].spec.outputs.is_empty()), "the source opened");
     d.app().wire(src, "audio", n, "audio");
     assert_eq!(d.app().graph.wires().len(), 1);
     d.frames(3);
