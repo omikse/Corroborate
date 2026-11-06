@@ -1,10 +1,12 @@
 # SOURCER (source)
 
-Any source in one node. Type or paste it, or Browse for a file:
+Any source in one node. A new node is two boxes and one input, with no outputs. Type or paste a source in the first box, or Browse for a file:
 - a file: mp3, wav, flac, ogg, m4a, video files, anything ffmpeg reads;
 - a web page: YouTube videos and live streams, and the other sites yt-dlp knows;
 - a direct stream URL: http(s) media files, HLS (`.m3u8`), rtmp, rtsp;
-- a microphone: pick it from **Mic ▾** (written `mic:<device>`).
+- a system stream: pick it in the second box, which lists every audio device ffmpeg sees (microphones, digital and virtual mics, capture cards). It is written `mic:<device>` into the source.
+
+System audio (what you hear) and per-application capture are not supported: they need WASAPI loopback, which does not go through ffmpeg.
 
 The line under the field says which of these it is. Web pages are resolved with yt-dlp, then ffmpeg
 decodes. Files, YouTube videos and media files on a server are read as recordings, as fast as they decode;
@@ -16,10 +18,11 @@ and kept there as evidence.
 Ports:
 - input `text` (optional): text from another node replaces what is typed in the field. No node gives
   text yet; when it is wired the node says so and uses the field.
-- outputs follow the source: `audio`, `time` and `metadata` always, and `video` when it has pictures
-  (video files, web pages, video streams). Wires keep their output by name when it changes.
+- outputs: none until a source is chosen, then `audio`, `time` and `metadata`, and `video` when it has
+  pictures (video files, web pages, video streams). Wires keep their output by name when it changes,
+  and emptying the source box keeps the outputs and wires as they are.
 
-On the canvas: status and UTC clock, the waveform (the whole recording, or the last 30 s when live;
+On the canvas: the two boxes, then (once there is a source) status and UTC clock, the waveform (the whole recording, or the last 30 s when live;
 hover it to read the time), and for video a viewer with one small frame a second (hover the waveform
 to scrub it). `metadata` is ffprobe's view of the source (format, duration, tags, streams) plus what
 was opened; it goes into the result JSON. While a live stream runs, the wires of the nodes it feeds

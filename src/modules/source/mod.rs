@@ -31,6 +31,10 @@ pub fn has_video(text: &str) -> bool {
 /// Outputs for this source: audio, time, metadata, and video when it has pictures. Video is last
 /// so the other outputs keep their place when it comes and goes.
 pub fn outputs(text: &str) -> Vec<Port> {
+    // Nothing chosen yet: no outputs. They appear once a source is picked.
+    if text.trim().trim_matches('"').is_empty() {
+        return Vec::new();
+    }
     let mut v = crate::modules::source_outputs();
     v.push(Port::req("metadata", PortKind::Json));
     if has_video(text) {
@@ -64,6 +68,9 @@ mod tests {
         assert!(has_video(r"C:\a\clip.MP4"));
         assert!(has_video("https://www.youtube.com/watch?v=abc"));
         assert!(!has_video("https://radio.example/stream.mp3"));
+        assert!(outputs("").is_empty());
+        assert!(outputs("  ").is_empty());
+        assert!(spec().outputs.is_empty());
         assert_eq!(outputs("x.wav").len(), 3);
         assert_eq!(outputs("x.mkv").last().unwrap().name, "video");
     }

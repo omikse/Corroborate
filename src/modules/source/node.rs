@@ -1,7 +1,8 @@
-//! The SOURCER node in the workbench: on the canvas, what to open (file, web page, stream URL or
-//! microphone), Browse and Microphone buttons, what it gave so far, a waveform of the audio and,
-//! for sources with pictures, a video viewer. Web pages are resolved with yt-dlp. Compiled into
-//! the `corroborate` program.
+//! The SOURCER node in the workbench: on the canvas, a source box (file, web page or stream URL,
+//! with Browse) and a system streams box (microphones, virtual mics, capture cards), then what it
+//! gave so far, a waveform of the audio and, for sources with pictures, a video viewer. A new
+//! node shows only the two boxes and has no outputs until a source is chosen. Web pages are
+//! resolved with yt-dlp. Compiled into the `corroborate` program.
 
 use super::*;
 use corroborate::modules::source::{has_video, outputs};
@@ -245,15 +246,22 @@ const WAVE_H: f32 = 64.0;
 const VIDEO_H: f32 = 150.0;
 const WAVE: Color32 = Color32::from_rgb(224, 164, 88);
 
-/// The SOURCER on the canvas: the path or URL with Browse and Microphone, its kind, status and
-/// clock, the waveform, and for sources with pictures the video viewer (hover the waveform to
-/// scrub it).
+/// The SOURCER on the canvas: the path or URL with Browse, the system streams box, its kind,
+/// status and clock, the waveform, and for sources with pictures the video viewer (hover the
+/// waveform to scrub it).
 pub struct Look;
 
 impl crate::look::NodeLook for Look {
     fn size(&self, app: &App, i: NodeId, _standard: Vec2) -> Vec2 {
-        let video = matches!(&app.nodes[i].kind, Kind::Source { input } if has_video(input));
-        Vec2::new(420.0, 240.0 + if video { VIDEO_H + 8.0 } else { 0.0 })
+        let (empty, video) = match &app.nodes[i].kind {
+            Kind::Source { input } => (input.trim().is_empty(), has_video(input)),
+            _ => (true, false),
+        };
+        // New default: just the two source boxes. Waveform and video come with a source.
+        if empty {
+            return Vec2::new(420.0, 130.0);
+        }
+        Vec2::new(420.0, 270.0 + if video { VIDEO_H + 8.0 } else { 0.0 })
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
@@ -271,8 +279,9 @@ impl crate::look::NodeLook for Look {
         let mut refresh = false;
         crate::look::area(ui, r, |ui| {
             ui.add_enabled_ui(fed_text.is_none(), |ui| {
+                // Row 1: file, YouTube link or stream URL. The text input overrides this box.
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut input).hint_text("file, YouTube link or stream URL").desired_width(r.width() - 140.0 * z));
+                    ui.add(egui::TextEdit::singleline(&mut input).hint_text("file, YouTube link or stream URL").desired_width(r.width() - 80.0 * z));
                     if ui.button("Browse…").clicked() {
                         if let Some(p) = rfd::FileDialog::new()
                             .add_filter("audio / video", &["mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "mp4", "mkv", "webm", "mov", "avi"])
@@ -282,19 +291,28 @@ impl crate::look::NodeLook for Look {
                             input = p.to_string_lossy().into_owned();
                         }
                     }
-                    let mic = ui.menu_button("Mic ▾", |ui| {
+                });
+                // Row 2: system streams. Every audio device ffmpeg lists: microphones, digital and
+                // virtual mics, capture cards. Picking one writes `mic:<device>` into the source.
+                let shown = match input.trim().strip_prefix(MIC) {
+                    Some(d) => d.trim().to_string(),
+                    None => "system stream: microphone, capture card…".to_string(),
+                };
+                let combo = egui::ComboBox::from_id_salt(format!("sys_stream_{i}"))
+                    .selected_text(shown)
+                    .width(r.width() - 8.0 * z)
+                    .show_ui(ui, |ui| {
                         if app.mics.is_empty() {
-                            ui.label("no microphones found");
+                            ui.label("no audio devices found");
                         }
                         for m in &app.mics {
-                            if ui.button(m).clicked() {
+                            let current = input.trim().strip_prefix(MIC).is_some_and(|d| d.trim() == m.as_str());
+                            if ui.selectable_label(current, m.as_str()).clicked() {
                                 input = format!("{MIC}{m}");
-                                ui.close();
                             }
                         }
                     });
-                    refresh = mic.response.clicked();
-                });
+                refresh = combo.response.clicked();
             });
             match (fed, &fed_text) {
                 (Some(f), None) => crate::look::line(ui, format!("text input: {} gives no text, the field is used", app.nodes[f].label), WARN),
@@ -302,11 +320,13 @@ impl crate::look::NodeLook for Look {
                 _ => crate::look::line(ui, kind_of(&input), DIM),
             }
             source_info(ui, &st);
-            ui.add_space(4.0 * z);
-            let cursor = waveform(ui, &st, z);
-            if has_video(&input) {
+            if !input.trim().is_empty() {
                 ui.add_space(4.0 * z);
-                video(app, ui, i, &st, cursor, z);
+                let cursor = waveform(ui, &st, z);
+                if has_video(&input) {
+                    ui.add_space(4.0 * z);
+                    video(app, ui, i, &st, cursor, z);
+                }
             }
         });
         if refresh {
@@ -315,7 +335,11 @@ impl crate::look::NodeLook for Look {
                 Err(e) => app.msg = e,
             }
         }
-        app.graph.set_outputs(i, outputs(&input));
+        // Outputs follow the source once one is chosen. Emptying the field keeps the outputs as
+        // they are, so the wires stay and come back to life with the next source.
+        if !input.trim().is_empty() {
+            app.graph.set_outputs(i, outputs(&input));
+        }
         if let Kind::Source { input: d } = &mut app.nodes[i].kind {
             *d = input;
         }
