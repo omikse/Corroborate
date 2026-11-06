@@ -2,3 +2,26 @@
 # "Plugin from file…" there makes one, and module folders with a program make the rest.
 id = "plugin"
 label = "Plugin"
+role = "detector"
+
+# Protocol 1 programs: audio in; the place and time wired in are passed as arguments.
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+
+[[input]]
+name = "place"
+kind = "location"
+
+[[input]]
+name = "time"
+kind = "time"
+
+[[output]]
+name = "findings"
+kind = "event"
+
+[[output]]
+name = "facts"
+kind = "json"

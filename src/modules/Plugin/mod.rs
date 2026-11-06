@@ -2,7 +2,7 @@
 //! Programs that ship with the tool are module folders of their own (Metadata, ADS-B check) whose
 //! module.toml names the program; Add node offers them from there.
 
-use crate::core::{NodeSpec, Port, PortKind, Role};
+use crate::core::NodeSpec;
 
 crate::builtin_manifest!();
 
@@ -36,11 +36,7 @@ mod tests {
     }
 }
 
+/// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {
-    NodeSpec {
-        name: manifest().id,
-        role: Role::Detector,
-        inputs: vec![Port::req("audio", PortKind::Audio), Port::opt("place", PortKind::Location), Port::opt("time", PortKind::Time)],
-        outputs: vec![Port::req("findings", PortKind::Event), Port::req("facts", PortKind::Json)],
-    }
+    manifest().spec()
 }

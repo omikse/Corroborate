@@ -3,6 +3,7 @@ label = "Combine locations"
 category = "Location"
 order = 1
 aliases = ["combine"]
+role = "transform"
 
 # Add node offers it twice: all locations must hold, or any may.
 [[variant]]
@@ -12,3 +13,23 @@ mode = "all"
 [[variant]]
 label = "Combine locations (any)"
 mode = "any"
+
+[[input]]
+name = "location 1"
+kind = "location"
+
+[[input]]
+name = "location 2"
+kind = "location"
+
+[[input]]
+name = "location 3"
+kind = "location"
+
+[[input]]
+name = "location 4"
+kind = "location"
+
+[[output]]
+name = "location"
+kind = "location"

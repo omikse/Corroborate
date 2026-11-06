@@ -13,7 +13,7 @@
 //! frequency is decided by vote once the hum is clear. Runs of clear readings of at least
 //! 30 s become findings.
 
-use crate::core::{NodeSpec, Port, PortKind, Role};
+use crate::core::NodeSpec;
 use crate::ingest::Resampler;
 use crate::module::{Finding, Module, INPUT_SR};
 use crate::timebase::{fmt_utc, json_escape, Anchor};
@@ -24,14 +24,9 @@ use std::sync::Arc;
 crate::builtin_manifest!();
 
 /// The node's ports: the one definition, used by the workbench and by `Module::spec`.
+/// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {
-    NodeSpec {
-        name: manifest().id,
-        role: Role::Detector,
-        // The grid data is chosen inside the node; the hum runs go to the timeline and result file.
-        inputs: vec![Port::req("audio", PortKind::Audio)],
-        outputs: vec![Port::req("location", PortKind::Location)],
-    }
+    manifest().spec()
 }
 
 const SR: f64 = 4000.0;

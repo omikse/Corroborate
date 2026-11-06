@@ -10,19 +10,15 @@ pub mod spectro;
 
 use detect::{Config, Detector, Event};
 use crate::ingest::Resampler;
-use crate::core::{NodeSpec, Port, PortKind, Role};
+use crate::core::NodeSpec;
 use crate::module::{Finding, Module, INPUT_SR};
 
 crate::builtin_manifest!();
 
 /// The node's ports: the one definition, used by the workbench and by `Module::spec`.
+/// Its ports and role: its module.toml.
 pub fn spec() -> NodeSpec {
-    NodeSpec {
-        name: manifest().id,
-        role: Role::Detector,
-        inputs: vec![Port::req("audio", PortKind::Audio)],
-        outputs: vec![Port::req("aircrafts", PortKind::Event)],
-    }
+    manifest().spec()
 }
 
 pub struct Planes {

@@ -2,3 +2,9 @@ id = "result-record"
 label = "Result record"
 category = "Output"
 aliases = ["record"]
+role = "record"
+# Its inputs take anything and grow as they are wired (made in code: "in 1", "in 2", …).
+
+[[output]]
+name = "location"
+kind = "location"

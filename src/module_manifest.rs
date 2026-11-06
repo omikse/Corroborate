@@ -10,14 +10,34 @@
 //! aliases = ["old-name"]       # names older project files used
 //! programs = ["x-helper.exe"]  # other programs of the module, kept in its folder
 //!
+//! role = "detector"            # source-file|source-live|reference|detector|transform|solver|record|view
+//!
+//! [[input]]                    # what can be wired in; kinds: audio video time location track
+//! name = "audio"               # event file text json any
+//! kind = "audio"
+//! required = true              # must be wired for the module to run (default false)
+//!
+//! [[output]]                   # what it gives
+//! name = "location"
+//! kind = "location"
+//!
+//! [[setting]]                  # a value the person sets on the node: the only way the GUI
+//! name = "threshold"           # changes processing. type: text|path|number|bool|choice
+//! type = "number"
+//! default = 0.5
+//! min = 0                      # number: its range; choice: choices = ["a", "b"]
+//! max = 1
+//!
 //! [processing]
 //! program = "adsb-check.exe"   # a separate program speaking the plugin protocol
+//! protocol = 2                 # 1: audio in, findings out (default); 2: the data bus (src/plugin.rs)
 //!
 //! [[variant]]                  # offered more than once in Add node, each with its own settings
 //! label = "Combine locations (any)"
 //! mode = "any"
 //! ```
 
+use crate::core::{NodeSpec, Port, PortKind, Role, SourceKind};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -30,6 +50,101 @@ pub const CATEGORIES: [&str; 7] = ["Sources", "Detectors", "Data", "Plugins", "O
 pub struct Variant {
     pub label: String,
     pub settings: Vec<(String, String)>,
+}
+
+/// What a setting holds; every value written to it is checked against this.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingType {
+    Text,
+    Path,
+    Number { min: Option<f64>, max: Option<f64> },
+    Bool,
+    Choice(Vec<String>),
+}
+
+/// A value the person sets on a node: the only channel from the GUI to processing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Setting {
+    pub name: String,
+    pub ty: SettingType,
+    pub default: String,
+}
+
+impl Setting {
+    /// The value as it will be used, or why it is refused.
+    pub fn check(&self, v: &str) -> Result<String, String> {
+        let v = v.trim();
+        match &self.ty {
+            SettingType::Text | SettingType::Path => Ok(v.to_string()),
+            SettingType::Number { min, max } => {
+                let x: f64 = v.parse().map_err(|_| format!("{}: \"{v}\" is not a number", self.name))?;
+                if !x.is_finite() || min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) {
+                    let lo = min.map_or("…".into(), |m| m.to_string());
+                    let hi = max.map_or("…".into(), |m| m.to_string());
+                    return Err(format!("{}: {v} is outside {lo} to {hi}", self.name));
+                }
+                Ok(v.to_string())
+            }
+            SettingType::Bool => match v {
+                "true" | "false" => Ok(v.to_string()),
+                _ => Err(format!("{}: must be true or false", self.name)),
+            },
+            SettingType::Choice(c) => {
+                if c.iter().any(|x| x == v) {
+                    Ok(v.to_string())
+                } else {
+                    Err(format!("{}: \"{v}\" is not one of {}", self.name, c.join(", ")))
+                }
+            }
+        }
+    }
+}
+
+/// A port kind by its module.toml name.
+pub fn port_kind(s: &str) -> Option<PortKind> {
+    Some(match s {
+        "audio" => PortKind::Audio,
+        "video" => PortKind::Video,
+        "time" => PortKind::Time,
+        "location" => PortKind::Location,
+        "track" => PortKind::Track,
+        "event" => PortKind::Event,
+        "file" => PortKind::File,
+        "text" => PortKind::Text,
+        "json" => PortKind::Json,
+        "any" => PortKind::Any,
+        _ => return None,
+    })
+}
+
+/// The module.toml name of a port kind.
+pub fn kind_id(k: PortKind) -> &'static str {
+    match k {
+        PortKind::Audio => "audio",
+        PortKind::Video => "video",
+        PortKind::Time => "time",
+        PortKind::Location => "location",
+        PortKind::Track => "track",
+        PortKind::Event => "event",
+        PortKind::File => "file",
+        PortKind::Text => "text",
+        PortKind::Json => "json",
+        PortKind::Any => "any",
+    }
+}
+
+fn role(s: &str) -> Option<Role> {
+    Some(match s {
+        "source-file" => Role::Source(SourceKind::File),
+        "source-live" => Role::Source(SourceKind::Live),
+        "reference" => Role::Source(SourceKind::Reference),
+        "detector" => Role::Detector,
+        "transform" => Role::Transform,
+        "solver" => Role::Solver,
+        "record" => Role::Record,
+        "view" => Role::View,
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +161,28 @@ pub struct Manifest {
     pub programs: Vec<String>,
     /// The folder it was found in; None for a module built into the program.
     pub folder: Option<PathBuf>,
+    pub role: Role,
+    pub inputs: Vec<Port>,
+    pub outputs: Vec<Port>,
+    pub settings: Vec<Setting>,
+    /// How its program talks: 1 audio in, findings out; 2 the data bus (ports and settings).
+    pub protocol: u32,
+}
+
+impl Manifest {
+    /// The node it makes: its id, role and declared ports.
+    pub fn spec(&self) -> NodeSpec {
+        NodeSpec { name: self.id, role: self.role, inputs: self.inputs.clone(), outputs: self.outputs.clone() }
+    }
+
+    pub fn setting(&self, name: &str) -> Option<&Setting> {
+        self.settings.iter().find(|s| s.name == name)
+    }
+
+    /// Settings as they start: each declared one at its default.
+    pub fn default_settings(&self) -> Vec<(String, String)> {
+        self.settings.iter().map(|s| (s.name.clone(), s.default.clone())).collect()
+    }
 }
 
 /// A name that lives as long as the program, kept once however often it is asked for. Ports and
@@ -89,15 +226,93 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         Some(toml::Value::Integer(n)) => Some(*n),
         Some(_) => return Err("`order` must be a whole number".into()),
     };
-    let program = match t.get("processing") {
-        None => None,
-        Some(toml::Value::Table(p)) => match p.get("program") {
-            None => None,
-            Some(toml::Value::String(s)) => Some(s.clone()),
-            Some(_) => return Err("`processing.program` must be text in quotes".into()),
-        },
+    let (program, protocol) = match t.get("processing") {
+        None => (None, 1),
+        Some(toml::Value::Table(p)) => {
+            let program = match p.get("program") {
+                None => None,
+                Some(toml::Value::String(s)) => Some(s.clone()),
+                Some(_) => return Err("`processing.program` must be text in quotes".into()),
+            };
+            let protocol = match p.get("protocol") {
+                None => 1,
+                Some(toml::Value::Integer(n @ 1..=2)) => *n as u32,
+                Some(_) => return Err("`processing.protocol` must be 1 or 2".into()),
+            };
+            (program, protocol)
+        }
         Some(_) => return Err("`processing` must be a [processing] section".into()),
     };
+    let role = match string("role")? {
+        None => Role::Transform,
+        Some(r) => role(&r).ok_or(format!("`role` \"{r}\" must be one of source-file, source-live, reference, detector, transform, solver, record, view"))?,
+    };
+    let tables = |k: &str| -> Result<Vec<&toml::Table>, String> {
+        match t.get(k) {
+            None => Ok(Vec::new()),
+            Some(toml::Value::Array(a)) => a.iter().map(|x| x.as_table().ok_or(format!("each [[{k}]] must be a section"))).collect(),
+            Some(_) => Err(format!("`{k}` must be [[{k}]] sections")),
+        }
+    };
+    let ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
+        let mut v: Vec<Port> = Vec::new();
+        for p in tables(k)? {
+            let name = p.get("name").and_then(|x| x.as_str()).ok_or(format!("a [[{k}]] has no `name`"))?;
+            let kind = p.get("kind").and_then(|x| x.as_str()).ok_or(format!("[[{k}]] {name} has no `kind`"))?;
+            let kind = port_kind(kind).ok_or(format!("[[{k}]] {name}: kind \"{kind}\" must be one of audio, video, time, location, track, event, file, text, json, any"))?;
+            let required = match p.get("required") {
+                None => req_default,
+                Some(toml::Value::Boolean(b)) => *b,
+                Some(_) => return Err(format!("[[{k}]] {name}: `required` must be true or false")),
+            };
+            if v.iter().any(|q| q.name == name) {
+                return Err(format!("[[{k}]] {name} is declared twice"));
+            }
+            v.push(Port { name: intern(name), kind, required });
+        }
+        Ok(v)
+    };
+    let inputs = ports("input", false)?;
+    let outputs = ports("output", true)?;
+    let mut settings: Vec<Setting> = Vec::new();
+    for s in tables("setting")? {
+        let name = s.get("name").and_then(|x| x.as_str()).ok_or("a [[setting]] has no `name`")?.to_string();
+        let num = |k: &str| -> Result<Option<f64>, String> {
+            match s.get(k) {
+                None => Ok(None),
+                Some(toml::Value::Integer(n)) => Ok(Some(*n as f64)),
+                Some(toml::Value::Float(f)) => Ok(Some(*f)),
+                Some(_) => Err(format!("[[setting]] {name}: `{k}` must be a number")),
+            }
+        };
+        let ty = match s.get("type").and_then(|x| x.as_str()).unwrap_or("text") {
+            "text" => SettingType::Text,
+            "path" => SettingType::Path,
+            "number" => SettingType::Number { min: num("min")?, max: num("max")? },
+            "bool" => SettingType::Bool,
+            "choice" => SettingType::Choice(strings(s.get("choices"), "choices")?),
+            other => return Err(format!("[[setting]] {name}: type \"{other}\" must be text, path, number, bool or choice")),
+        };
+        let default = match s.get("default") {
+            None => match &ty {
+                SettingType::Number { min, .. } => min.unwrap_or(0.0).to_string(),
+                SettingType::Bool => "false".into(),
+                SettingType::Choice(c) => c.first().cloned().unwrap_or_default(),
+                _ => String::new(),
+            },
+            Some(toml::Value::String(x)) => x.clone(),
+            Some(toml::Value::Integer(n)) => n.to_string(),
+            Some(toml::Value::Float(f)) => f.to_string(),
+            Some(toml::Value::Boolean(b)) => b.to_string(),
+            Some(_) => return Err(format!("[[setting]] {name}: `default` must be text, a number or true/false")),
+        };
+        let setting = Setting { name: name.clone(), ty, default };
+        setting.check(&setting.default).map_err(|e| format!("[[setting]] default: {e}"))?;
+        if settings.iter().any(|q| q.name == name) {
+            return Err(format!("[[setting]] {name} is declared twice"));
+        }
+        settings.push(setting);
+    }
     let mut variants = Vec::new();
     match t.get("variant") {
         None => {}
@@ -134,6 +349,11 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         program,
         programs: strings(t.get("programs"), "programs")?,
         folder: None,
+        role,
+        inputs,
+        outputs,
+        settings,
+        protocol,
     })
 }
 
@@ -218,12 +438,64 @@ mod tests {
             program: None,
             programs: vec![],
             folder: None,
+            role: Role::Transform,
+            inputs: vec![],
+            outputs: vec![],
+            settings: vec![],
+            protocol: 1,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];
         let cats = by_category(&all);
         let names: Vec<&str> = cats.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(names, ["Sources", "View", "Checks", "Zeta"]);
         assert_eq!(cats[0].1.iter().map(|m| m.id).collect::<Vec<_>>(), ["s1", "s2"]);
+    }
+
+    #[test]
+    fn ports_and_settings() {
+        let m = parse(
+            r#"id = "x"
+label = "X"
+role = "detector"
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+[[input]]
+name = "place"
+kind = "location"
+[[output]]
+name = "claps"
+kind = "event"
+[[setting]]
+name = "level"
+type = "number"
+default = 0.5
+min = 0
+max = 1
+[[setting]]
+name = "mode"
+type = "choice"
+choices = ["fast", "slow"]
+[processing]
+program = "x.exe"
+protocol = 2
+"#,
+        )
+        .unwrap();
+        let s = m.spec();
+        assert_eq!(s.role, Role::Detector);
+        assert_eq!(s.inputs, [Port::req("audio", PortKind::Audio), Port::opt("place", PortKind::Location)]);
+        assert_eq!(s.outputs, [Port::req("claps", PortKind::Event)]);
+        assert_eq!(m.protocol, 2);
+        assert_eq!(m.default_settings(), [("level".to_string(), "0.5".to_string()), ("mode".to_string(), "fast".to_string())]);
+        let level = m.setting("level").unwrap();
+        assert_eq!(level.check(" 0.7 "), Ok("0.7".into()));
+        assert!(level.check("2").unwrap_err().contains("outside"));
+        assert!(level.check("loud").unwrap_err().contains("not a number"));
+        assert!(m.setting("mode").unwrap().check("medium").unwrap_err().contains("fast, slow"));
+        assert!(parse("id = \"x\"\nlabel = \"X\"\n[[output]]\nname = \"a\"\nkind = \"smell\"").unwrap_err().contains("smell"));
+        assert!(parse("id = \"x\"\nlabel = \"X\"\n[[setting]]\nname = \"n\"\ntype = \"number\"\ndefault = 5\nmax = 1").unwrap_err().contains("outside"));
     }
 
     #[test]

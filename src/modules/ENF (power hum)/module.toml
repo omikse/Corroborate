@@ -4,3 +4,14 @@ category = "Detectors"
 order = 2
 # Programs of this module, copied into its folder by run.cmd (planes-view uses enf-plugin).
 programs = ["enf-plugin.exe"]
+role = "detector"
+
+# The grid data is chosen inside the node; the hum runs go to the timeline and result file.
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+
+[[output]]
+name = "location"
+kind = "location"

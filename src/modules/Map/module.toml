@@ -1,3 +1,9 @@
 id = "map"
 label = "Map"
 category = "View"
+role = "view"
+
+[[input]]
+name = "location"
+kind = "location"
+required = true

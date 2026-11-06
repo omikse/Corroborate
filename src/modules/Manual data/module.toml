@@ -3,3 +3,16 @@ label = "Manual data"
 category = "Sources"
 order = 2
 aliases = ["manual"]
+role = "reference"
+
+[[output]]
+name = "place"
+kind = "location"
+
+[[output]]
+name = "time"
+kind = "time"
+
+[[output]]
+name = "facts"
+kind = "json"

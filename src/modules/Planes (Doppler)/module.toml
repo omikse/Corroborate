@@ -2,3 +2,13 @@ id = "planes"
 label = "Planes (Doppler)"
 category = "Detectors"
 order = 1
+role = "detector"
+
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+
+[[output]]
+name = "aircrafts"
+kind = "event"

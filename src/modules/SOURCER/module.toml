@@ -5,3 +5,5 @@ category = "Sources"
 order = 1
 # Names older project files used for this module.
 aliases = ["source", "file", "stream", "mic"]
+role = "source-live"
+# Its outputs follow what it opens (audio, video, time, metadata…): made in code.

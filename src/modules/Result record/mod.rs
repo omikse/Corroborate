@@ -1,7 +1,7 @@
 //! Result record node: takes anything wired into it, saves what is static at once and records
 //! what streams until recording ends, and gives the location its location inputs agree on.
 
-use crate::core::{NodeSpec, Port, PortKind, Role};
+use crate::core::{NodeSpec, Port, PortKind};
 
 crate::builtin_manifest!();
 
@@ -13,7 +13,7 @@ pub const INPUTS: [&str; 24] = [
 
 /// A fresh record: one free input.
 pub fn spec() -> NodeSpec {
-    NodeSpec { name: manifest().id, role: Role::Record, inputs: vec![Port::opt(INPUTS[0], PortKind::Any)], outputs: vec![Port::req("location", PortKind::Location)] }
+    NodeSpec { inputs: vec![Port::opt(INPUTS[0], PortKind::Any)], ..manifest().spec() }
 }
 
 /// Kinds that keep arriving while a source runs: recorded from Record until End recording.
@@ -40,6 +40,7 @@ pub fn kind_name(k: PortKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Role;
     use crate::graph::Graph;
 
     /// Wiring into the free input adds the next one; unwiring packs them again.

@@ -3,3 +3,13 @@ label = "Invert location"
 category = "Location"
 order = 2
 aliases = ["invert"]
+role = "transform"
+
+[[input]]
+name = "location"
+kind = "location"
+required = true
+
+[[output]]
+name = "location"
+kind = "location"
