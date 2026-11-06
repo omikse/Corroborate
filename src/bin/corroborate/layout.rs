@@ -25,10 +25,6 @@ pub fn wire_points(a: Pos2, sa: Side, b: Pos2, sb: Side) -> [Pos2; 4] {
     [a, a + normal(sa) * d, b + normal(sb) * d, b]
 }
 
-fn color(c: [u8; 3]) -> Color32 {
-    Color32::from_rgb(c[0], c[1], c[2])
-}
-
 impl App {
     /// Module manifests by id, read again each second (so a module.toml or look.rhai changed in
     /// the modules folder shows at once), plus those of modules carried by nodes.
@@ -38,6 +34,7 @@ impl App {
             return;
         }
         self.looks_at = Instant::now();
+        nodes::refresh_types();
         let mut map: HashMap<&'static str, Arc<Manifest>> = nodes::modules().into_iter().map(|m| (m.id, Arc::new(m))).collect();
         for n in &self.nodes {
             if let Kind::Module { m, .. } = &n.kind {
@@ -132,12 +129,12 @@ impl App {
     }
 }
 
-/// A port's dot and name. `filled` false draws a ring (an optional input not yet wired).
+/// A port's dot and name. Its colour and shape are its type's; `filled` means needed to run (a
+/// required input), else it is drawn open.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_port(p: &egui::Painter, c: Pos2, side: Side, look: &PortLook, col: Color32, filled: bool, name: &str, text_col: Color32, z: f32) {
-    let col = look.color.map_or(col, color);
+pub fn draw_port(p: &egui::Painter, c: Pos2, side: Side, look: &PortLook, col: Color32, shape: DotShape, filled: bool, name: &str, text_col: Color32, z: f32) {
     let s = look.dot_size.unwrap_or(5.0) * z;
-    match look.dot.unwrap_or(DotShape::Circle) {
+    match shape {
         DotShape::Circle if filled => {
             p.circle_filled(c, s, col);
         }

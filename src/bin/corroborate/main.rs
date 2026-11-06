@@ -86,15 +86,20 @@ const SEL: Color32 = Color32::from_rgb(95, 179, 161);
 const GOOD: Color32 = Color32::from_rgb(140, 220, 110);
 const LIVE: Color32 = Color32::from_rgb(255, 80, 80);
 
+/// A kind's colour: its type's (types\<id>\type.toml).
 fn kind_color(k: PortKind) -> Color32 {
-    match k {
-        PortKind::Audio => Color32::from_rgb(224, 164, 88),
-        PortKind::Video => Color32::from_rgb(224, 200, 90),
-        PortKind::Time => Color32::from_rgb(122, 167, 224),
-        PortKind::Location => Color32::from_rgb(199, 133, 201),
-        PortKind::Track => Color32::from_rgb(143, 209, 107),
-        PortKind::Event => Color32::from_rgb(224, 122, 106),
-        _ => Color32::from_rgb(154, 163, 173),
+    let [r, g, b] = corroborate::types::of(k).color;
+    Color32::from_rgb(r, g, b)
+}
+
+/// A kind's dot: how its data arrives (a value, a list, a stream).
+fn kind_shape(k: PortKind) -> corroborate::module_manifest::DotShape {
+    use corroborate::module_manifest::DotShape;
+    use corroborate::types::Flow;
+    match corroborate::types::of(k).flow {
+        Flow::Value => DotShape::Circle,
+        Flow::List => DotShape::Square,
+        Flow::Stream => DotShape::Diamond,
     }
 }
 
@@ -943,11 +948,7 @@ impl App {
                 // An input that takes anything: grey and open until wired, then the wired kind's colour and name.
                 let fed = (p.kind == PortKind::Any).then(|| self.graph.feeder(i, p.name)).flatten();
                 let fed_kind = fed.and_then(|(f, o)| self.graph.nodes()[f].spec.outputs.iter().find(|x| x.name == o).map(|x| x.kind));
-                let col = match fed_kind {
-                    Some(fk) => kind_color(fk),
-                    None if p.kind == PortKind::Any => Color32::from_rgb(110, 116, 124),
-                    None => kind_color(p.kind),
-                };
+                let shown_kind = fed_kind.unwrap_or(p.kind);
                 let name: String = match (fed, fed_kind) {
                     (Some((_, o)), Some(fk)) => format!("{o} · {}", corroborate::modules::result_record::kind_name(fk)),
                     _ if p.kind == PortKind::Any => "+".into(),
@@ -955,8 +956,11 @@ impl App {
                 };
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
                 let nc = if fed_kind.is_some() { tc } else { nc };
-                layout::draw_port(&painter, c, side, &pl, col, fed_kind.is_some() || p.required, &name, nc, self.zoom);
+                layout::draw_port(&painter, c, side, &pl, kind_color(shown_kind), kind_shape(shown_kind), p.required, &name, nc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click());
+                if pr.hovered() && self.wiring.is_none() {
+                    pr.clone().on_hover_text(self.port_hover(i, p, false));
+                }
                 if pr.secondary_clicked() {
                     unwire = Some((i, p.name));
                 }
@@ -970,8 +974,11 @@ impl App {
                     continue;
                 }
                 let (c, side) = self.port_place(origin, i, k, true);
-                layout::draw_port(&painter, c, side, &pl, kind_color(p.kind), true, p.name, tc, self.zoom);
+                layout::draw_port(&painter, c, side, &pl, kind_color(p.kind), kind_shape(p.kind), false, p.name, tc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
+                if pr.hovered() && self.wiring.is_none() {
+                    pr.clone().on_hover_text(self.port_hover(i, p, true));
+                }
                 if pr.drag_started() {
                     self.wiring = Some((i, k));
                 }

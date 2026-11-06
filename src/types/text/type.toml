@@ -1,0 +1,10 @@
+id = "text"
+label = "Text"
+color = "#b8c4d0"
+flow = "value"
+description = "Any text: a note, a name, a statement."
+
+[[field]]
+name = "value"
+type = "text"
+label = "text"

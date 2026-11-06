@@ -1,0 +1,10 @@
+id = "file"
+label = "File"
+color = "#a0a8b4"
+flow = "value"
+description = "A path to a file on this computer."
+
+[[field]]
+name = "value"
+type = "file"
+label = "file"

@@ -1,0 +1,5 @@
+id = "any"
+label = "Any"
+color = "#6e747c"
+flow = "value"
+description = "An input that takes every type; it shows the type wired into it."

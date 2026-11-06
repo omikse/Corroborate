@@ -1,0 +1,39 @@
+id = "location"
+label = "Location"
+color = "#c785c9"
+flow = "value"
+description = "An area of the Earth in 1° cells that either adds (the place is here) or subtracts (the place is not here)."
+
+[[field]]
+name = "lat"
+type = "number"
+label = "latitude"
+unit = "°"
+min = -90
+max = 90
+
+[[field]]
+name = "lon"
+type = "number"
+label = "longitude"
+unit = "°"
+min = -180
+max = 180
+
+[[field]]
+name = "radius_km"
+type = "number"
+label = "radius"
+unit = "km"
+min = 0
+default = 25
+
+[[field]]
+name = "add"
+type = "bool"
+label = "the place is here"
+default = true
+
+[[field]]
+name = "note"
+type = "text"

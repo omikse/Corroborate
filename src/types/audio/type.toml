@@ -1,0 +1,5 @@
+id = "audio"
+label = "Audio"
+color = "#e0a458"
+flow = "stream"
+description = "Sound as it is recorded: the raw samples a detector listens to. Not a value; it flows while the graph runs."

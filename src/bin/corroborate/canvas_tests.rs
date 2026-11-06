@@ -183,3 +183,18 @@ fn select_all_and_frame() {
     assert!(area.expand(400.0).contains_rect(r), "F brings the nodes back on screen: {r:?}");
     d.shot("canvas_framed");
 }
+
+#[test]
+fn a_dot_says_its_type() {
+    let (mut d, inv, comb, _map) = three();
+    let p = d.app().graph.nodes()[comb].spec.inputs[0].clone();
+    let t = d.app().port_hover(comb, &p, false);
+    assert!(t.starts_with("location 1 · Location (value, input, optional)"), "{t}");
+    assert!(t.contains("An area of the Earth") && t.contains("now: no location wired in"), "{t}");
+    let o = d.app().graph.nodes()[inv].spec.outputs[0].clone();
+    assert!(d.app().port_hover(inv, &o, true).contains("(value, output)"));
+    let (c, _) = { let a = d.app(); a.port_place(a.canvas_origin, comb, 0, false) };
+    d.h.hover_at(c);
+    d.frames(30);
+    d.shot("canvas_dot_hover");
+}

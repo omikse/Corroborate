@@ -1,0 +1,23 @@
+id = "time"
+label = "Time"
+color = "#7aa7e0"
+flow = "value"
+description = "A moment in UTC (Coordinated Universal Time) with its error: when the recording started, or when something happened."
+
+[[field]]
+name = "utc0"
+type = "datetime"
+label = "time (UTC)"
+
+[[field]]
+name = "error_s"
+type = "number"
+label = "error"
+unit = "s"
+min = 0
+default = 0
+
+[[field]]
+name = "source"
+type = "text"
+label = "where it comes from"

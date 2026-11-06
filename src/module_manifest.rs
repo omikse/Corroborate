@@ -42,9 +42,7 @@
 //! side = "bottom"              # in its [[input]] / [[output]]. side: left right top bottom
 //! at = 40                      # px along that edge from its start (left or top); else spaced evenly
 //! label = "outside"            # inside | outside | hidden
-//! dot = "square"               # circle | square | diamond
-//! dot_size = 6
-//! color = "#ff8800"
+//! dot_size = 6                 # a dot's colour and shape come from its type (src/types.rs)
 //!
 //! A `look.rhai` beside module.toml can change the look while the node runs (see the workbench's
 //! script.rs).
@@ -207,9 +205,7 @@ pub struct PortLook {
     /// Unzoomed px along its edge from the edge's start (left end or top end).
     pub at: Option<f32>,
     pub label: Option<PortLabel>,
-    pub dot: Option<DotShape>,
     pub dot_size: Option<f32>,
-    pub color: Option<[u8; 3]>,
     /// Not drawn (a script's choice; a wired port is drawn all the same).
     pub hidden: bool,
 }
@@ -221,9 +217,7 @@ impl PortLook {
             side: over.side.or(self.side),
             at: over.at.or(self.at),
             label: over.label.or(self.label),
-            dot: over.dot.or(self.dot),
             dot_size: over.dot_size.or(self.dot_size),
-            color: over.color.or(self.color),
             hidden: self.hidden || over.hidden,
         }
     }
@@ -274,6 +268,11 @@ fn port_look(t: &toml::Table, what: &str) -> Result<PortLook, String> {
             Some(_) => Err(format!("{what}: `{k}` must be text in quotes")),
         }
     };
+    for k in ["dot", "color"] {
+        if t.contains_key(k) {
+            return Err(format!("{what}: `{k}` is gone: a dot's colour and shape come from its type (the type's type.toml)"));
+        }
+    }
     Ok(PortLook {
         side: match word("side")? {
             None => None,
@@ -287,15 +286,7 @@ fn port_look(t: &toml::Table, what: &str) -> Result<PortLook, String> {
             Some("hidden") => Some(PortLabel::Hidden),
             Some(s) => return Err(format!("{what}: label \"{s}\" must be inside, outside or hidden")),
         },
-        dot: match word("dot")? {
-            None => None,
-            Some("circle") => Some(DotShape::Circle),
-            Some("square") => Some(DotShape::Square),
-            Some("diamond") => Some(DotShape::Diamond),
-            Some(s) => return Err(format!("{what}: dot \"{s}\" must be circle, square or diamond")),
-        },
         dot_size: look_num(t, "dot_size", what)?,
-        color: look_color(t, "color", what)?,
         hidden: false,
     })
 }
@@ -725,8 +716,7 @@ fill = "#2a3038"
 radius = 10
 status = false
 [look.ports.audio]
-dot = "square"
-color = "#ff8800"
+dot_size = 7
 [look.ports.video]
 label = "hidden"
 "##,
@@ -734,11 +724,12 @@ label = "hidden"
         .unwrap();
         assert_eq!(m.frame, FrameLook { size: Some((260.0, 140.0)), fill: Some([0x2a, 0x30, 0x38]), radius: Some(10.0), status: Some(false) });
         let a = m.port_look("audio");
-        assert_eq!((a.side, a.at, a.dot, a.color), (Some(Side::Bottom), Some(40.0), Some(DotShape::Square), Some([255, 136, 0])));
+        assert_eq!((a.side, a.at, a.dot_size), (Some(Side::Bottom), Some(40.0), Some(7.0)));
         assert_eq!(m.port_look("video").label, Some(PortLabel::Hidden), "a port made in code can be given a look by name");
         assert_eq!(m.port_look("out"), PortLook::default());
         assert!(parse("id = \"x\"\nlabel = \"X\"\n[look]\nfill = \"red\"").unwrap_err().contains("colour"));
         assert!(parse("id = \"x\"\nlabel = \"X\"\n[look.ports.a]\nside = \"up\"").unwrap_err().contains("left, right"));
+        assert!(parse("id = \"x\"\nlabel = \"X\"\n[look.ports.a]\ndot = \"square\"").unwrap_err().contains("type"));
     }
 
     #[test]

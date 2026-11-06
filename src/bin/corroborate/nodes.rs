@@ -200,6 +200,19 @@ pub fn modules_dir() -> PathBuf {
     corroborate::home().join("modules")
 }
 
+/// The tool's types folder: built-in type folders (copied there by run.cmd, where they can be
+/// changed while the program runs) and folders dropped in.
+pub fn types_dir() -> PathBuf {
+    corroborate::home().join("types")
+}
+
+/// Reads the types folder into the shared type list (called with the manifests' refresh, once a
+/// second).
+pub fn refresh_types() {
+    let found = corroborate::types::discover(&types_dir()).into_iter().filter_map(|(_, t)| t.ok()).collect();
+    corroborate::types::set_found(found);
+}
+
 type Found = Vec<(PathBuf, Result<Manifest, String>)>;
 static FOUND: Mutex<Option<(Instant, PathBuf, Found)>> = Mutex::new(None);
 

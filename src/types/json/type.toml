@@ -1,0 +1,10 @@
+id = "json"
+label = "JSON"
+color = "#8fb8b0"
+flow = "value"
+description = "Any JSON (JavaScript Object Notation) document, passed on as it is."
+
+[[field]]
+name = "value"
+type = "text"
+label = "JSON"

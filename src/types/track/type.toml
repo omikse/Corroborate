@@ -1,0 +1,24 @@
+id = "track"
+label = "Track"
+color = "#8fd16b"
+flow = "list"
+description = "A measured line over time (a frequency, a level): points keep coming and are kept."
+
+[[field]]
+name = "id"
+type = "text"
+
+[[field]]
+name = "t"
+type = "number"
+label = "time"
+unit = "s"
+
+[[field]]
+name = "value"
+type = "number"
+
+[[field]]
+name = "ok"
+type = "bool"
+default = true

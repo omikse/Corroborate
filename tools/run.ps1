@@ -98,6 +98,21 @@ foreach ($exe in $moved + 'meta-plugin.exe') {
     }
 }
 
+# Each type folder (src\types\<id>\, with a type.toml) goes to app\types\<id>\, kept like module
+# files: a type.toml changed in app\ after the last copy is kept (and listed).
+foreach ($dir in Get-ChildItem (Join-Path $root 'src\types') -Directory) {
+    $from = Join-Path $dir.FullName 'type.toml'
+    if (-not (Test-Path $from)) { continue }
+    $dst = Join-Path (Join-Path $app 'types') $dir.Name
+    New-Item -ItemType Directory -Force $dst | Out-Null
+    $to = Join-Path $dst 'type.toml'
+    if (-not (Test-Path $to) -or (Get-Item $to).LastWriteTime -lt (Get-Item $from).LastWriteTime) {
+        Copy-Item $from $to
+    } elseif ((Get-FileHash $to).Hash -ne (Get-FileHash $from).Hash) {
+        Write-Host "kept your change: $to (differs from $from)"
+    }
+}
+
 if (-not $NoStart) {
     $exe = Join-Path $app 'corroborate.exe'
     if ($AppArgs) {

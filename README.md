@@ -89,8 +89,9 @@ To change one node, edit only its folder:
 - **Look on the canvas, without touching code:**
   - `module.toml` `[look]`: the node's `size`, `fill`, corner `radius`, `status = false` to hide the
     status line; for each port (in its `[[input]]`/`[[output]]`, or `[look.ports.<name>]`): `side`
-    (left, right, top, bottom), `at` (px along that edge), `label` (inside, outside, hidden), `dot`
-    (circle, square, diamond), `dot_size`, `color`. Anything left out stays as it was.
+    (left, right, top, bottom), `at` (px along that edge), `label` (inside, outside, hidden),
+    `dot_size`. A dot's colour and shape are its type's (see Data types). Anything left out stays
+    as it was.
   - `look.rhai` beside it (a [Rhai](https://rhai.rs) script): `layout(node)` changes the frame and
     ports while the node runs (for example hide a port until a setting is filled), `draw(node)`
     draws inside the node: text, rectangles, circles, lines, editors for the module's settings,

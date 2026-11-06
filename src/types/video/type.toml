@@ -1,0 +1,5 @@
+id = "video"
+label = "Video"
+color = "#e0c85a"
+flow = "stream"
+description = "Moving pictures as they are recorded. Not a value; it flows while the graph runs."

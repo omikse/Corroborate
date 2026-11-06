@@ -8,8 +8,8 @@
 //!     #{
 //!         size: [260, 140],                 // unzoomed px
 //!         fill: "#2a3038", radius: 10, status: false,
-//!         ports: #{ audio: #{ side: "bottom", at: 40, label: "outside", dot: "square",
-//!                             dot_size: 6, color: "#ff8800", hidden: node.settings.mode == "off" } },
+//!         ports: #{ audio: #{ side: "bottom", at: 40, label: "outside",
+//!                             dot_size: 6, hidden: node.settings.mode == "off" } },
 //!     }
 //! }
 //!
@@ -40,7 +40,7 @@
 //! 100 000 operations; a script that fails (or never ends) shows its error on its own node.
 
 use super::*;
-use corroborate::module_manifest::{parse_color, DotShape, FrameLook, PortLabel, PortLook, Side};
+use corroborate::module_manifest::{parse_color, FrameLook, PortLabel, PortLook, Side};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Map, Scope, AST};
 use std::hash::{Hash, Hasher};
 
@@ -208,14 +208,7 @@ fn layout_of(d: Dynamic) -> Result<(FrameLook, Vec<(String, PortLook)>), String>
                     Some("hidden") => Some(PortLabel::Hidden),
                     _ => None,
                 },
-                dot: match word(&p, "dot").as_deref() {
-                    Some("circle") => Some(DotShape::Circle),
-                    Some("square") => Some(DotShape::Square),
-                    Some("diamond") => Some(DotShape::Diamond),
-                    _ => None,
-                },
                 dot_size: p.get("dot_size").map(num),
-                color: word(&p, "color").and_then(|c| parse_color(&c)),
                 hidden: p.get("hidden").and_then(|v| v.as_bool().ok()).unwrap_or(false),
             },
         ));

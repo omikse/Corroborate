@@ -1,0 +1,33 @@
+id = "event"
+label = "Event"
+color = "#e07a6a"
+flow = "list"
+description = "Timed findings (a clap, a plane passing): each has a start, an end and a label; they keep coming and are kept."
+
+[[field]]
+name = "t_start"
+type = "number"
+label = "start"
+unit = "s"
+
+[[field]]
+name = "t_end"
+type = "number"
+label = "end"
+unit = "s"
+
+[[field]]
+name = "label"
+type = "text"
+
+[[field]]
+name = "detail"
+type = "text"
+
+[[field]]
+name = "error_s"
+type = "number"
+label = "error"
+unit = "s"
+min = 0
+default = 0

@@ -24,6 +24,7 @@ pub mod graph;
 pub mod sync;
 pub mod synth;
 pub mod timebase;
+pub mod types;
 
 pub use modules::planes::detect::{Config, Detector, Event};
 pub use module::{Finding, Module, INPUT_SR};

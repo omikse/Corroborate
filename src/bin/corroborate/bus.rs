@@ -178,6 +178,30 @@ impl App {
         }
     }
 
+    /// What a dot's tooltip says: its type, what the type is, and the value on it now.
+    pub(crate) fn port_hover(&self, i: NodeId, p: &corroborate::core::Port, out: bool) -> String {
+        let fed = if out { None } else { self.graph.feeder(i, p.name) };
+        let kind = match fed {
+            Some((f, o)) => self.graph.nodes()[f].spec.outputs.iter().find(|x| x.name == o).map_or(p.kind, |x| x.kind),
+            None => p.kind,
+        };
+        let t = corroborate::types::of(kind);
+        let need = if out { "output" } else if p.required { "input, needed to run" } else { "input, optional" };
+        let now = match (out, fed) {
+            (true, _) => self.value_from(i, p.name),
+            (false, Some((f, o))) => self.value_from(f, o),
+            (false, None) => Err("not wired".into()),
+        };
+        let now = match now {
+            Ok(d) => {
+                let s = summary(&d);
+                if s.chars().count() > 200 { format!("{}…", s.chars().take(199).collect::<String>()) } else { s }
+            }
+            Err(e) => e,
+        };
+        format!("{} · {} ({}, {need})\n{}\nnow: {now}", p.name, t.label, t.flow.name(), t.description)
+    }
+
     /// A location a program sent (the area of a node whose module has no Rust code).
     pub(crate) fn outbox_area(&self, from: NodeId) -> Result<(Arc<Area>, String), String> {
         let s = self.nodes[from].state.lock().unwrap();

@@ -30,14 +30,14 @@ fn rect_of(d: &mut Drive, i: NodeId) -> Rect {
     a.node_rect(a.canvas_origin, i)
 }
 
-/// module.toml moves `audio` to the bottom edge, 40 px from the left, with a square dot; the
+/// module.toml moves `audio` to the bottom edge, 40 px from the left; the
 /// wire into it leaves downwards.
 #[test]
 fn manifest_moves_a_port() {
     let mut d = Drive::new();
     let a = d.app();
     let src = a.add(Kind::Sourcer { input: crate::drive::tone_wav().to_string_lossy().into_owned() }, Pos2::new(30.0, 40.0));
-    let n = a.add(module("bottom-audio", "[look]\nfill = \"#203040\"\nradius = 14\n[look.ports.audio]\nside = \"bottom\"\nat = 40\ndot = \"square\"\nlabel = \"outside\"", None), Pos2::new(560.0, 60.0));
+    let n = a.add(module("bottom-audio", "[look]\nfill = \"#203040\"\nradius = 14\n[look.ports.audio]\nside = \"bottom\"\nat = 40\nlabel = \"outside\"", None), Pos2::new(560.0, 60.0));
     d.app().wire(src, "audio", n, "audio");
     assert_eq!(d.app().graph.wires().len(), 1);
     d.frames(3);
