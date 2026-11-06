@@ -61,30 +61,6 @@ pub fn flush(p: &mut Planes, st: &Shared) {
     s.status = format!("{} passes", s.planes.passes.len());
 }
 
-pub fn marks(s: &NodeState) -> Vec<Mark> {
-    let (to, err) = clock(&s.anchor);
-    s.planes
-        .passes
-        .iter()
-        .map(|e| Mark {
-            t0: to(e.t_start),
-            t1: to(e.t_end),
-            err,
-            label: format!("{:.0} m/s", e.speed),
-            detail: format!(
-                "pass {}: closest approach {}, {:.0} m/s, {:.0} m, f0 {:.1} Hz, grade {}",
-                e.id,
-                s.anchor.as_ref().map_or(format!("{:.1} s", e.t_cpa), |a| format!("{} UTC", fmt_clock(a.utc(e.t_cpa)))),
-                e.speed,
-                e.dist,
-                e.f0,
-                e.grade()
-            ),
-            col: grade_color(e.grade()),
-        })
-        .collect()
-}
-
 pub fn json(s: &NodeState) -> String {
     let p: Vec<String> = s.planes.passes.iter().map(|e| e.to_json(s.anchor.as_ref())).collect();
     format!(",\"passes\":[{}]", p.join(","))

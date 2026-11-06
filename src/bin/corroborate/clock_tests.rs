@@ -196,3 +196,34 @@ fn wire_box_text_and_confidence() {
     let abs = Data::Time { clock: "s".into(), t: 0.0, utc: Some(45_003.0), error_s: 1.0, source: String::new() };
     assert_eq!((tx(&abs, Cf::P68, None).top.as_str(), tx(&abs, Cf::P68, None).bottom.as_str()), ("12:30:03 UTC", "± 1.00 s"));
 }
+
+/// Timeline rows: absolute first (placed on UTC), then relative (on the group's reference clock),
+/// then unanchored; a floating row starts under the first absolute event.
+#[test]
+fn timeline_rows_order_and_placement() {
+    use crate::timeline::{build_rows, default_shift};
+    use corroborate::clock::{Anchor as An, Link};
+    use corroborate::data::Event;
+    let clocks = corroborate::clock::solve(
+        &[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 2.0, from: "n1".into(), enabled: true }],
+        &[Link { a: "b".into(), t_a: 0.0, b: "c".into(), t_b: 10.0, error_s: 1.0, from: "manual".into(), enabled: true }],
+    );
+    let ev = |c: &str, t: f64, e: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t + 1.0, error_s: e, ..Default::default() });
+    // Listed unanchored first, to show the order comes from the kind.
+    let events = [ev("z", 5.0, 0.0), ev("c", 3.0, 0.0), ev("b", 4.0, 0.0), ev("a", 30.0, 0.5)];
+    let rows = build_rows(&clocks, &events, &|c| format!("clip {c}"));
+    let kinds: Vec<Ck> = rows.iter().map(|r| r.group.kind).collect();
+    assert_eq!(kinds, vec![Ck::Absolute, Ck::Relative, Ck::None]);
+    let a = &rows[0].subs[0].events[0];
+    assert_eq!((a.t0, a.clock_err, a.own_err), (1030.0, 2.0, 0.5));
+    assert!((a.err() - 2.0f64.hypot(0.5)).abs() < 1e-9);
+    // b and c share a group; both placed on the reference clock (the smaller id, b).
+    assert_eq!(rows[1].subs.len(), 2);
+    let on_ref: Vec<f64> = rows[1].subs.iter().map(|s| s.events[0].t0).collect();
+    assert!((on_ref[0] - 4.0).abs() < 1e-6 && (on_ref[1] - -7.0).abs() < 1e-6, "{on_ref:?}");
+    assert_eq!(rows[2].subs[0].events[0].t0, 5.0, "unanchored: as it is");
+    // The floating row's first event starts under the first absolute one.
+    let s = default_shift(&rows, &rows[2], 0.0);
+    assert!((rows[2].first().unwrap() + s - 1030.0).abs() < 1e-9);
+    assert_eq!(default_shift(&rows, &rows[0], 0.0), 0.0);
+}

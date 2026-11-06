@@ -33,6 +33,7 @@ mod canvas;
 mod drop_menu;
 mod clock_view;
 mod evidence;
+mod timeline;
 mod project;
 mod layout;
 mod look;
@@ -161,22 +162,6 @@ fn fmt_clock(utc: f64) -> String {
     timebase::fmt_utc_clock(utc)
 }
 
-/// A finding on the timeline: its span on the shared clock, the clock's error, and how it looks.
-struct Mark {
-    t0: f64,
-    t1: f64,
-    err: f64,
-    label: String,
-    detail: String,
-    col: Color32,
-}
-
-/// A node's clock: source seconds to UTC (when anchored), and that clock's error in seconds.
-fn clock(a: &Option<Anchor>) -> (impl Fn(f64) -> f64 + '_, f64) {
-    let err = a.as_ref().map_or(0.0, |a| a.error_s);
-    (move |t: f64| a.as_ref().map_or(t, |a| a.utc(t)), err)
-}
-
 // ---------------------------------------------------------------- project
 
 struct NodeData {
@@ -264,6 +249,8 @@ struct App {
     project_path: Option<PathBuf>,
     /// Shared clocks, the evidence about the clocks and the clocks solved from it (evidence.rs).
     ev: evidence::Evidence,
+    /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
+    tls: timeline::TlState,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
 }
@@ -313,6 +300,7 @@ impl App {
             project_path: None,
             next_uid: 1,
             ev: Default::default(),
+            tls: Default::default(),
         }
     }
 
@@ -1154,134 +1142,6 @@ impl App {
         );
     }
 
-    // ---------------- timeline
-
-    fn timeline_view(&mut self, ui: &mut egui::Ui) {
-        struct Lane {
-            name: String,
-            utc: bool,
-            note: String,
-            marks: Vec<Mark>,
-        }
-        let mut lanes: Vec<Lane> = Vec::new();
-        let mut any_utc = false;
-        let mut end = f64::MIN;
-        for n in self.nodes.iter().filter(|n| !n.hidden) {
-            let s = n.state.lock().unwrap();
-            let a = s.anchor.clone();
-            let (to, err) = clock(&a);
-            let marks = match &n.kind {
-                Kind::Planes => planes_node::marks(&s),
-                Kind::Enf { .. } => enf_node::marks(&s),
-                Kind::Plugin { .. } => plugin_node::marks(&s),
-                // A module on the bus has a lane once it has sent events.
-                Kind::Module { .. } => match bus::marks(&s) {
-                    m if m.is_empty() => continue,
-                    m => m,
-                },
-                _ => continue,
-            };
-            if s.audio_s > 0.0 {
-                end = end.max(to(s.audio_s));
-            }
-            any_utc |= a.is_some();
-            let note = match &a {
-                Some(a) => format!("clock: {} (± {:.0} s)", a.source, err),
-                None if s.audio_s > 0.0 => "no UTC anchor: source time".into(),
-                None => String::new(),
-            };
-            lanes.push(Lane { name: n.label.clone(), utc: a.is_some(), note, marks });
-        }
-
-        let label_w = 190.0;
-        let ruler_h = 22.0;
-        let lane_h = 34.0;
-        let h = ruler_h + lane_h * lanes.len().max(1) as f32 + 4.0;
-        let (area, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click_and_drag());
-        let p = ui.painter_at(area);
-        p.rect_filled(area, 0.0, PANEL);
-        let track = Rect::from_min_max(Pos2::new(area.left() + label_w, area.top()), area.max);
-
-        if self.follow && end > f64::MIN {
-            let span = (self.tl.1 - self.tl.0).max(60.0);
-            self.tl = (end - span * 0.95, end + span * 0.05);
-        }
-        let span = (self.tl.1 - self.tl.0).max(1e-3);
-        if let Some(hp) = resp.hover_pos() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-            if scroll != 0.0 && track.contains(hp) {
-                let f = (-scroll as f64 * 0.002).exp();
-                let at = self.tl.0 + ((hp.x - track.left()) / track.width()) as f64 * span;
-                self.tl = (at - (at - self.tl.0) * f, at + (self.tl.1 - at) * f);
-            }
-        }
-        if resp.dragged() {
-            let dt = -(resp.drag_delta().x / track.width()) as f64 * span;
-            self.tl = (self.tl.0 + dt, self.tl.1 + dt);
-            self.follow = false;
-        }
-        let (v0, span) = (self.tl.0, (self.tl.1 - self.tl.0).max(1e-3));
-        let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
-
-        let raw = span / 8.0;
-        let mag = 10f64.powf(raw.log10().floor());
-        let step = [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * mag).find(|s| *s >= raw).unwrap_or(10.0 * mag);
-        let mut t = (v0 / step).ceil() * step;
-        while t <= self.tl.1 {
-            let x = tx(t);
-            p.line_segment([Pos2::new(x, track.top()), Pos2::new(x, track.bottom())], Stroke::new(1.0, Color32::from_rgb(40, 44, 49)));
-            let txt = if any_utc { fmt_clock(t) } else { format!("{t:.0} s") };
-            p.text(Pos2::new(x + 3.0, track.top() + 4.0), Align2::LEFT_TOP, txt, FontId::proportional(10.5), DIM);
-            t += step;
-        }
-        p.line_segment([Pos2::new(area.left(), area.top() + ruler_h), Pos2::new(area.right(), area.top() + ruler_h)], Stroke::new(1.0, LINE));
-        p.text(
-            Pos2::new(area.left() + 8.0, area.top() + 4.0),
-            Align2::LEFT_TOP,
-            if any_utc { "UTC" } else { "source time" },
-            FontId::proportional(10.5),
-            DIM,
-        );
-        let mut hover = None;
-        for (li, lane) in lanes.iter().enumerate() {
-            let top = area.top() + ruler_h + li as f32 * lane_h;
-            let row = Rect::from_min_max(Pos2::new(area.left(), top), Pos2::new(area.right(), top + lane_h));
-            p.line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, Color32::from_rgb(42, 46, 51)));
-            p.text(Pos2::new(area.left() + 8.0, top + 11.0), Align2::LEFT_CENTER, &lane.name, FontId::proportional(12.0), TEXT);
-            p.text(Pos2::new(area.left() + 8.0, top + 25.0), Align2::LEFT_CENTER, &lane.note, FontId::proportional(9.5), DIM);
-            if any_utc && !lane.utc && !lane.marks.is_empty() {
-                p.text(Pos2::new(track.left() + 8.0, row.center().y), Align2::LEFT_CENTER, "own clock, offset unknown: not placed on UTC", FontId::proportional(10.5), DIM);
-                continue;
-            }
-            for m in &lane.marks {
-                let (xa, xb) = (tx(m.t0 - m.err), tx(m.t1 + m.err));
-                if xb < track.left() || xa > track.right() {
-                    continue;
-                }
-                let band = Rect::from_min_max(Pos2::new(xa.max(track.left()), top + 5.0), Pos2::new(xb.min(track.right()), top + lane_h - 5.0));
-                let strength = (1.0 / (1.0 + m.err)) as f32;
-                p.rect_filled(band, 2.0, alpha(m.col, 0.10 + 0.15 * strength));
-                let core = Rect::from_min_max(
-                    Pos2::new(tx(m.t0).max(track.left()), top + 8.0),
-                    Pos2::new(tx(m.t1).min(track.right()).max(tx(m.t0) + 2.0), top + lane_h - 8.0),
-                );
-                p.rect_filled(core, 2.0, alpha(m.col, 0.35 + 0.55 * strength));
-                if core.width() > 40.0 {
-                    p.text(core.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &m.label, FontId::proportional(10.0), Color32::BLACK);
-                }
-                if resp.hover_pos().is_some_and(|h| band.expand(2.0).contains(h)) {
-                    hover = Some(format!("{}\n{}\ntime error ± {:.0} s ({})", m.label, m.detail, m.err, lane.note));
-                }
-            }
-        }
-        if lanes.is_empty() {
-            p.text(Pos2::new(track.left() + 8.0, area.top() + ruler_h + 14.0), Align2::LEFT_CENTER, "findings from detectors and plugins appear here", FontId::proportional(11.0), DIM);
-        }
-        if let Some(t) = hover {
-            resp.on_hover_text(t);
-        }
-    }
-
     // ---------------- frame
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -1389,7 +1249,13 @@ impl App {
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
         });
-        egui::Panel::bottom("timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(0.0)).show(ui, |ui| {
+        let open = self.tls.open;
+        egui::Panel::bottom(if open { "timeline" } else { "timeline-closed" })
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(0.0))
+            .resizable(open)
+            .default_size(170.0)
+            .size_range(if open { 80.0..=700.0 } else { 0.0..=f32::INFINITY })
+            .show(ui, |ui| {
             self.timeline_view(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {

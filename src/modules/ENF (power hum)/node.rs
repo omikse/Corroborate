@@ -101,22 +101,6 @@ pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
     }
 }
 
-pub fn marks(s: &NodeState) -> Vec<Mark> {
-    let (to, err) = clock(&s.anchor);
-    s.enf
-        .segments
-        .iter()
-        .map(|g| Mark {
-            t0: to(g.t_start),
-            t1: to(g.t_end),
-            err,
-            label: format!("{:.3} Hz", g.mean_hz),
-            detail: format!("hum {:.3} Hz ({:.3}–{:.3}), harmonic {}", g.mean_hz, g.min_hz, g.max_hz, g.harmonic),
-            col: Color32::from_rgb(110, 170, 255),
-        })
-        .collect()
-}
-
 pub fn json(s: &NodeState) -> String {
     let p: Vec<String> = s.enf.segments.iter().map(|e| e.to_json(s.anchor.as_ref())).collect();
     let frac = s.enf.area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));

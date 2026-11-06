@@ -163,16 +163,6 @@ pub fn status(s: &NodeState) -> Option<String> {
     Some(if first.is_empty() { s.plugin.state.clone() } else { first.to_string() })
 }
 
-pub fn marks(s: &NodeState) -> Vec<Mark> {
-    let (to, err) = clock(&s.anchor);
-    let col = s.plugin.color.map_or(Color32::from_rgb(200, 200, 200), |[r, g, b]| Color32::from_rgb(r, g, b));
-    s.plugin
-        .findings
-        .iter()
-        .map(|f| Mark { t0: to(f.t_start), t1: to(f.t_end), err, label: f.label.clone(), detail: f.detail.clone(), col })
-        .collect()
-}
-
 pub fn json(path: &str, s: &NodeState) -> String {
     let anchor = s.anchor.as_ref();
     let f: Vec<String> = s

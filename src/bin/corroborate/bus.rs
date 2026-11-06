@@ -449,20 +449,6 @@ pub(crate) fn summary(d: &Data) -> String {
     }
 }
 
-/// Events a program sent, for the timeline.
-pub fn marks(s: &NodeState) -> Vec<Mark> {
-    let (to, err) = clock(&s.anchor);
-    let col = s.plugin.color.map_or(Color32::from_rgb(200, 200, 200), |[r, g, b]| Color32::from_rgb(r, g, b));
-    s.outbox
-        .iter()
-        .flat_map(|(_, d)| match d {
-            Data::Events(v) => v.clone(),
-            _ => Vec::new(),
-        })
-        .map(|e| Mark { t0: to(e.t_start), t1: to(e.t_end), err: err + e.error_s, label: e.label, detail: e.detail, col })
-        .collect()
-}
-
 /// A module on the data bus: its settings, then a line per output with what it holds, and the
 /// program's state and last log line.
 pub struct Look;
