@@ -28,6 +28,7 @@ mod look_tests;
 mod canvas_tests;
 mod bus;
 mod canvas;
+mod drop_menu;
 mod project;
 mod layout;
 mod look;
@@ -220,6 +221,10 @@ struct App {
     selected: Option<NodeId>,
     /// Wire being dragged from (node, output index).
     wiring: Option<(NodeId, usize)>,
+    /// Wire being dragged from (node, input index), towards an output.
+    wiring_in: Option<(NodeId, usize)>,
+    /// The menu of a wire let go on empty canvas.
+    drop_menu: Option<drop_menu::DropMenu>,
     msg: String,
     stop: Option<Arc<AtomicBool>>,
     /// Recordings in progress, by record node, and each record's last note.
@@ -279,6 +284,8 @@ impl App {
             zoom: 1.0,
             selected: None,
             wiring: None,
+            wiring_in: None,
+            drop_menu: None,
             msg: String::new(),
             stop: None,
             recordings: HashMap::new(),
@@ -827,6 +834,7 @@ impl App {
         let mut move_by = Vec2::ZERO;
         let mut delete = None;
         let mut drop_on: Option<(NodeId, usize)> = None;
+        let mut drop_out: Option<(NodeId, usize)> = None;
         let mut unwire: Option<(NodeId, &'static str)> = None;
         let pointer = ui.ctx().pointer_latest_pos();
         let released = ui.input(|i| i.pointer.any_released());
@@ -838,7 +846,7 @@ impl App {
             let rect = self.node_rect(origin, i);
             let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD * self.zoom));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
-            if self.wiring.is_none() {
+            if self.wiring.is_none() && self.wiring_in.is_none() {
                 let space = ui.input(|i| i.key_down(egui::Key::Space));
                 if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
                     self.pan += resp.drag_delta();
@@ -957,9 +965,12 @@ impl App {
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
                 let nc = if fed_kind.is_some() { tc } else { nc };
                 layout::draw_port(&painter, c, side, &pl, kind_color(shown_kind), kind_shape(shown_kind), p.required, &name, nc, self.zoom);
-                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click());
-                if pr.hovered() && self.wiring.is_none() {
+                let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click_and_drag());
+                if pr.hovered() && self.wiring.is_none() && self.wiring_in.is_none() {
                     pr.clone().on_hover_text(self.port_hover(i, p, false));
+                }
+                if pr.drag_started_by(egui::PointerButton::Primary) {
+                    self.wiring_in = Some((i, k));
                 }
                 if pr.secondary_clicked() {
                     unwire = Some((i, p.name));
@@ -976,8 +987,11 @@ impl App {
                 let (c, side) = self.port_place(origin, i, k, true);
                 layout::draw_port(&painter, c, side, &pl, kind_color(p.kind), kind_shape(p.kind), false, p.name, tc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
-                if pr.hovered() && self.wiring.is_none() {
+                if pr.hovered() && self.wiring.is_none() && self.wiring_in.is_none() {
                     pr.clone().on_hover_text(self.port_hover(i, p, true));
+                }
+                if self.wiring_in.is_some() && released && pointer.is_some_and(|q| q.distance(c) < 12.0 * self.zoom) {
+                    drop_out = Some((i, k));
                 }
                 if pr.drag_started() {
                     self.wiring = Some((i, k));
@@ -985,6 +999,41 @@ impl App {
             }
         }
 
+        // Let go on empty canvas: the menu of nodes to add there and wire.
+        let empty_at = pointer.filter(|q| area.contains(*q) && !(0..self.nodes.len()).any(|i| !self.nodes[i].hidden && self.node_rect(origin, i).contains(*q)));
+        let (pan, zoom) = (self.pan, self.zoom);
+        let menu_at = move |end: drop_menu::End, q: Pos2| drop_menu::DropMenu { end, screen: q, world: ((q - origin - pan) / zoom).to_pos2() };
+        // Wire being dragged from an input, towards an output.
+        if let Some((n, k)) = self.wiring_in {
+            let (b, sb) = self.port_place(origin, n, k, false);
+            if let Some(a) = pointer {
+                let kind = self.graph.nodes()[n].spec.inputs[k].kind;
+                painter.add(CubicBezierShape::from_points_stroke(
+                    layout::wire_points(a, corroborate::module_manifest::Side::Right, b, sb),
+                    false,
+                    Color32::TRANSPARENT,
+                    Stroke::new(2.0 * self.zoom, kind_color(kind)),
+                ));
+            }
+            if released {
+                if let Some((f, fo)) = drop_out {
+                    let out = self.graph.nodes()[f].spec.outputs[fo].name;
+                    let inp = self.graph.nodes()[n].spec.inputs[k].name;
+                    self.graph.disconnect(n, inp);
+                    match self.graph.connect(f, out, n, inp) {
+                        Ok(()) => {
+                            self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[f].label, self.nodes[n].label);
+                            self.sync_record_ports();
+                            self.save_project();
+                        }
+                        Err(e) => self.msg = describe(&e),
+                    }
+                } else if let Some(q) = empty_at {
+                    self.drop_menu = Some(menu_at(drop_menu::End::In(n, k), q));
+                }
+                self.wiring_in = None;
+            }
+        }
         // Wire being dragged.
         if let Some((n, k)) = self.wiring {
             let (a, sa) = self.port_place(origin, n, k, true);
@@ -1009,6 +1058,8 @@ impl App {
                         }
                         Err(e) => self.msg = describe(&e),
                     }
+                } else if let Some(q) = empty_at {
+                    self.drop_menu = Some(menu_at(drop_menu::End::Out(n, k), q));
                 }
                 self.wiring = None;
             }
@@ -1035,12 +1086,13 @@ impl App {
                 self.pick_only(i);
             }
         }
+        self.drop_menu_ui(&ui.ctx().clone());
         let at = (ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p)).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         self.canvas_keys(&ui.ctx().clone(), area, at.to_pos2());
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag node: move · drag empty: select · middle-drag or Space+drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag output to input: wire · right-click: menus",
+            "scroll: zoom · drag node: move · drag empty: select · middle-drag or Space+drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
             FontId::proportional(11.0),
             DIM,
         );

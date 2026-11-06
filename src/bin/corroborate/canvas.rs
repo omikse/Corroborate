@@ -316,6 +316,8 @@ impl App {
             self.selected = None;
         }
         self.wiring = None;
+        self.wiring_in = None;
+        self.drop_menu = None;
         self.drafts.clear();
         self.setting_errors.clear();
         self.save_project();
@@ -362,6 +364,7 @@ impl App {
                     egui::Key::Escape => {
                         self.pick_none();
                         self.wiring = None;
+                        self.wiring_in = None;
                         self.sel.boxing = None;
                     }
                     egui::Key::F | egui::Key::Home if !m.any() => self.frame_nodes(area),
@@ -391,7 +394,7 @@ impl App {
     /// release to every node it touches.
     pub(crate) fn box_select(&mut self, ui: &egui::Ui, bg: &egui::Response, painter: &egui::Painter, origin: Pos2) {
         let space = ui.input(|i| i.key_down(egui::Key::Space));
-        if bg.drag_started_by(egui::PointerButton::Primary) && !space && self.wiring.is_none() {
+        if bg.drag_started_by(egui::PointerButton::Primary) && !space && self.wiring.is_none() && self.wiring_in.is_none() {
             self.sel.boxing = ui.input(|i| i.pointer.press_origin());
         }
         let Some(start) = self.sel.boxing else { return };

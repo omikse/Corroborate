@@ -258,3 +258,41 @@ fn value_nodes() {
     assert_eq!(d.app().graph.feeder(map, "location"), None, "a text does not fit the map");
     assert!(d.app().changes.iter().any(|c| c.node == place && c.name == "type" && c.old == "location" && c.new == "text"), "logged");
 }
+
+/// A wire dragged from a dot onto empty canvas offers the modules that fit its type; the one
+/// picked is added there and wired. From an input, a Value node of its type comes first. A wire
+/// dragged from an input onto an output wires them too.
+#[test]
+fn drag_from_a_dot_to_empty_canvas() {
+    let mut d = Drive::new();
+    let map = d.app().add(Kind::Map, Pos2::new(600.0, 60.0));
+    d.frames(3);
+    let (c, _) = { let a = d.app(); a.port_place(a.canvas_origin, map, 0, false) };
+    drag(&mut d, c, c - Vec2::new(250.0, -150.0), PointerButton::Primary, Modifiers::NONE);
+    let choices: Vec<String> = d.app().drop_choices(crate::drop_menu::End::In(map, 0)).into_iter().map(|(l, _)| l).collect();
+    assert_eq!(choices[0], "Value (Location)", "{choices:?}");
+    assert!(choices.iter().any(|l| l == "Combine locations (all)") && !choices.iter().any(|l| l == "Map"), "{choices:?}");
+    d.shot("drop_menu_from_input");
+    d.click("Value (Location)");
+    let v = d.app().nodes.len() - 1;
+    assert!(matches!(&d.app().nodes[v].kind, Kind::Value { ty, .. } if ty == "location"));
+    assert_eq!(d.app().graph.feeder(map, "location"), Some((v, "value")), "the new Value feeds the map");
+    assert!(d.app().nodes[v].pos.x < d.app().nodes[map].pos.x, "it sits left of the map");
+
+    // From the Value's output onto empty canvas: Invert location takes a location.
+    d.frames(3);
+    let (c, _) = { let a = d.app(); a.port_place(a.canvas_origin, v, 0, true) };
+    drag(&mut d, c, c + Vec2::new(200.0, 120.0), PointerButton::Primary, Modifiers::NONE);
+    d.shot("drop_menu_from_output");
+    d.click("Invert location");
+    let inv = d.app().nodes.len() - 1;
+    assert!(matches!(d.app().nodes[inv].kind, Kind::InvertLocation));
+    assert_eq!(d.app().graph.feeder(inv, "location"), Some((v, "value")));
+
+    // From the map's input back onto Invert's output: rewired.
+    d.frames(3);
+    let (a, b) = { let x = d.app(); (x.port_place(x.canvas_origin, map, 0, false).0, x.port_place(x.canvas_origin, inv, 0, true).0) };
+    drag(&mut d, a, b, PointerButton::Primary, Modifiers::NONE);
+    assert_eq!(d.app().graph.feeder(map, "location"), Some((inv, "location")), "{}", d.msg());
+    d.shot("drop_menu_wired");
+}
