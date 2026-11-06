@@ -129,6 +129,37 @@ impl App {
     }
 }
 
+/// What an output is for, as its module.toml says: about, needs, when, source, status and the
+/// signal quality it needs. Hover text of outputs and ghost sockets.
+pub fn socket_text(s: &corroborate::module_manifest::Socket) -> String {
+    use corroborate::module_manifest::Status;
+    let mut v = Vec::new();
+    if !s.about.is_empty() {
+        v.push(s.about.clone());
+    }
+    if !s.needs.is_empty() {
+        v.push(format!("needs: {}", s.needs.join(", ")));
+    }
+    if !s.when.is_empty() {
+        v.push(format!("when: {}", s.when));
+    }
+    if let Some(q) = &s.min_quality {
+        v.push(format!("signal needed: {q}"));
+    }
+    if !s.source.is_empty() {
+        v.push(format!("source: {}", s.source));
+    }
+    v.push(
+        match s.status {
+            Status::Built => "built",
+            Status::Planned => "planned: not built yet, nothing to wire",
+            Status::Possible => "possible: shown in research, not planned, nothing to wire",
+        }
+        .into(),
+    );
+    v.join("\n")
+}
+
 /// A port's dot and name. Its colour and shape are its type's; `filled` means needed to run (a
 /// required input), else it is drawn open.
 #[allow(clippy::too_many_arguments)]

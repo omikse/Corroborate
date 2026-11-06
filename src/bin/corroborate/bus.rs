@@ -205,6 +205,15 @@ impl App {
         }
     }
 
+    /// Why output `out` of node `i` gives nothing although it is built: the node's signal is
+    /// below what the output's use case needs (module.toml `min_quality`). None: not held.
+    pub(crate) fn output_held(&self, i: NodeId, out: &str) -> Option<String> {
+        match &self.nodes[i].kind {
+            Kind::Enf { .. } => crate::enf_node::held(&*self.nodes[i].state.lock().ok()?, out),
+            _ => None,
+        }
+    }
+
     /// What a dot's tooltip says: its type, what the type is, and the value on it now.
     pub(crate) fn port_hover(&self, i: NodeId, p: &corroborate::core::Port, out: bool) -> String {
         let fed = if out { None } else { self.graph.feeder(i, p.name) };
@@ -226,7 +235,12 @@ impl App {
             }
             Err(e) => e,
         };
-        format!("{} · {} ({}, {need})\n{}\nnow: {now}", p.name, t.label, t.flow.name(), t.description)
+        // What the output is for, as its module.toml says.
+        let about = match self.manifest_of(i).and_then(|m| m.sockets.iter().find(|s| s.name == p.name).cloned()) {
+            Some(s) if out => format!("\n{}", layout::socket_text(&s)),
+            _ => String::new(),
+        };
+        format!("{} · {} ({}, {need})\n{}{about}\nnow: {now}", p.name, t.label, t.flow.name(), t.description)
     }
 
     /// A location a program sent (the area of a node whose module has no Rust code).

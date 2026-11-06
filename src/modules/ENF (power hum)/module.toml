@@ -15,9 +15,11 @@ required = true
 # Each output is a use case of the hum (README "Use cases"). Built ones give values; planned and
 # possible ones are drawn greyed on the node with this text on hover, nothing to wire.
 # min_quality: the signal quality verdict the use case needs (none, weak, good).
+# The built ones sit at fixed rows (at, px from the top); the node draws the rest under them.
 
 [[output]]
 name = "location"
+at = 44
 kind = "location"
 title = "grid 50/60 Hz"
 about = "Where this hum's nominal frequency (50 or 60 Hz) is used: wire it into a Map to see the coverage."
@@ -28,6 +30,7 @@ min_quality = "weak"
 
 [[output]]
 name = "quality"
+at = 62
 kind = "quality"
 title = "quality"
 about = "Is the hum good enough, and why: level, verdict, score, readings kept, longest clean run, error."
@@ -37,6 +40,7 @@ min_quality = "none"
 
 [[output]]
 name = "hum track"
+at = 80
 kind = "track"
 title = "hum track"
 about = "The grid frequency over the recording's time, readings that count marked ok."

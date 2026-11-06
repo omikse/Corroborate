@@ -146,16 +146,22 @@ pub fn min_level(out: &str) -> Option<Level> {
     })
 }
 
+/// Why output `out` gives nothing at the signal quality there is now (None: it may give).
+/// Before any reading, everything that needs more than "none" is held.
+pub fn held(s: &NodeState, out: &str) -> Option<String> {
+    let need = min_level(out)?;
+    let now = s.enf.quality.as_ref().map_or(Level::None, |q| q.level);
+    (now < need).then(|| format!("needs {} signal, now {}", need.word(), now.word()))
+}
+
 /// The values on the ENF node's outputs other than location (see `area_out`): the quality and
 /// the hum track. An output whose use case needs a better signal than there is gives none, and
 /// says what it needs.
 pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data::Data, String> {
     use corroborate::data::{Data, TrackPoint};
     let q = s.enf.quality.as_ref().ok_or("no readings yet")?;
-    if let Some(need) = min_level(out) {
-        if q.level < need {
-            return Err(format!("needs {} signal, now {}", need.word(), q.level.word()));
-        }
+    if let Some(why) = held(s, out) {
+        return Err(why);
     }
     match out {
         "quality" => Ok(Data::Custom { kind: "quality", json: quality_json(q) }),
@@ -201,11 +207,15 @@ impl App {
 //  └─────────────────────────────────────────────────────┘
 
 /// Size on the canvas (unzoomed).
-const NODE_W: f32 = 520.0;
+const NODE_W: f32 = 640.0;
 const NODE_H: f32 = 340.0;
 /// Room left at the sides for the port names, and the status column's width.
 const LEFT: f32 = 42.0;
-const RIGHT: f32 = 60.0;
+const RIGHT: f32 = 140.0;
+/// The outputs' rows on the right edge: the first one's distance from the top (module.toml
+/// `at` of the built ones), and the row height. Ghost sockets follow the built outputs.
+const OUT_TOP: f32 = 44.0;
+const OUT_ROW: f32 = 18.0;
 const STATUS_W: f32 = 128.0;
 const TRACE_H: f32 = 58.0;
 const HUM: Color32 = Color32::from_rgb(110, 170, 255);
@@ -292,6 +302,39 @@ impl crate::look::NodeLook for Look {
 
         let st = app.nodes[i].state.clone();
         let p = ui.painter().clone();
+
+        // Use cases not built yet (planned ◦, possible ·): greyed under the built outputs, on the
+        // right edge, with their module.toml text on hover. Nothing to wire.
+        {
+            use corroborate::module_manifest::{kind_id, Status};
+            let man = corroborate::modules::enf::manifest();
+            let nr = app.node_rect(app.canvas_origin, i);
+            // The body's painter is clipped to the body; the dots sit on the frame's edge.
+            let gp = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(nr.expand(10.0 * z));
+            let level = st.lock().unwrap().enf.quality.as_ref().map_or(Level::None, |q| q.level);
+            let built = man.sockets.iter().filter(|s| s.status == Status::Built).count();
+            for (j, s) in man.sockets.iter().filter(|s| s.status != Status::Built).enumerate() {
+                let y = nr.top() + (OUT_TOP + (built + j) as f32 * OUT_ROW) * z;
+                let c = Pos2::new(nr.right(), y);
+                // In its type's colour (faded: not built) when the signal is good enough for it,
+                // grey when it is too weak.
+                let need = min_level(&s.name).unwrap_or(Level::None);
+                let (col, text) = if level >= need { (alpha(kind_color(s.kind), 0.7), DIM) } else { (GHOST, GHOST) };
+                match s.status {
+                    Status::Planned => {
+                        gp.circle_filled(c, 4.5 * z, NODE);
+                        gp.circle_stroke(c, 4.0 * z, Stroke::new(1.4 * z, col));
+                    }
+                    _ => {
+                        gp.circle_filled(c, 2.4 * z, col);
+                    }
+                }
+                gp.text(c - Vec2::new(10.0 * z, 0.0), Align2::RIGHT_CENTER, s.label.as_deref().unwrap_or(&s.name), FontId::proportional(10.5 * z), text);
+                let hit = Rect::from_min_max(Pos2::new(c.x - 120.0 * z, y - OUT_ROW / 2.0 * z), Pos2::new(c.x + 8.0 * z, y + OUT_ROW / 2.0 * z));
+                ui.interact(hit, egui::Id::new(("enf-socket", i, j)), Sense::hover())
+                    .on_hover_text(format!("{} · {}\n{}", s.name, kind_id(s.kind), crate::layout::socket_text(s)));
+            }
+        }
 
         // Earth map: where the measured grid frequency is used.
         let area = area_out(&st).ok().map(|(a, _)| a);

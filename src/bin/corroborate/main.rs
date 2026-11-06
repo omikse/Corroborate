@@ -94,6 +94,8 @@ const WARN: Color32 = Color32::from_rgb(224, 164, 88);
 const SEL: Color32 = Color32::from_rgb(95, 179, 161);
 const GOOD: Color32 = Color32::from_rgb(140, 220, 110);
 const LIVE: Color32 = Color32::from_rgb(255, 80, 80);
+/// An output (or use case) with nothing on it: not built yet, or the signal is too weak for it.
+const GHOST: Color32 = Color32::from_rgb(88, 94, 104);
 
 /// A kind's colour: its type's (types\<id>\type.toml).
 fn kind_color(k: PortKind) -> Color32 {
@@ -1039,7 +1041,11 @@ impl App {
                     continue;
                 }
                 let (c, side) = self.port_place(origin, i, k, true);
-                layout::draw_port(&painter, c, side, &pl, kind_color(p.kind), kind_shape(p.kind), false, p.name, tc, self.zoom);
+                // module.toml's title for it, and grey while the node's signal is too weak for it.
+                let title = self.manifest_of(i).and_then(|m| m.sockets.iter().find(|s| s.name == p.name).and_then(|s| s.label.clone()));
+                let held = self.output_held(i, p.name).is_some();
+                let (col, nc) = if held { (GHOST, DIM) } else { (kind_color(p.kind), tc) };
+                layout::draw_port(&painter, c, side, &pl, col, kind_shape(p.kind), false, title.as_deref().unwrap_or(p.name), nc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
                 if pr.hovered() && self.wiring.is_none() && self.wiring_in.is_none() {
                     pr.clone().on_hover_text(self.port_hover(i, p, true));
