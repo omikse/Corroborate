@@ -67,12 +67,15 @@ fn full_project() -> App {
     a.wire(man, "value", plug, "place");
     a.wire(enf, "location", inv, "location");
     a.wire(inv, "location", map, "location");
-    a.wire(man, "value", comb, "location 1");
-    a.wire(enf, "location", comb, "location 2");
-    a.wire_record(planes, "aircrafts", rec);
-    a.wire_record(comb, "location", rec);
-    a.wire_record(man, "value", rec);
-    a.wire_record(mic, "audio", rec);
+    // Combine grows past its old four inputs.
+    for from in [man, enf, inv, man, enf] {
+        a.wire_many(from, if from == man { "value" } else { "location" }, comb);
+    }
+    assert_eq!(a.graph.nodes()[comb].spec.inputs.len(), 6, "five wired and one free");
+    a.wire_many(planes, "aircrafts", rec);
+    a.wire_many(comb, "location", rec);
+    a.wire_many(man, "value", rec);
+    a.wire_many(mic, "audio", rec);
     a
 }
 
@@ -82,7 +85,7 @@ fn full_project() -> App {
 fn round_trip_every_kind() {
     let a = full_project();
     let wires = a.graph.wires().len();
-    assert_eq!(wires, 13, "all test wires were made: {:#?}", describe_project(&a));
+    assert_eq!(wires, 16, "all test wires were made: {:#?}", describe_project(&a));
     let b = reload(&a);
     assert_eq!(describe_project(&a), describe_project(&b));
     assert_eq!(a.project_text(), b.project_text(), "saving a loaded project changes nothing");
@@ -151,7 +154,7 @@ fn emptied_source_keeps_its_wires() {
     a.wire(src, "audio", enf, "audio");
     let clip = a.add(Kind::Sourcer { input: "clip.mkv".into() }, Pos2::new(30.0, 300.0));
     let rec = a.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(400.0, 300.0));
-    a.wire_record(clip, "video", rec);
+    a.wire_many(clip, "video", rec);
     for s in [src, clip] {
         if let Kind::Sourcer { input } = &mut a.nodes[s].kind {
             input.clear();

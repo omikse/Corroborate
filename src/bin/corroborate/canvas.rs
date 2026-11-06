@@ -108,7 +108,7 @@ impl App {
             self.graph.isolate(i);
             self.nodes[i].hidden = true;
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
         self.pick_none();
         self.msg = format!("deleted {} node(s)", ids.len());
         self.save_project();
@@ -300,17 +300,17 @@ impl App {
             }
             self.graph.isolate(i);
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
         for (a, o, b, inp) in &s.wires {
             if *a < self.nodes.len() && *b < self.nodes.len() {
                 if matches!(self.nodes[*b].kind, Kind::ResultRecord { .. }) {
-                    self.wire_record(*a, o, *b);
+                    self.wire_many(*a, o, *b);
                 } else {
                     let _ = self.graph.connect(*a, o, *b, inp);
                 }
             }
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
         self.sel.picked.retain(|&i| !self.nodes[i].hidden);
         if self.selected.is_some_and(|i| self.nodes[i].hidden) {
             self.selected = None;

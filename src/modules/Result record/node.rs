@@ -77,22 +77,23 @@ impl App {
             .collect()
     }
 
-    /// Every record shows its wired inputs plus one free one.
-    pub(crate) fn sync_record_ports(&mut self) {
+    /// Every node with a `many = true` input shows its wired ports plus one free one.
+    pub(crate) fn sync_many_ports(&mut self) {
         for i in 0..self.nodes.len() {
-            if matches!(self.nodes[i].kind, Kind::ResultRecord { .. }) {
-                self.graph.pack_any_inputs(i, &nodes::RECORD_INPUTS);
+            let names = self.nodes[i].kind.many_names();
+            if !names.is_empty() {
+                self.graph.pack_many(i, &names);
             }
         }
     }
 
-    /// Wire `from.out` into the record's free input (old project files, tests).
-    pub(crate) fn wire_record(&mut self, from: NodeId, out: &str, rec: NodeId) {
-        self.sync_record_ports();
-        if let Some(free) = self.graph.nodes()[rec].spec.inputs.last().map(|p| p.name) {
-            self.wire(from, out, rec, free);
+    /// Wire `from.out` into node `to`'s free `many` port (project files, tests).
+    pub(crate) fn wire_many(&mut self, from: NodeId, out: &str, to: NodeId) {
+        self.sync_many_ports();
+        if let Some(free) = self.graph.nodes()[to].spec.inputs.last().map(|p| p.name) {
+            self.wire(from, out, to, free);
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
     }
 
     pub(crate) fn record_folder(&self, rec: NodeId) -> PathBuf {

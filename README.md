@@ -93,7 +93,7 @@ refused until one is changed. Values of a type are checked against its fields as
 Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the
 tool, under `app\modules\`). Its `module.toml` says what it is: `id` (what project files keep),
 `label`, `category` (the Add node heading), `order`, `aliases` (names older files used), `role`,
-its ports (`[[input]]`, `[[output]]`: name, kind (a type's id), required), its settings (`[[setting]]`: name,
+its ports (`[[input]]`, `[[output]]`: name, kind (a type's id), required; `many = true` on the last input makes it grow as it is wired), its settings (`[[setting]]`: name,
 type, default, range or choices) and, for a module that is a separate program,
 `[processing] program` and `protocol`. `node.rs` holds what a built-in module does in the
 workbench (state while running, canvas, status, timeline marks, result file). The app

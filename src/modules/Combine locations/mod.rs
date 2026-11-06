@@ -3,7 +3,6 @@
 use crate::core::NodeSpec;
 
 crate::builtin_manifest!(look);
-pub const INPUTS: [&str; 4] = ["location 1", "location 2", "location 3", "location 4"];
 
 /// The mode as written in project files and labels: "any" (OR) or "all" (AND).
 pub fn mode(any: bool) -> &'static str {

@@ -58,7 +58,7 @@ impl App {
         }
         let outputs = self.nodes[i].kind.spec().outputs;
         self.graph.set_outputs(i, outputs);
-        self.sync_record_ports();
+        self.sync_many_ports();
     }
 }
 

@@ -8,7 +8,8 @@ impl App {
     pub(crate) fn combine_area_out(&self, i: NodeId, any: bool) -> Result<(Arc<Area>, String), String> {
         let mut acc: Option<WorldMask> = None;
         let mut used = Vec::new();
-        for inp in nodes::COMBINE_INPUTS {
+        let inputs: Vec<&'static str> = self.graph.nodes()[i].spec.inputs.iter().map(|p| p.name).collect();
+        for inp in inputs {
             let Some((f, _)) = self.graph.feeder(i, inp) else { continue };
             if let Ok((a, _)) = self.area_from(f) {
                 let al = a.allowed();

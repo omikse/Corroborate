@@ -17,6 +17,8 @@
 //!                              # or in this module's own types\<id>.toml, see src/types.rs)
 //! kind = "audio"
 //! required = true              # must be wired for the module to run (default false)
+//! many = true                  # (last input only) grows as it is wired: "audio 1", "audio 2", …
+//!                              # always one free input more, up to MANY_MAX
 //!
 //! [[output]]                   # what it gives
 //! name = "location"
@@ -320,6 +322,8 @@ pub struct Manifest {
     /// Time inputs that anchor another input's clock (`[[input]] anchors = "audio"`): (time
     /// input, anchored input). The wired time is when that input's audio starts.
     pub anchors: Vec<(String, String)>,
+    /// The last input's name when it is `many = true`: it grows as it is wired ("in 1", "in 2", …).
+    pub many: Option<String>,
     /// Its look.rhai, if it has one.
     pub script: Option<String>,
 }
@@ -327,7 +331,19 @@ pub struct Manifest {
 impl Manifest {
     /// The node it makes: its id, role and declared ports.
     pub fn spec(&self) -> NodeSpec {
-        NodeSpec { name: self.id, role: self.role, inputs: self.inputs.clone(), outputs: self.outputs.clone() }
+        let mut inputs = self.inputs.clone();
+        if let (Some(_), Some(last)) = (&self.many, inputs.last_mut()) {
+            last.name = self.many_names()[0];
+        }
+        NodeSpec { name: self.id, role: self.role, inputs, outputs: self.outputs.clone() }
+    }
+
+    /// The names a `many` input takes, in order ("in 1" … "in 24"); empty without one.
+    pub fn many_names(&self) -> Vec<&'static str> {
+        match &self.many {
+            Some(base) => (1..=MANY_MAX).map(|k| intern(&format!("{base} {k}"))).collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn setting(&self, name: &str) -> Option<&Setting> {
@@ -341,12 +357,20 @@ impl Manifest {
 
     /// How port `name` looks, as module.toml says.
     pub fn port_look(&self, name: &str) -> PortLook {
+        // A `many` input's ports ("in 3") look like the input declared ("in").
+        let name = match &self.many {
+            Some(base) if name.strip_prefix(base.as_str()).is_some_and(|r| r.starts_with(' ')) => base.as_str(),
+            _ => name,
+        };
         self.port_looks.iter().find(|(n, _)| n == name).map(|(_, l)| l.clone()).unwrap_or_default()
     }
 }
 
 /// A name that lives as long as the program, kept once however often it is asked for. Ports and
 /// node names are `&'static str`; names read from files come through here.
+/// The most ports a `many = true` input grows to.
+pub const MANY_MAX: usize = 24;
+
 pub fn intern(s: &str) -> &'static str {
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
     let mut names = NAMES.lock().unwrap();
@@ -416,6 +440,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
     let mut anchors: Vec<(String, String)> = Vec::new();
+    let mut many: Option<String> = None;
     let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
         for p in tables(k)? {
@@ -435,6 +460,11 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
                 Some(toml::Value::String(a)) if k == "input" && kind == PortKind::Time => anchors.push((name.to_string(), a.clone())),
                 Some(_) => return Err(format!("[[{k}]] {name}: `anchors` goes on a time input and names another input")),
             }
+            match p.get("many") {
+                None | Some(toml::Value::Boolean(false)) => {}
+                Some(toml::Value::Boolean(true)) if k == "input" => many = Some(name.to_string()),
+                Some(_) => return Err(format!("[[{k}]] {name}: `many` goes on an input and is true or false")),
+            }
             let l = port_look(p, &format!("[[{k}]] {name}"))?;
             if l != PortLook::default() {
                 port_looks.push((name.to_string(), l));
@@ -445,6 +475,14 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let inputs = ports("input", false)?;
     let outputs = ports("output", true)?;
+    if let Some(m) = &many {
+        if inputs.last().map(|p| p.name) != Some(m.as_str()) {
+            return Err(format!("[[input]] {m}: `many` goes on the last input only"));
+        }
+        if inputs.last().is_some_and(|p| p.required) {
+            return Err(format!("[[input]] {m}: a `many` input cannot be required"));
+        }
+    }
     if let Some((t, a)) = anchors.iter().find(|(_, a)| !inputs.iter().any(|p| p.name == a)) {
         return Err(format!("[[input]] {t}: anchors \"{a}\", which is not an input"));
     }
@@ -564,6 +602,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         frame,
         port_looks,
         anchors,
+        many,
         script: None,
     })
 }
@@ -640,6 +679,20 @@ mod tests {
         assert!(e.contains("line"), "{e}");
     }
 
+    /// A `many` input: the last one, not required; its ports are "name 1", "name 2", ….
+    #[test]
+    fn many_input_grows_from_name_1() {
+        let m = parse("id = \"a\"\nlabel = \"a\"\n[[input]]\nname = \"x\"\nkind = \"audio\"\n[[input]]\nname = \"loc\"\nkind = \"location\"\nmany = true").unwrap();
+        let s = m.spec();
+        assert_eq!(s.inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["x", "loc 1"]);
+        assert_eq!(m.many_names().len(), MANY_MAX);
+        assert_eq!(m.many_names()[2], "loc 3");
+        let e = parse("id = \"a\"\nlabel = \"a\"\n[[input]]\nname = \"loc\"\nkind = \"location\"\nmany = true\n[[input]]\nname = \"x\"\nkind = \"audio\"").unwrap_err();
+        assert!(e.contains("last input"), "{e}");
+        let e = parse("id = \"a\"\nlabel = \"a\"\n[[input]]\nname = \"loc\"\nkind = \"location\"\nmany = true\nrequired = true").unwrap_err();
+        assert!(e.contains("required"), "{e}");
+    }
+
     #[test]
     fn categories_known_first_then_alphabetical() {
         let m = |id: &str, label: &str, cat: &str, order: Option<i64>| Manifest {
@@ -660,6 +713,7 @@ mod tests {
             frame: FrameLook::default(),
             port_looks: vec![],
             anchors: vec![],
+            many: None,
             script: None,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];

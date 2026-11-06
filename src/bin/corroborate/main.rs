@@ -508,15 +508,18 @@ impl App {
         }
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                if matches!(self.nodes[b].kind, Kind::ResultRecord { .. }) {
-                    // Old projects named the record's inputs by kind: any name takes the free input.
-                    self.wire_record(a, &o, b);
+                let names = self.nodes[b].kind.many_names();
+                let fixed = self.graph.nodes()[b].spec.inputs.iter().any(|p| p.name == i && !names.contains(&p.name));
+                if !names.is_empty() && !fixed {
+                    // A `many` input: wires come in order and take the free port (old projects
+                    // named the record's inputs by kind).
+                    self.wire_many(a, &o, b);
                 } else {
                     let _ = self.graph.connect(a, &o, b, &i);
                 }
             }
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
         new
     }
 
@@ -757,8 +760,8 @@ impl App {
             // Title and one row per port, nothing else.
             Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 6.0)
         } else if let Some((w, h)) = self.frame_look(i).size {
-            // module.toml's [look] size, or what its look.rhai says.
-            Vec2::new(w, h)
+            // module.toml's [look] size, or what its look.rhai says; taller when its ports need it.
+            Vec2::new(w, h.max(HEAD + self.port_rows(i) * ROW + 26.0))
         } else {
             let standard = Vec2::new(NODE_W, HEAD + self.port_rows(i) * ROW + 26.0);
             look::of(&self.nodes[i].kind).size(self, i, standard)
@@ -1074,7 +1077,7 @@ impl App {
                     match self.graph.connect(f, out, n, inp) {
                         Ok(()) => {
                             self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[f].label, self.nodes[n].label);
-                            self.sync_record_ports();
+                            self.sync_many_ports();
                             self.save_project();
                         }
                         Err(e) => self.msg = describe(&e),
@@ -1104,7 +1107,7 @@ impl App {
                     match self.graph.connect(n, out, t, inp) {
                         Ok(()) => {
                             self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[n].label, self.nodes[t].label);
-                            self.sync_record_ports();
+                            self.sync_many_ports();
                             self.save_project();
                         }
                         Err(e) => self.msg = describe(&e),
@@ -1118,7 +1121,7 @@ impl App {
         if let Some((i, name)) = unwire {
             if self.graph.disconnect(i, name) {
                 self.msg = format!("unwired {}.{name}", self.nodes[i].label);
-                self.sync_record_ports();
+                self.sync_many_ports();
                 self.save_project();
             }
         }
@@ -1324,7 +1327,7 @@ mod canvas_timing {
         let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
         app.wire(man, "value", inv, "location");
         let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(480.0, 60.0));
-        app.wire_record(man, "value", rec);
+        app.wire_many(man, "value", rec);
         for (k, from, out) in [(0, man, "value"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));
             app.wire(from, out, m, "location");

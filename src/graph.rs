@@ -151,18 +151,21 @@ impl Graph {
         self.wires.retain(|w| w.to != id);
     }
 
-    /// Give node `id` open inputs that take any kind (the Result record): its wired inputs first,
-    /// packed in order, then one free input, as many as `names` holds.
-    pub fn pack_any_inputs(&mut self, id: NodeId, names: &[&'static str]) {
+    /// Pack node `id`'s `many` input (its last inputs, named `names` in order): its wired ports
+    /// first, in order, then one free port, at most `names.len()`. Other inputs stay as they are.
+    pub fn pack_many(&mut self, id: NodeId, names: &[&'static str]) {
         let Some(node) = self.nodes.get_mut(id) else { return };
-        let mut mine: Vec<usize> = self.wires.iter().enumerate().filter(|(_, w)| w.to == id).map(|(k, _)| k).collect();
+        let fixed = node.spec.inputs.iter().position(|p| names.contains(&p.name)).unwrap_or(node.spec.inputs.len());
+        let kind = node.spec.inputs.get(fixed).map_or(crate::core::PortKind::Any, |p| p.kind);
+        let mut mine: Vec<usize> = self.wires.iter().enumerate().filter(|(_, w)| w.to == id && w.to_port >= fixed).map(|(k, _)| k).collect();
         mine.sort_by_key(|&k| self.wires[k].to_port);
         mine.truncate(names.len());
         for (slot, &k) in mine.iter().enumerate() {
-            self.wires[k].to_port = slot;
+            self.wires[k].to_port = fixed + slot;
         }
         let n = (mine.len() + 1).min(names.len());
-        let inputs: Vec<crate::core::Port> = names[..n].iter().map(|s| crate::core::Port::opt(s, crate::core::PortKind::Any)).collect();
+        let mut inputs: Vec<crate::core::Port> = node.spec.inputs[..fixed].to_vec();
+        inputs.extend(names[..n].iter().map(|s| crate::core::Port::opt(s, kind)));
         if node.spec.inputs != inputs {
             node.spec.inputs = inputs;
         }

@@ -77,7 +77,7 @@ impl App {
                 let out = self.graph.nodes()[n].spec.outputs[k].name;
                 match spec.inputs.iter().find(|p| p.kind == want) {
                     Some(p) => self.wire(n, out, id, p.name),
-                    None => self.wire_record(n, out, id),
+                    None => self.wire_many(n, out, id),
                 }
             }
             End::In(n, k) => {
@@ -88,7 +88,7 @@ impl App {
                 }
             }
         }
-        self.sync_record_ports();
+        self.sync_many_ports();
         self.pick_only(id);
         self.save_project();
         id

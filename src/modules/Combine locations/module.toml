@@ -14,21 +14,11 @@ mode = "all"
 label = "Combine locations (any)"
 mode = "any"
 
+# Grows as it is wired: "location 1", "location 2", …
 [[input]]
-name = "location 1"
+name = "location"
 kind = "location"
-
-[[input]]
-name = "location 2"
-kind = "location"
-
-[[input]]
-name = "location 3"
-kind = "location"
-
-[[input]]
-name = "location 4"
-kind = "location"
+many = true
 
 [[output]]
 name = "location"

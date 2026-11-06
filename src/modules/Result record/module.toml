@@ -3,7 +3,12 @@ label = "Result record"
 category = "Output"
 aliases = ["record"]
 role = "record"
-# Its inputs take anything and grow as they are wired (made in code: "in 1", "in 2", …).
+
+# Takes anything; grows as it is wired: "in 1", "in 2", …
+[[input]]
+name = "in"
+kind = "any"
+many = true
 
 [[output]]
 name = "location"

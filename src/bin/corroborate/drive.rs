@@ -274,7 +274,7 @@ fn area_timing() {
     let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
     app.wire(man, "value", inv, "location");
     let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(990.0, 40.0));
-    app.wire_record(man, "value", rec);
+    app.wire_many(man, "value", rec);
     for (name, id) in [("value", man), ("invert", inv), ("record", rec)] {
         let t = Instant::now();
         for _ in 0..20 {

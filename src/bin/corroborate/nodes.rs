@@ -40,8 +40,6 @@ pub enum Kind {
     Missing { name: String, param: String, rows: Vec<(String, String)> },
 }
 
-pub use combine_locations::INPUTS as COMBINE_INPUTS;
-pub use result_record::INPUTS as RECORD_INPUTS;
 
 /// The Add node heading "Plugin from file…" goes under.
 pub const PLUGINS: &str = "Plugins";
@@ -83,6 +81,16 @@ impl Kind {
             Kind::InvertLocation => label(invert_location::manifest()),
             Kind::Module { m, .. } => m.label.clone(),
             Kind::Missing { name, .. } => format!("{name} (module missing)"),
+        }
+    }
+
+    /// The names its `many = true` input grows through ("in 1", "in 2", …); empty without one.
+    pub fn many_names(&self) -> Vec<&'static str> {
+        match self {
+            Kind::ResultRecord { .. } => result_record::manifest().many_names(),
+            Kind::CombineLocations { .. } => combine_locations::manifest().many_names(),
+            Kind::Module { m, .. } => m.many_names(),
+            _ => Vec::new(),
         }
     }
 

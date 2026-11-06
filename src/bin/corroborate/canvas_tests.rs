@@ -284,7 +284,7 @@ fn value_nodes() {
     }
     let time = d.app().add(time, Pos2::new(30.0, 330.0));
     let rec = d.app().add(Kind::ResultRecord { folder: String::new() }, Pos2::new(800.0, 330.0));
-    d.app().wire_record(time, "value", rec);
+    d.app().wire_many(time, "value", rec);
     d.frames(5);
     assert!(d.app().map_status(map).contains('%'), "the map shows the place: {}", d.app().map_status(map));
     let json = d.app().result_json(&[time, rec]);
