@@ -1,0 +1,4 @@
+id = "planes"
+label = "Planes (Doppler)"
+category = "Detectors"
+order = 1

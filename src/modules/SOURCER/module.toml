@@ -1,0 +1,7 @@
+# What this module is. The folder is named by its label; the id is what project files keep.
+id = "sourcer"
+label = "SOURCER"
+category = "Sources"
+order = 1
+# Names older project files used for this module.
+aliases = ["source", "file", "stream", "mic"]

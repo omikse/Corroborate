@@ -137,6 +137,15 @@ impl Graph {
         });
     }
 
+    /// Replace node `id`'s inputs (a node whose module is missing gets them from its saved wires).
+    /// Must be called before wiring them.
+    pub fn set_inputs(&mut self, id: NodeId, inputs: Vec<crate::core::Port>) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.spec.inputs = inputs;
+        }
+        self.wires.retain(|w| w.to != id);
+    }
+
     /// Give node `id` open inputs that take any kind (the Result record): its wired inputs first,
     /// packed in order, then one free input, as many as `names` holds.
     pub fn pack_any_inputs(&mut self, id: NodeId, names: &[&'static str]) {

@@ -1,0 +1,6 @@
+id = "adsb-check"
+label = "ADS-B check"
+category = "Plugins"
+
+[processing]
+program = "adsb-check.exe"

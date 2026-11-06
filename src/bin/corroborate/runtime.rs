@@ -6,7 +6,7 @@
 use crate::enf_node::{self, EnfJob, EnfState};
 use crate::planes_node::{self, PlanesState};
 use crate::plugin_node::{self, PluginJob, PluginState};
-use crate::source_node;
+use crate::sourcer_node;
 use corroborate::timebase::{self, Anchor, SharedAnchor};
 use corroborate::{ingest, INPUT_SR};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +33,7 @@ pub struct NodeState {
     pub planes: PlanesState,
     pub enf: EnfState,
     pub plugin: PluginState,
-    pub source: source_node::SourceState,
+    pub source: sourcer_node::SourceState,
 }
 
 impl NodeState {
@@ -72,7 +72,7 @@ pub struct Job {
     /// Working folder for plugins (adsb-check writes its flight log there).
     pub work_dir: std::path::PathBuf,
     /// WAV files recording this source's audio (Result record nodes add and remove them).
-    pub taps: crate::record_node::Taps,
+    pub taps: crate::result_record_node::Taps,
 }
 
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -110,7 +110,7 @@ fn run(job: Job) {
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
             set_status("yt-dlp: checking the link, downloading the audio if it is not live…");
-            match source_node::resolve(u) {
+            match sourcer_node::resolve(u) {
                 Ok((r, is_live)) => {
                     // A video that is not live is read as a recording: as fast as it decodes.
                     live = is_live;
@@ -126,7 +126,7 @@ fn run(job: Job) {
 
     // Metadata and pictures for the SOURCER's own view and outputs (not for microphones).
     if !matches!(job.input, Input::Mic(_)) {
-        source_node::start_side(ff_input.clone(), key.clone(), live, job.source.clone(), job.stop.clone());
+        sourcer_node::start_side(ff_input.clone(), key.clone(), live, job.source.clone(), job.stop.clone());
     }
 
     // UTC anchor: file metadata or our recording sidecar for files; for live sources the PC

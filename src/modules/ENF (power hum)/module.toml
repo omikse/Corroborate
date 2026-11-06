@@ -1,0 +1,6 @@
+id = "enf"
+label = "ENF (power hum)"
+category = "Detectors"
+order = 2
+# Programs of this module, copied into its folder by run.cmd (planes-view uses enf-plugin).
+programs = ["enf-plugin.exe"]

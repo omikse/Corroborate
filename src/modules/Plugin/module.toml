@@ -1,0 +1,4 @@
+# Runs any program that speaks the plugin protocol. Not in Add node by itself:
+# "Plugin from file…" there makes one, and module folders with a program make the rest.
+id = "plugin"
+label = "Plugin"

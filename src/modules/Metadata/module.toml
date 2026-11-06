@@ -1,0 +1,8 @@
+id = "metadata"
+label = "Metadata"
+category = "Plugins"
+# The program was called meta-plugin before.
+aliases = ["meta-plugin"]
+
+[processing]
+program = "metadata.exe"

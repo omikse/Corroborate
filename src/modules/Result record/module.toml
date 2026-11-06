@@ -1,0 +1,4 @@
+id = "result-record"
+label = "Result record"
+category = "Output"
+aliases = ["record"]

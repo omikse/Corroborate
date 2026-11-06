@@ -24,26 +24,26 @@ mod nodes;
 mod runtime;
 
 // Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
-#[path = "../../modules/combine/node.rs"]
-mod combine_node;
-#[path = "../../modules/enf/node.rs"]
+#[path = "../../modules/Combine locations/node.rs"]
+mod combine_locations_node;
+#[path = "../../modules/ENF (power hum)/node.rs"]
 mod enf_node;
-#[path = "../../modules/grid_frequencies/node.rs"]
-mod grid_node;
-#[path = "../../modules/invert/node.rs"]
-mod invert_node;
-#[path = "../../modules/manual/node.rs"]
-mod manual_node;
-#[path = "../../modules/map/node.rs"]
+#[path = "../../modules/Grid frequencies (50 or 60 Hz)/node.rs"]
+mod grid_frequencies_node;
+#[path = "../../modules/Invert location/node.rs"]
+mod invert_location_node;
+#[path = "../../modules/Manual data/node.rs"]
+mod manual_data_node;
+#[path = "../../modules/Map/node.rs"]
 mod map_node;
-#[path = "../../modules/planes/node.rs"]
+#[path = "../../modules/Planes (Doppler)/node.rs"]
 mod planes_node;
-#[path = "../../modules/plugin/node.rs"]
+#[path = "../../modules/Plugin/node.rs"]
 mod plugin_node;
-#[path = "../../modules/record/node.rs"]
-mod record_node;
-#[path = "../../modules/source/node.rs"]
-mod source_node;
+#[path = "../../modules/Result record/node.rs"]
+mod result_record_node;
+#[path = "../../modules/SOURCER/node.rs"]
+mod sourcer_node;
 
 use corroborate::core::{PortKind, Role, SourceKind};
 use corroborate::graph::{Graph, GraphError, NodeId};
@@ -183,7 +183,7 @@ struct NodeData {
     /// Deleted from the workspace (ids stay stable; a deleted node has no wires).
     hidden: bool,
     /// WAV files this source's audio is being recorded into (by Result record nodes).
-    taps: record_node::Taps,
+    taps: result_record_node::Taps,
 }
 
 fn project_file() -> Option<PathBuf> {
@@ -216,7 +216,7 @@ struct App {
     msg: String,
     stop: Option<Arc<AtomicBool>>,
     /// Recordings in progress, by record node, and each record's last note.
-    recordings: HashMap<NodeId, record_node::Recording>,
+    recordings: HashMap<NodeId, result_record_node::Recording>,
     record_notes: HashMap<NodeId, String>,
     /// What the running graph was started from; a change (held for a moment) restarts it.
     run_sig: Option<String>,
@@ -276,7 +276,7 @@ impl App {
         }
         if let Some(src) = start {
             // A path or URL on the command line goes into the first source node.
-            let kind = Kind::Source { input: src };
+            let kind = Kind::Sourcer { input: src };
             match app.nodes.iter().position(|n| !n.hidden && n.kind.is_source()) {
                 Some(i) => app.nodes[i].kind = kind,
                 None => {
@@ -336,7 +336,7 @@ impl App {
             text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
         }
         for (ni, &i) in keep.iter().enumerate() {
-            if let Kind::Manual { rows } = &self.nodes[i].kind {
+            if let Kind::ManualData { rows } = &self.nodes[i].kind {
                 for (k, v) in rows {
                     text.push_str(&format!("row|{ni}|{}|{}\n", clean(k), clean(v)));
                 }
@@ -366,7 +366,7 @@ impl App {
             let f: Vec<&str> = line.split('|').collect();
             match f.as_slice() {
                 ["node", k, x, y, label, param] => {
-                    let Some(kind) = Kind::from_saved(k, param.to_string()) else { continue };
+                    let kind = Kind::from_saved(k, param.to_string());
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
                     if !label.trim().is_empty() {
                         self.nodes[id].label = label.to_string();
@@ -381,25 +381,43 @@ impl App {
             return false;
         }
         for (n, k, v) in rows {
-            if let Some(Kind::Manual { rows }) = self.nodes.get_mut(n).map(|x| &mut x.kind) {
+            if let Some(Kind::ManualData { rows }) = self.nodes.get_mut(n).map(|x| &mut x.kind) {
                 rows.push((k, v));
             }
+        }
+        // A node whose module this tool lacks keeps the ports its saved wires use.
+        for s in 0..self.nodes.len() {
+            if !matches!(self.nodes[s].kind, Kind::Missing { .. }) {
+                continue;
+            }
+            let ins: Vec<&str> = wires.iter().filter(|w| w.2 == s).map(|w| w.3.as_str()).collect();
+            let outs: Vec<(&str, PortKind)> = wires
+                .iter()
+                .filter(|w| w.0 == s && w.2 < self.nodes.len())
+                .map(|w| {
+                    let k = self.graph.nodes()[w.2].spec.inputs.iter().find(|p| p.name == w.3).map_or(PortKind::Any, |p| p.kind);
+                    (w.1.as_str(), k)
+                })
+                .collect();
+            let (ins, outs) = nodes::missing_ports(&ins, &outs);
+            self.graph.set_inputs(s, ins);
+            self.graph.set_outputs(s, outs);
         }
         // A SOURCER saved with its box emptied had kept its outputs and wires (they come back to
         // life with the next source); an empty one loads with none, so give back the outputs
         // its saved wires use: the usual set, with video when a wire takes it.
         for s in 0..self.nodes.len() {
-            if matches!(&self.nodes[s].kind, Kind::Source { input } if input.trim().is_empty()) {
+            if matches!(&self.nodes[s].kind, Kind::Sourcer { input } if input.trim().is_empty()) {
                 let used: Vec<&str> = wires.iter().filter(|w| w.0 == s).map(|w| w.1.as_str()).collect();
                 if !used.is_empty() {
                     let like = if used.contains(&"video") { "x.mkv" } else { "x.wav" };
-                    self.graph.set_outputs(s, corroborate::modules::source::outputs(like));
+                    self.graph.set_outputs(s, corroborate::modules::sourcer::outputs(like));
                 }
             }
         }
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                if matches!(self.nodes[b].kind, Kind::Record { .. }) {
+                if matches!(self.nodes[b].kind, Kind::ResultRecord { .. }) {
                     // Old projects named the record's inputs by kind: any name takes the free input.
                     self.wire_record(a, &o, b);
                 } else {
@@ -433,10 +451,10 @@ impl App {
         let n = &self.nodes[from];
         match &n.kind {
             Kind::Enf { .. } => enf_node::area_out(&n.state),
-            Kind::Manual { rows } => manual_node::area_out(rows),
-            Kind::Record { .. } => self.record_area_out(from),
-            Kind::Combine { any } => self.combine_area_out(from, *any),
-            Kind::Invert => self.invert_area_out(from),
+            Kind::ManualData { rows } => manual_data_node::area_out(rows),
+            Kind::ResultRecord { .. } => self.record_area_out(from),
+            Kind::CombineLocations { any } => self.combine_area_out(from, *any),
+            Kind::InvertLocation => self.invert_area_out(from),
             _ => Err("this node gives no area".into()),
         }
     }
@@ -457,7 +475,7 @@ impl App {
                 continue;
             }
             let input = match &n.kind {
-                Kind::Source { input } => source_node::input(input),
+                Kind::Sourcer { input } => sourcer_node::input(input),
                 _ => None,
             };
             let Some(input) = input else {
@@ -507,17 +525,17 @@ impl App {
             if n.hidden {
                 continue;
             }
-            if let Kind::Source { input } = &n.kind {
+            if let Kind::Sourcer { input } = &n.kind {
                 s.push_str(&format!("{i}:{input}|"));
                 for (t, _) in self.graph.targets(i, "audio") {
                     // Wiring audio into a record taps it while recording: no restart.
-                    if matches!(self.nodes[t].kind, Kind::Record { .. }) {
+                    if matches!(self.nodes[t].kind, Kind::ResultRecord { .. }) {
                         continue;
                     }
                     s.push_str(&format!("{t}:{}:{};", self.nodes[t].kind.spec().name, self.nodes[t].kind.saved_param()));
                 }
             }
-            if let Kind::Manual { rows } = &n.kind {
+            if let Kind::ManualData { rows } = &n.kind {
                 // Plugins read the place when they start.
                 if self.graph.targets(i, "place").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
                     s.push_str(&format!("{i}:{rows:?}|"));
@@ -580,12 +598,13 @@ impl App {
             let own = match &n.kind {
                 Kind::Planes => planes_node::json(&s),
                 Kind::Enf { .. } => enf_node::json(&s),
-                Kind::GridFrequencies { path } => grid_node::json(path),
+                Kind::GridFrequencies { path } => grid_frequencies_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
-                Kind::Manual { rows } => manual_node::json(rows),
-                Kind::Source { .. } => source_node::json(&s),
-                Kind::Map | Kind::Invert | Kind::Combine { .. } => String::new(),
-                Kind::Record { .. } => {
+                Kind::ManualData { rows } => manual_data_node::json(rows),
+                Kind::Sourcer { .. } => sourcer_node::json(&s),
+                Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } => String::new(),
+                Kind::Missing { name, .. } => format!(",\"module_missing\":\"{}\"", json_escape(name)),
+                Kind::ResultRecord { .. } => {
                     drop(s);
                     self.record_json(i)
                 }
@@ -649,10 +668,11 @@ impl App {
 
     fn add_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
         let mut pick: Option<Kind> = None;
-        for (section, kinds) in nodes::menu() {
-            ui.label(egui::RichText::new(section).small().color(DIM));
-            for k in kinds {
-                if ui.button(k.default_label()).clicked() {
+        // Headings and entries come from the modules' module.toml (category, label, variants).
+        for (section, entries) in nodes::menu() {
+            ui.label(egui::RichText::new(section.to_uppercase()).small().color(DIM));
+            for (label, k) in entries {
+                if ui.button(label).clicked() {
                     pick = Some(k);
                 }
             }
@@ -790,13 +810,14 @@ impl App {
                     let s = self.nodes[i].state.lock().unwrap();
                     let st = match &self.nodes[i].kind {
                         Kind::Plugin { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
-                        Kind::Manual { rows } => manual_node::status(rows),
+                        Kind::ManualData { rows } => manual_data_node::status(rows),
                         Kind::Map => self.map_status(i),
-                        Kind::Combine { .. } | Kind::Invert => match self.area_from(i) {
+                        Kind::CombineLocations { .. } | Kind::InvertLocation => match self.area_from(i) {
                             Ok((a, _)) => map_node::area_status(&a),
                             Err(e) => e,
                         },
-                        Kind::Record { .. } => self.record_status(i),
+                        Kind::ResultRecord { .. } => self.record_status(i),
+                        Kind::Missing { .. } => "module not found: add its folder to modules\\".into(),
                         _ => s.status.clone(),
                     };
                     (st, s.running)
@@ -822,7 +843,7 @@ impl App {
                     None => kind_color(p.kind),
                 };
                 let name: String = match (fed, fed_kind) {
-                    (Some((_, o)), Some(fk)) => format!("{o} · {}", corroborate::modules::record::kind_name(fk)),
+                    (Some((_, o)), Some(fk)) => format!("{o} · {}", corroborate::modules::result_record::kind_name(fk)),
                     _ if p.kind == PortKind::Any => "+".into(),
                     _ => p.name.into(),
                 };
@@ -1186,10 +1207,10 @@ mod canvas_timing {
         let ctx = egui::Context::default();
         let mut app = App::empty();
         let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
-        let man = app.add(Kind::Manual { rows }, Pos2::new(20.0, 420.0));
-        let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
+        let man = app.add(Kind::ManualData { rows }, Pos2::new(20.0, 420.0));
+        let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
         app.wire(man, "place", inv, "location");
-        let rec = app.add(Kind::Record { folder: String::new() }, Pos2::new(480.0, 60.0));
+        let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(480.0, 60.0));
         app.wire_record(man, "place", rec);
         for (k, from, out) in [(0, man, "place"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));

@@ -15,6 +15,7 @@ pub mod core;
 pub mod ingest;
 pub mod locate;
 pub mod module;
+pub mod module_manifest;
 pub mod modules;
 pub mod plugin;
 pub mod graph;

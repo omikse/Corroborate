@@ -14,7 +14,7 @@ fn describe_project(app: &App) -> Vec<String> {
         .map(|&i| {
             let n = &app.nodes[i];
             let rows = match &n.kind {
-                Kind::Manual { rows } => format!(" rows={rows:?}"),
+                Kind::ManualData { rows } => format!(" rows={rows:?}"),
                 _ => String::new(),
             };
             format!("node {} {} {:?} label={:?} at {:.0},{:.0}{rows}", idx(i), n.kind.spec().name, n.kind.saved_param(), n.label, n.pos.x, n.pos.y)
@@ -41,24 +41,24 @@ fn reload(app: &App) -> App {
 /// A project with one of every node kind, unusual settings and labels, and every kind of wire.
 fn full_project() -> App {
     let mut a = App::empty();
-    let src = a.add(Kind::Source { input: r"C:\Media\field recording 03.wav".into() }, Pos2::new(30.0, 40.0));
-    let vid = a.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(30.0, 200.0));
-    let mic = a.add(Kind::Source { input: "mic:Microphone (USB Audio Device)".into() }, Pos2::new(30.0, 360.0));
+    let src = a.add(Kind::Sourcer { input: r"C:\Media\field recording 03.wav".into() }, Pos2::new(30.0, 40.0));
+    let vid = a.add(Kind::Sourcer { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(30.0, 200.0));
+    let mic = a.add(Kind::Sourcer { input: "mic:Microphone (USB Audio Device)".into() }, Pos2::new(30.0, 360.0));
     let rows = vec![
         ("coordinates".to_string(), "50.08, 14.42".to_string()),
         ("radius_km".to_string(), "25".to_string()),
         ("notes".to_string(), "Příbram, ½ km from the road: 30 °C".to_string()),
         ("empty".to_string(), String::new()),
     ];
-    let man = a.add(Kind::Manual { rows }, Pos2::new(30.0, 520.0));
+    let man = a.add(Kind::ManualData { rows }, Pos2::new(30.0, 520.0));
     let planes = a.add(Kind::Planes, Pos2::new(500.0, 700.0));
     let enf = a.add(Kind::Enf { grid: r"D:\grids\eu.json".into() }, Pos2::new(500.0, 40.0));
     a.add(Kind::GridFrequencies { path: r"D:\grids\eu.json".into() }, Pos2::new(500.0, 400.0));
     let plug = a.add(Kind::Plugin { path: r"C:\Tools\my plugin\detect.exe".into() }, Pos2::new(30.0, 760.0));
-    let inv = a.add(Kind::Invert, Pos2::new(1050.0, 400.0));
+    let inv = a.add(Kind::InvertLocation, Pos2::new(1050.0, 400.0));
     let map = a.add(Kind::Map, Pos2::new(1300.0, 400.0));
-    let comb = a.add(Kind::Combine { any: true }, Pos2::new(1050.0, 600.0));
-    let rec = a.add(Kind::Record { folder: r"E:\Evidence\case 12".into() }, Pos2::new(1050.0, 40.0));
+    let comb = a.add(Kind::CombineLocations { any: true }, Pos2::new(1050.0, 600.0));
+    let rec = a.add(Kind::ResultRecord { folder: r"E:\Evidence\case 12".into() }, Pos2::new(1050.0, 40.0));
     a.nodes[src].label = "Field recorder — north gate".into();
     a.nodes[mic].label = "Mic 2".into();
 
@@ -114,24 +114,24 @@ fn saves_through_a_file() {
 #[test]
 fn separators_in_text_do_not_shift_fields() {
     let mut a = App::empty();
-    let man = a.add(Kind::Manual { rows: vec![("a|b".into(), "line 1\nline 2".into()), ("after".into(), "kept".into())] }, Pos2::new(30.0, 40.0));
+    let man = a.add(Kind::ManualData { rows: vec![("a|b".into(), "line 1\nline 2".into()), ("after".into(), "kept".into())] }, Pos2::new(30.0, 40.0));
     a.nodes[man].label = "two\r\nlines | here".into();
-    let src = a.add(Kind::Source { input: "C:\\x|y.wav".into() }, Pos2::new(400.0, 40.0));
+    let src = a.add(Kind::Sourcer { input: "C:\\x|y.wav".into() }, Pos2::new(400.0, 40.0));
     let b = reload(&a);
     assert_eq!(b.nodes.len(), 2);
     assert_eq!(b.nodes[man].label, "two  lines   here");
     match &b.nodes[man].kind {
-        Kind::Manual { rows } => assert_eq!(rows, &[("a b".to_string(), "line 1 line 2".to_string()), ("after".to_string(), "kept".to_string())]),
+        Kind::ManualData { rows } => assert_eq!(rows, &[("a b".to_string(), "line 1 line 2".to_string()), ("after".to_string(), "kept".to_string())]),
         k => panic!("{k:?}"),
     }
-    assert!(matches!(&b.nodes[src].kind, Kind::Source { input } if input == "C:\\x y.wav"));
+    assert!(matches!(&b.nodes[src].kind, Kind::Sourcer { input } if input == "C:\\x y.wav"));
 }
 
 /// Deleted nodes are not saved; the others are renumbered and keep their wires.
 #[test]
 fn deleted_nodes_are_left_out() {
     let mut a = App::empty();
-    let src = a.add(Kind::Source { input: "x.wav".into() }, Pos2::new(30.0, 40.0));
+    let src = a.add(Kind::Sourcer { input: "x.wav".into() }, Pos2::new(30.0, 40.0));
     let gone = a.add(Kind::Planes, Pos2::new(400.0, 40.0));
     let enf = a.add(Kind::Enf { grid: String::new() }, Pos2::new(400.0, 300.0));
     a.wire(src, "audio", gone, "audio");
@@ -148,14 +148,14 @@ fn deleted_nodes_are_left_out() {
 #[test]
 fn emptied_source_keeps_its_wires() {
     let mut a = App::empty();
-    let src = a.add(Kind::Source { input: "x.wav".into() }, Pos2::new(30.0, 40.0));
+    let src = a.add(Kind::Sourcer { input: "x.wav".into() }, Pos2::new(30.0, 40.0));
     let enf = a.add(Kind::Enf { grid: String::new() }, Pos2::new(400.0, 40.0));
     a.wire(src, "audio", enf, "audio");
-    let clip = a.add(Kind::Source { input: "clip.mkv".into() }, Pos2::new(30.0, 300.0));
-    let rec = a.add(Kind::Record { folder: String::new() }, Pos2::new(400.0, 300.0));
+    let clip = a.add(Kind::Sourcer { input: "clip.mkv".into() }, Pos2::new(30.0, 300.0));
+    let rec = a.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(400.0, 300.0));
     a.wire_record(clip, "video", rec);
     for s in [src, clip] {
-        if let Kind::Source { input } = &mut a.nodes[s].kind {
+        if let Kind::Sourcer { input } = &mut a.nodes[s].kind {
             input.clear();
         }
     }
@@ -164,8 +164,9 @@ fn emptied_source_keeps_its_wires() {
     assert_eq!(describe_project(&a), describe_project(&b));
 }
 
-/// A broken or cut-off file loads what it can: unknown lines and kinds, bad numbers, wires to
-/// nodes that are not there, and a last line cut in half are skipped without a panic.
+/// A broken or cut-off file loads what it can without a panic: unknown lines, bad numbers, wires
+/// to nodes that are not there and a last line cut in half are skipped; a module this tool lacks
+/// stays as a placeholder, so the wires after it still reach the nodes they were saved to.
 #[test]
 fn damaged_files_load_what_they_can() {
     let text = "# corroborate project\n\
@@ -174,17 +175,18 @@ fn damaged_files_load_what_they_can() {
                 node|enf|abc|-|ENF|\n\
                 garbage line\n\
                 row|7|k|v\n\
-                wire|0|audio|1|audio\n\
+                wire|0|audio|2|audio\n\
                 wire|0|audio|9|audio\n\
-                wire|0|nonsense|1|audio\n\
+                wire|0|nonsense|2|audio\n\
                 node|map|10";
     let mut b = App::empty();
     assert!(b.load_project_text(text));
     let d = describe_project(&b);
-    assert_eq!(d.len(), 3, "{d:#?}");
-    assert!(d[0].contains("source") && d[0].contains("My source"), "{d:#?}");
-    assert!(d[1].contains("enf") && d[1].contains("at 40,40"), "bad numbers fall back: {d:#?}");
-    assert_eq!(d[2], "wire 0.audio -> 1.audio");
+    assert_eq!(d.len(), 4, "{d:#?}");
+    assert!(d[0].contains("sourcer") && d[0].contains("My source"), "{d:#?}");
+    assert!(d[1].contains("teleporter"), "kept as a placeholder: {d:#?}");
+    assert!(d[2].contains("enf") && d[2].contains("at 40,40"), "bad numbers fall back: {d:#?}");
+    assert_eq!(d[3], "wire 0.audio -> 2.audio");
     assert!(!App::empty().load_project_text(""), "an empty file is no project");
     assert!(!App::empty().load_project_text("garbage\n"), "no nodes is no project");
 }
@@ -193,7 +195,7 @@ fn damaged_files_load_what_they_can() {
 #[test]
 fn made_on_the_canvas() {
     let mut d = Drive::new();
-    for label in [Kind::Map.default_label(), Kind::Manual { rows: vec![] }.default_label()] {
+    for label in [Kind::Map.default_label(), Kind::ManualData { rows: vec![] }.default_label()] {
         d.click("Add node");
         d.click(&label);
     }
@@ -205,4 +207,37 @@ fn made_on_the_canvas() {
     assert_eq!(want, describe_project(&back));
     assert!(want.iter().any(|l| l.contains("\"coordinates\"")), "{want:#?}");
     d.shot("project_made_on_canvas");
+}
+
+/// A project using a module this tool lacks loads it as a grey placeholder that keeps its
+/// setting and wires, and saves back exactly as it was.
+#[test]
+fn missing_module_keeps_its_place() {
+    let text = "# corroborate project\n\
+                node|sourcer|30|40|SOURCER|x.wav\n\
+                node|teleporter|400|40|Teleporter|speed=9\n\
+                node|invert-location|700|40|Invert location|\n\
+                wire|0|audio|1|sound\n\
+                wire|1|where|2|location\n";
+    let mut a = App::empty();
+    assert!(a.load_project_text(text));
+    assert!(matches!(&a.nodes[1].kind, Kind::Missing { name, param } if name == "teleporter" && param == "speed=9"));
+    assert_eq!(a.graph.wires().len(), 2, "{:#?}", describe_project(&a));
+    let again = a.project_text();
+    let mut b = App::empty();
+    assert!(b.load_project_text(&again));
+    assert_eq!(describe_project(&a), describe_project(&b));
+    assert!(again.contains("node|teleporter|400|40|Teleporter|speed=9"), "{again}");
+}
+
+/// Files written before modules had one name each load as today's modules and save with ids.
+#[test]
+fn old_names_are_saved_as_ids() {
+    let text = "node|source|30|40|SOURCER|x.wav\nnode|record|400|40|Result record|\nnode|combine|400|300||any\nwire|0|audio|1|aircrafts\n";
+    let mut a = App::empty();
+    assert!(a.load_project_text(text));
+    let t = a.project_text();
+    for want in ["node|sourcer|", "node|result-record|", "node|combine-locations|400|300|Combine locations (any)|any"] {
+        assert!(t.contains(want), "{want} not in\n{t}");
+    }
 }

@@ -1,0 +1,14 @@
+id = "combine-locations"
+label = "Combine locations"
+category = "Location"
+order = 1
+aliases = ["combine"]
+
+# Add node offers it twice: all locations must hold, or any may.
+[[variant]]
+label = "Combine locations (all)"
+mode = "all"
+
+[[variant]]
+label = "Combine locations (any)"
+mode = "any"

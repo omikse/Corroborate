@@ -170,7 +170,7 @@ pub fn tone_wav() -> PathBuf {
 #[test]
 fn sourcer() {
     let mut d = Drive::new();
-    let s = d.app().add(Kind::Source { input: String::new() }, Pos2::new(40.0, 40.0));
+    let s = d.app().add(Kind::Sourcer { input: String::new() }, Pos2::new(40.0, 40.0));
     d.frames(3);
     assert!(d.app().graph.nodes()[s].spec.outputs.is_empty(), "a new SOURCER has no outputs");
     println!("{}", d.dump());
@@ -190,22 +190,22 @@ fn sourcer() {
 fn all_nodes() {
     let mut d = Drive::new();
     let a = d.app();
-    a.add(Kind::Source { input: String::new() }, Pos2::new(30.0, 40.0));
-    a.add(Kind::Manual { rows: corroborate::modules::manual::defaults() }, Pos2::new(30.0, 200.0));
+    a.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 40.0));
+    a.add(Kind::ManualData { rows: corroborate::modules::manual_data::defaults() }, Pos2::new(30.0, 200.0));
     a.add(Kind::Enf { grid: String::new() }, Pos2::new(460.0, 40.0));
-    a.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
+    a.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(990.0, 40.0));
     a.add(Kind::Planes, Pos2::new(460.0, 700.0));
     a.add(Kind::Map, Pos2::new(560.0, 330.0));
-    a.add(Kind::Invert, Pos2::new(560.0, 560.0));
-    let comb = a.add(Kind::Combine { any: false }, Pos2::new(1050.0, 330.0));
+    a.add(Kind::InvertLocation, Pos2::new(560.0, 560.0));
+    let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(1050.0, 330.0));
     a.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(1050.0, 500.0));
     a.add(Kind::Plugin { path: "my-plugin.exe".into() }, Pos2::new(30.0, 560.0));
-    let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::Manual { .. })).unwrap();
+    let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::ManualData { .. })).unwrap();
     d.frames(5);
     d.shot("all_nodes");
 
     let rows = |d: &mut Drive| match &d.app().nodes[man].kind {
-        Kind::Manual { rows } => rows.clone(),
+        Kind::ManualData { rows } => rows.clone(),
         _ => unreachable!(),
     };
     let before = rows(&mut d).len();
@@ -218,7 +218,7 @@ fn all_nodes() {
     assert!(rows(&mut d).last().is_some_and(|(_, v)| v == "typed on the canvas"), "typing edits the new row: {:?}", rows(&mut d));
 
     d.click("any may hold (OR)");
-    assert!(matches!(d.app().nodes[comb].kind, Kind::Combine { any: true }), "Combine switched to OR");
+    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: true }), "Combine switched to OR");
     d.shot("all_nodes_edited");
 }
 
@@ -229,10 +229,10 @@ fn all_nodes() {
 fn area_timing() {
     let mut app = App::empty();
     let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
-    let man = app.add(Kind::Manual { rows }, Pos2::new(30.0, 200.0));
-    let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
+    let man = app.add(Kind::ManualData { rows }, Pos2::new(30.0, 200.0));
+    let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
     app.wire(man, "place", inv, "location");
-    let rec = app.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
+    let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(990.0, 40.0));
     app.wire_record(man, "place", rec);
     for (name, id) in [("manual", man), ("invert", inv), ("record", rec)] {
         let t = Instant::now();
@@ -242,4 +242,16 @@ fn area_timing() {
         }
         println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
+}
+
+/// Add node, built from the modules' categories.
+#[test]
+fn add_node_menu() {
+    let mut d = Drive::new();
+    d.click("Add node");
+    let text = d.dump();
+    for want in ["SOURCES", "DETECTORS", "PLUGINS", "ENF (power hum)", "Metadata", "Combine locations (any)", "Plugin from file…"] {
+        assert!(text.contains(want), "{want} not in the menu:\n{text}");
+    }
+    d.shot("add_node_menu");
 }

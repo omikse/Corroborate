@@ -1,0 +1,5 @@
+id = "manual-data"
+label = "Manual data"
+category = "Sources"
+order = 2
+aliases = ["manual"]

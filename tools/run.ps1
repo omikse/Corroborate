@@ -33,27 +33,69 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 New-Item -ItemType Directory -Force $app | Out-Null
-Get-ChildItem $app -Filter '*.old-*' | ForEach-Object {
+$modules = Join-Path $app 'modules'
+New-Item -ItemType Directory -Force $modules | Out-Null
+Get-ChildItem $app -Recurse -Filter '*.old-*' | ForEach-Object {
     try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
 }
 
-$programs = 'corroborate', 'corroborate-cli', 'planes-view', 'enf-plugin', 'meta-plugin', 'adsb-check'
-foreach ($p in $programs) {
-    $src = Join-Path $root "target\release\$p.exe"
-    $dst = Join-Path $app "$p.exe"
-    if (-not (Test-Path $src)) { continue }
+# Put a built program at $dst; one that is running is moved aside, not overwritten.
+function Deploy-Program([string]$exe, [string]$dst) {
+    $src = Join-Path $root "target\release\$exe"
+    if (-not (Test-Path $src)) { return }
     if (Test-Path $dst) {
-        if ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash) { continue }
+        if ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash) { return }
         try {
             Remove-Item $dst -Force -ErrorAction Stop
         } catch {
-            $aside = "$p.exe.old-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            $aside = "$exe.old-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
             Rename-Item $dst $aside
-            Write-Host "$p is running: the old one is kept as $aside until it closes."
+            Write-Host "$exe is running: the old one is kept as $aside until it closes."
         }
     }
     Copy-Item $src $dst
-    Write-Host "updated $p"
+    Write-Host "updated $dst"
+}
+
+# The tool's own programs sit in app\.
+foreach ($p in 'corroborate.exe', 'corroborate-cli.exe', 'planes-view.exe') {
+    Deploy-Program $p (Join-Path $app $p)
+}
+
+# Each module folder (src\modules\<label>\, with a module.toml) goes to app\modules\<label>\:
+# its module.toml, look scripts, READMEs and data, and the programs its module.toml names. A file
+# changed in app\ after the last copy is kept (and listed), so tweaks made there are not lost.
+$moved = @()
+foreach ($dir in Get-ChildItem (Join-Path $root 'src\modules') -Directory) {
+    $manifest = Join-Path $dir.FullName 'module.toml'
+    if (-not (Test-Path $manifest)) { continue }
+    $dst = Join-Path $modules $dir.Name
+    New-Item -ItemType Directory -Force $dst | Out-Null
+    foreach ($f in Get-ChildItem $dir.FullName -File | Where-Object { $_.Extension -in '.toml', '.rhai', '.md', '.json' }) {
+        $to = Join-Path $dst $f.Name
+        if (-not (Test-Path $to) -or (Get-Item $to).LastWriteTime -lt $f.LastWriteTime) {
+            Copy-Item $f.FullName $to
+        } elseif ((Get-FileHash $to).Hash -ne (Get-FileHash $f.FullName).Hash) {
+            Write-Host "kept your change: $to (differs from $($f.FullName))"
+        }
+    }
+    $text = Get-Content -Raw $manifest
+    $names = [regex]::Matches($text, '(?m)^\s*program\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+    $list = [regex]::Match($text, '(?m)^\s*programs\s*=\s*\[([^\]]*)\]')
+    if ($list.Success) { $names += [regex]::Matches($list.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value } }
+    foreach ($exe in $names) {
+        Deploy-Program $exe (Join-Path $dst $exe)
+        $moved += $exe
+    }
+}
+
+# Programs that now live in their module folder (and meta-plugin, renamed metadata) leave app\.
+foreach ($exe in $moved + 'meta-plugin.exe') {
+    $old = Join-Path $app $exe
+    if (Test-Path $old) {
+        try { Remove-Item $old -Force -ErrorAction Stop; Write-Host "removed $old (moved to its module folder)" }
+        catch { Write-Host "$old is running: remove it after it closes." }
+    }
 }
 
 if (-not $NoStart) {

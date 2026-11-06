@@ -13,6 +13,7 @@ realfft = "3.5.1"
 eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 cpal = { version = "0.18.2", optional = true }
 rfd = { version = "0.17.2", optional = true }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 
 [dev-dependencies]
 # Drives the workbench headless in tests and renders it to PNG (src/bin/corroborate/drive.rs).
@@ -36,20 +37,20 @@ path = "src/main.rs"
 # Modules' own programs.
 [[bin]]
 name = "planes-view"
-path = "src/modules/planes/view.rs"
+path = "src/modules/Planes (Doppler)/view.rs"
 required-features = ["gui"]
 
 [[bin]]
 name = "enf-plugin"
-path = "src/modules/enf/plugin.rs"
+path = "src/modules/ENF (power hum)/plugin.rs"
 
 [[bin]]
-name = "meta-plugin"
-path = "src/modules/meta/main.rs"
+name = "metadata"
+path = "src/modules/Metadata/main.rs"
 
 [[bin]]
 name = "adsb-check"
-path = "src/modules/adsb-check/main.rs"
+path = "src/modules/ADS-B check/main.rs"
 
 [profile.release]
 lto = "thin"

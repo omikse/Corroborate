@@ -33,16 +33,26 @@ pub trait NodeLook: Sync {
 /// The look of a node kind: its folder's `Look`.
 pub fn of(kind: &Kind) -> &'static dyn NodeLook {
     match kind {
-        Kind::Source { .. } => &source_node::Look,
-        Kind::Manual { .. } => &manual_node::Look,
+        Kind::Sourcer { .. } => &sourcer_node::Look,
+        Kind::ManualData { .. } => &manual_data_node::Look,
         Kind::Planes => &planes_node::Look,
         Kind::Enf { .. } => &enf_node::Look,
-        Kind::GridFrequencies { .. } => &grid_node::Look,
+        Kind::GridFrequencies { .. } => &grid_frequencies_node::Look,
         Kind::Plugin { .. } => &plugin_node::Look,
-        Kind::Record { .. } => &record_node::Look,
+        Kind::ResultRecord { .. } => &result_record_node::Look,
         Kind::Map => &map_node::Look,
-        Kind::Combine { .. } => &combine_node::Look,
-        Kind::Invert => &invert_node::Look,
+        Kind::CombineLocations { .. } => &combine_locations_node::Look,
+        Kind::InvertLocation => &invert_location_node::Look,
+        Kind::Missing { .. } => &Missing,
+    }
+}
+
+/// A node whose module this tool does not have: grey, nothing inside, its saved wires kept.
+struct Missing;
+
+impl NodeLook for Missing {
+    fn fill(&self, _app: &App, _i: NodeId) -> Color32 {
+        Color32::from_rgb(52, 52, 52)
     }
 }
 

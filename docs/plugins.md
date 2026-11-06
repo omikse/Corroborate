@@ -7,8 +7,9 @@ plugin that crashes stops on its own; the viewer carries on and says so in the p
 - **Plugins ▸ Import plugin…** adds a program; the list there switches plugins on or off and removes them.
   Changes restart the current source so the plugins see it from the first sample (not while recording).
   The list is kept in the settings file, so plugins are imported once.
-- Plugins that come with the viewer (the other programs in its folder: `enf-plugin`, `meta-plugin`,
-  `adsb-check`) are added and switched on by themselves the first time the viewer sees them. One you remove
+- Plugins that come with the tool (programs in its own folder and in its module folders,
+  `modules\<module>\`: `enf-plugin`, `metadata`, `adsb-check`) are added and switched on by themselves
+  the first time the viewer sees them. One you remove
   stays removed (`plugin_removed=` in the settings file); importing it again brings it back.
 - **Arguments**: `--source <path or URL>` and `--file` or `--live`, so a plugin can read the source's own
   metadata.

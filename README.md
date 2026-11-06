@@ -35,35 +35,44 @@ canvas starts empty; `--new` opens an empty one (the old project is copied to `s
 
 ## Modules
 
-Every node is a module: its own folder under `src/modules/` with its code and a README. `mod.rs`
-holds the node's name, label and ports, written only there; `node.rs` holds everything it does in the
-workbench (state while running, window, canvas status, timeline marks, result file). The app
-(`src/bin/corroborate/`) only draws the graph and calls into the modules.
+Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the
+tool, under `app\modules\`). Its `module.toml` says what it is: `id` (what project files keep),
+`label`, `category` (the Add node heading), `order`, `aliases` (names older files used) and, for a
+module that is a separate program, `[processing] program`. `mod.rs` holds the node's ports;
+`node.rs` holds everything it does in the workbench (state while running, canvas, status, timeline
+marks, result file). The app (`src/bin/corroborate/`) only draws the graph and calls into the modules.
+
+**Adding a module:** drop its folder into `app\modules\`. The workbench reads module folders every
+second: the module appears in Add node under its category. A folder with a program
+(`[processing] program = "x.exe"`, plugin protocol: [docs/plugins.md](docs/plugins.md)) runs as a
+plugin. A project using a module the tool does not have keeps it as a grey placeholder with its
+setting and wires, and saves it back unchanged.
 
 To change one node, edit only its folder:
-- **Ports:** `spec()` in `mod.rs`. Built-in projects skip wires to ports a node no longer has.
+- **Name, menu place:** `module.toml` (in `app\modules\<label>\` it takes effect while the program runs).
+- **Ports:** `spec()` in `mod.rs`.
 - **Look on the canvas:** the `Look` at the end of `node.rs` (methods in `src/bin/corroborate/look.rs`).
   `size` sets the node's size, `fill` its colour, `body` draws inside it (pictures, and controls
-  such as buttons or a file picker), and `status` (false) hides the status line. The Map node is the example: its map is drawn by `body`. Any node can
-  draw a map with `map_node::paint`.
+  such as buttons or a file picker), and `status` (false) hides the status line. The Map node is the
+  example: its map is drawn by `body`. Any node can draw a map with `map_node::paint`.
 
-| Node | Folder | What it gives |
+| Module (folder) | id | What it gives |
 |---|---|---|
-| Source data | [source](src/modules/source/README.md) | audio and time from a file (mp3, wav, video), a YouTube video or live stream, a stream URL, or a microphone |
-| Manual data | [manual](src/modules/manual/README.md) | facts typed in: date, time, place, coordinates, notes |
-| Planes (Doppler) | [planes](src/modules/planes/README.md) | aircraft passes: speed, closest approach, distance |
-| Power hum (ENF) | [enf](src/modules/enf/README.md) | mains hum runs, and the area where that grid frequency is used |
-| Grid frequencies | [grid_frequencies](src/modules/grid_frequencies/README.md) | 50/60 Hz zones by region, for ENF |
-| Plugin | [plugin](src/modules/plugin/README.md) | runs a separate program on the same audio |
-| ADS-B check (plugin) | [adsb-check](src/modules/adsb-check/README.md) | flight data versus heard passes |
-| Metadata (plugin) | [meta](src/modules/meta/README.md) | what a file says about itself |
-| Result record | [record](src/modules/record/README.md) | the result JSON, evidence trail and agreed location |
-| Combine locations | [combine](src/modules/combine/README.md) | several locations into one (all or any) |
-| Invert location | [invert](src/modules/invert/README.md) | flips what a location adds and subtracts |
-| Map | [map](src/modules/map/README.md) | a location on a world map |
+| [SOURCER](<src/modules/SOURCER/README.md>) | `sourcer` | audio, time, metadata and video from a file, a YouTube video or live stream, a stream URL, or an audio device |
+| [Manual data](<src/modules/Manual data/README.md>) | `manual-data` | facts typed in: date, time, place, coordinates, notes |
+| [Planes (Doppler)](<src/modules/Planes (Doppler)/README.md>) | `planes` | aircraft passes: speed, closest approach, distance |
+| [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | `enf` | mains hum runs, and the area where that grid frequency is used |
+| [Grid frequencies (50 or 60 Hz)](<src/modules/Grid frequencies (50 or 60 Hz)/README.md>) | `grid-frequencies` | 50/60 Hz zones by region, for ENF |
+| [Plugin](<src/modules/Plugin/README.md>) | `plugin` | runs a separate program on the same audio |
+| [ADS-B check](<src/modules/ADS-B check/README.md>) | `adsb-check` | flight data versus heard passes (program `adsb-check.exe`) |
+| [Metadata](<src/modules/Metadata/README.md>) | `metadata` | what a file says about itself (program `metadata.exe`) |
+| [Result record](<src/modules/Result record/README.md>) | `result-record` | the result JSON, evidence trail and agreed location |
+| [Combine locations](<src/modules/Combine locations/README.md>) | `combine-locations` | several locations into one (all or any) |
+| [Invert location](<src/modules/Invert location/README.md>) | `invert-location` | flips what a location adds and subtracts |
+| [Map](<src/modules/Map/README.md>) | `map` | a location on a world map |
 
 Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, is a
-separate program that nothing opens by itself: [planes/VIEWER.md](src/modules/planes/VIEWER.md).
+separate program that nothing opens by itself: [VIEWER.md](<src/modules/Planes (Doppler)/VIEWER.md>).
 
 ## Location: the world, cut down by evidence
 
