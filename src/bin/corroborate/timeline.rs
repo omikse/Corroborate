@@ -19,6 +19,9 @@ use corroborate::clock::{Anchor as ClockAnchor, Clocks, Ev, Kind as Ck, Link};
 use corroborate::data::{Data, Event};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The `detail` of the faint bar showing a source's audio on its row.
+pub const AUDIO_BAR: &str = "the source's audio so far";
+
 /// One event on a row, in the numbering of its group (before any shift).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TlEvent {
@@ -426,7 +429,19 @@ impl App {
 
     /// The timeline panel's contents.
     pub(crate) fn timeline_view(&mut self, ui: &mut egui::Ui) {
-        let (events, end) = self.timeline_events();
+        let (mut events, end) = self.timeline_events();
+        // Every source with audio has a row: its audio as a faint bar, so the row (and its
+        // playhead) is there before any finding.
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.hidden || !n.kind.is_source() {
+                continue;
+            }
+            let a = n.state.lock().unwrap().audio_s;
+            if let (true, Some(clock)) = (a > 0.0, self.clock_of(i)) {
+                events.push((i, Event { clock, t_start: 0.0, t_end: a, label: "audio".into(), detail: AUDIO_BAR.into(), error_s: 0.0 }));
+            }
+        }
         let names: BTreeMap<String, String> = events.iter().map(|(_, e)| (e.clock.clone(), self.clock_name(&e.clock))).collect();
         let rows = build_rows(&self.ev.clocks, &events, &|c| names.get(c).cloned().unwrap_or_else(|| c.to_string()));
         let any_abs = rows.iter().any(|r| r.group.kind == Ck::Absolute);
@@ -509,8 +524,13 @@ impl App {
             p.rect_filled(area, 0.0, PANEL);
             let track = Rect::from_min_max(Pos2::new(area.left() + label_w, area.top()), area.max);
 
+            // A view that lost its way (zoomed out to centuries, or not a number) starts again.
+            if !(self.tl.1 - self.tl.0).is_finite() || self.tl.1 - self.tl.0 > 30.0 * 86_400.0 {
+                self.tl = (0.0, 600.0);
+                self.follow = true;
+            }
             if self.follow && end > f64::MIN {
-                let span = (self.tl.1 - self.tl.0).max(60.0);
+                let span = (self.tl.1 - self.tl.0).clamp(60.0, 30.0 * 86_400.0);
                 self.tl = (end - span * 0.95, end + span * 0.05);
             }
             let span = (self.tl.1 - self.tl.0).max(1e-3);
@@ -685,7 +705,9 @@ impl App {
                         // The event: a mark for a moment, a bar for a span.
                         let (x0, x1) = (tx(t0).max(track.left()), tx(t1).min(track.right()));
                         let core = Rect::from_min_max(Pos2::new(x0, cy - half + 3.0), Pos2::new(x1.max(x0 + 2.0), cy + half - 3.0));
-                        p.rect_filled(core, 2.0, alpha(ec, 0.85 * faint));
+                        let bar = e.detail == AUDIO_BAR;
+                        let core = if bar { core.shrink2(Vec2::new(0.0, 4.0)) } else { core };
+                        p.rect_filled(core, 2.0, alpha(ec, if bar { 0.22 } else { 0.85 } * faint));
                         if core.width() > 44.0 {
                             p.text(core.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &e.label, FontId::proportional(10.0), Color32::BLACK);
                         }
