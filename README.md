@@ -93,7 +93,7 @@ refused until one is changed. Values of a type are checked against its fields as
 Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the
 tool, under `app\modules\`). Its `module.toml` says what it is: `id` (what project files keep),
 `label`, `category` (the Add node heading), `order`, `aliases` (names older files used), `role`,
-its ports (`[[input]]`, `[[output]]`: name, kind (a type's id), required; `many = true` on the last input makes it grow as it is wired), its settings (`[[setting]]`: name,
+its ports (`[[input]]`, `[[output]]`: name, kind (a type's id), required; `many = true` on the last input makes it grow as it is wired; an `[[output]]` can say what it is for: `title`, `status` built/planned/possible (planned and possible ones are drawn greyed, nothing to wire), `about`, `needs`, `when`, `source`, and `min_quality` none/weak/good, the signal it needs), its settings (`[[setting]]`: name,
 type, default, range or choices) and, for a module that is a separate program,
 `[processing] program` and `protocol`. `node.rs` holds what a built-in module does in the
 workbench (state while running, canvas, status, timeline marks, result file). The app
@@ -146,7 +146,7 @@ To change one node, edit only its folder:
 | [SOURCER](<src/modules/SOURCER/README.md>) | `sourcer` | audio, time, metadata and video from a file, a YouTube video or live stream, a stream URL, or an audio device |
 | [Value](<src/modules/Value/README.md>) | `value` | one value of any type typed in: a place, a time, a note, events, … |
 | [Planes (Doppler)](<src/modules/Planes (Doppler)/README.md>) | `planes` | aircraft passes: speed, closest approach, distance |
-| [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | `enf` | mains hum runs, and the area where that grid frequency is used |
+| [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | `enf` | mains hum runs, the area where that grid frequency is used, the hum track, and a quality verdict (good enough to date / weak / no hum, and why); all 16 use cases on its outputs |
 | [Grid frequencies (50 or 60 Hz)](<src/modules/Grid frequencies (50 or 60 Hz)/README.md>) | `grid-frequencies` | 50/60 Hz zones by region, for ENF |
 | [Plugin](<src/modules/Plugin/README.md>) | `plugin` | runs a separate program on the same audio |
 | [ADS-B check](<src/modules/ADS-B check/README.md>) | `adsb-check` | flight data versus heard passes (program `adsb-check.exe`) |
