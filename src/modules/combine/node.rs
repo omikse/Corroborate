@@ -1,4 +1,4 @@
-//! The Combine locations node in the workbench: the area it gives and its window.
+//! The Combine locations node in the workbench: the area it gives and its AND / OR choice on the canvas.
 //! Compiled into the `corroborate` program.
 
 use super::*;
@@ -29,28 +29,23 @@ impl App {
         };
         Ok((Arc::new(Area::add(m)), note))
     }
-
-    pub(crate) fn combine_window(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        if let Kind::Combine { any } = &mut self.nodes[i].kind {
-            ui.horizontal(|ui| {
-                ui.radio_value(any, false, "all must hold (AND)");
-                ui.radio_value(any, true, "any may hold (OR)");
-            });
-        }
-        ui.colored_label(DIM, "Takes what each wired location still allows and combines it. The result adds (green).");
-        match self.area_from(i) {
-            Ok((_, note)) => {
-                ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { TEXT }, note);
-            }
-            Err(e) => {
-                ui.colored_label(DIM, e);
-            }
-        }
-    }
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
+/// The Combine node on the canvas: all must hold (AND) or any may (OR). The status line says
+/// what is left, or CONTRADICTION.
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
+        Vec2::new(standard.x + 130.0, standard.y)
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let Kind::Combine { any } = &mut app.nodes[i].kind else { return };
+        crate::look::area(ui, r, |ui| {
+            ui.radio_value(any, false, "all must hold (AND)");
+            ui.radio_value(any, true, "any may hold (OR)");
+        });
+    }
+}

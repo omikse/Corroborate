@@ -16,45 +16,8 @@ use eframe::egui::{
     self, epaint::CubicBezierShape, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 };
 
-// ---------- colours ----------
-
-const BG: Color32 = Color32::from_rgb(23, 25, 28);
-const PANEL: Color32 = Color32::from_rgb(31, 34, 38);
-const NODE: Color32 = Color32::from_rgb(42, 46, 51);
-const LINE: Color32 = Color32::from_rgb(58, 63, 70);
-const TEXT: Color32 = Color32::from_rgb(216, 220, 226);
-const DIM: Color32 = Color32::from_rgb(138, 146, 156);
-const WARN: Color32 = Color32::from_rgb(224, 164, 88);
-const SEL: Color32 = Color32::from_rgb(95, 179, 161);
-
-fn kind_color(k: PortKind) -> Color32 {
-    match k {
-        PortKind::Audio => Color32::from_rgb(224, 164, 88),
-        PortKind::Video => Color32::from_rgb(224, 200, 90),
-        PortKind::Time => Color32::from_rgb(122, 167, 224),
-        PortKind::Location => Color32::from_rgb(199, 133, 201),
-        PortKind::Track => Color32::from_rgb(143, 209, 107),
-        PortKind::Event => Color32::from_rgb(224, 122, 106),
-        _ => Color32::from_rgb(154, 163, 173),
-    }
-}
-
-fn role_text(r: Role) -> &'static str {
-    match r {
-        Role::Source(SourceKind::Live) => "source · live",
-        Role::Source(SourceKind::File) => "source · file",
-        Role::Source(SourceKind::Reference) => "source · reference",
-        Role::Detector => "detector",
-        Role::Transform => "transform",
-        Role::Solver => "solver",
-        Role::Record => "record",
-        Role::View => "view",
-    }
-}
-
-fn with_alpha(c: Color32, a: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
-}
+// Colours, port colours and role names are the workbench's own (main.rs).
+use super::{alpha as with_alpha, kind_color, role_text, BG, DIM, LINE, NODE, PANEL, SEL, TEXT, WARN};
 
 // ---------- synthetic scenario ----------
 

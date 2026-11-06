@@ -1,4 +1,4 @@
-//! The Manual data node in the workbench: its window, the area its coordinates give, its
+//! The Manual data node in the workbench: its rows edited on the canvas, the area its coordinates give, its
 //! canvas status and its part of the result file. Compiled into the `corroborate` program.
 
 use super::*;
@@ -15,34 +15,27 @@ pub fn area(rows: &[(String, String)]) -> Option<(WorldMask, String)> {
     }
 }
 
-/// The area on the node's place output.
+/// The area on the node's place output. Building the circle takes about 2 ms and the canvas asks
+/// every frame, so the last few are kept, keyed by the coordinates and radius typed in.
 pub fn area_out(rows: &[(String, String)]) -> Result<(Arc<Area>, String), String> {
-    area(rows).map(|(a, l)| (Arc::new(Area::add(a)), l)).ok_or("no coordinates typed in".to_string())
+    type Memo = Vec<(String, Result<(Arc<Area>, String), String>)>;
+    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(Vec::new());
+    let val = |k: &str| rows.iter().find(|(q, _)| q.trim() == k).map_or("", |(_, v)| v.trim());
+    let key = format!("{}|{}", val("coordinates"), val("radius_km"));
+    let mut memo = MEMO.lock().unwrap();
+    if let Some((_, r)) = memo.iter().find(|(k, _)| *k == key) {
+        return r.clone();
+    }
+    let r = area(rows).map(|(a, l)| (Arc::new(Area::add(a)), l)).ok_or("no coordinates typed in".to_string());
+    if memo.len() >= 8 {
+        let _ = memo.remove(0);
+    }
+    memo.push((key, r.clone()));
+    r
 }
 
 pub fn status(rows: &[(String, String)]) -> String {
     format!("{} facts", rows.iter().filter(|(_, v)| !v.trim().is_empty()).count())
-}
-
-pub fn window(ui: &mut egui::Ui, i: NodeId, rows: &mut Vec<(String, String)>) {
-    ui.colored_label(DIM, "Facts you know. Wired into a plugin, they are passed to it when it starts (coordinates as lat, lon; elevation in m).");
-    let mut remove = None;
-    egui::Grid::new(("manual", i)).num_columns(3).show(ui, |ui| {
-        for (r, (k, v)) in rows.iter_mut().enumerate() {
-            ui.add(egui::TextEdit::singleline(k).desired_width(110.0));
-            ui.add(egui::TextEdit::singleline(v).desired_width(240.0));
-            if ui.small_button("✕").clicked() {
-                remove = Some(r);
-            }
-            ui.end_row();
-        }
-    });
-    if let Some(r) = remove {
-        rows.remove(r);
-    }
-    if ui.button("+ field").clicked() {
-        rows.push((String::new(), String::new()));
-    }
 }
 
 pub fn json(rows: &[(String, String)]) -> String {
@@ -73,8 +66,46 @@ impl App {
     }
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
+/// Height of one row on the canvas, unzoomed.
+const ROW_H: f32 = 22.0;
+
+/// The Manual data node on the canvas: one row per fact (key, value, ✕) and "+ field". Wired
+/// into a plugin, the facts are passed to it when it starts (coordinates as lat, lon; elevation
+/// in m).
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, app: &App, i: NodeId, standard: Vec2) -> Vec2 {
+        let n = match &app.nodes[i].kind {
+            Kind::Manual { rows } => rows.len(),
+            _ => 0,
+        };
+        Vec2::new(340.0, standard.y.max(HEAD + 4.0 + (n + 1) as f32 * ROW_H + 28.0))
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let z = app.zoom;
+        let Kind::Manual { rows } = &mut app.nodes[i].kind else { return };
+        let key_w = r.width() * 0.36;
+        let val_w = r.width() - key_w - 30.0 * z;
+        let mut remove = None;
+        crate::look::area(ui, r, |ui| {
+            for (n, (k, v)) in rows.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(k).hint_text("key").desired_width(key_w));
+                    ui.add(egui::TextEdit::singleline(v).hint_text("value").desired_width(val_w));
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(n);
+                    }
+                });
+            }
+            if ui.small_button("+ field").clicked() {
+                rows.push((String::new(), String::new()));
+            }
+        });
+        if let Some(n) = remove {
+            rows.remove(n);
+        }
+    }
+}

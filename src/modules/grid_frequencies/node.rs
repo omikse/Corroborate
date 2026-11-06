@@ -31,33 +31,6 @@ pub fn load(path: &str) -> Result<GridMap, String> {
     GridMap::parse(&text).map_err(|e| format!("{path}: {e}"))
 }
 
-pub fn window(ui: &mut egui::Ui, path: &mut String) {
-    ui.horizontal(|ui| {
-        ui.label("File");
-        ui.add(egui::TextEdit::singleline(path).hint_text("empty: the bundled file").desired_width(300.0));
-        if ui.button("Browse…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                *path = p.to_string_lossy().into_owned();
-            }
-        }
-    });
-    match load(path) {
-        Ok(g) => {
-            ui.colored_label(DIM, format!("data: {}", g.source));
-            for r in &g.regions {
-                ui.label(format!("{:.0} Hz · {}", r.hz, r.id));
-            }
-        }
-        Err(e) => {
-            ui.colored_label(WARN, e);
-        }
-    }
-    if path.trim().is_empty() {
-        ui.colored_label(DIM, format!("bundled file: {}", bundled_file()));
-    }
-    ui.colored_label(DIM, "Swap the file to use other grid data. Read when the graph (re)starts.");
-}
-
 pub fn json(path: &str) -> String {
     let r = match load(path) {
         Ok(g) => format!("\"regions\":{},\"data_source\":\"{}\"", g.regions.len(), json_escape(&g.source)),
@@ -66,8 +39,28 @@ pub fn json(path: &str) -> String {
     format!(",\"file\":\"{}\",{r}", json_escape(path))
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
+/// The Grid frequencies node on the canvas: the data file (empty: the bundled one) with Browse.
+/// Read when the graph (re)starts.
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
+        Vec2::new(300.0, standard.y + 24.0)
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let z = app.zoom;
+        let Kind::GridFrequencies { path } = &mut app.nodes[i].kind else { return };
+        crate::look::area(ui, r, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(path).hint_text("bundled file").desired_width(r.width() - 70.0 * z));
+                if ui.button("Browse…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                        *path = p.to_string_lossy().into_owned();
+                    }
+                }
+            });
+        });
+    }
+}

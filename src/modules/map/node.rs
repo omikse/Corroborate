@@ -1,6 +1,6 @@
 //! The Map node in the workbench: the world map (Robinson projection over NASA Blue Marble, with
-//! Natural Earth coastlines) drawn on the canvas and in its window. Other nodes that show an area
-//! (Result record) draw it with `draw`. Compiled into the `corroborate` program.
+//! Natural Earth coastlines) drawn on the canvas (hover it for the cell under the pointer). Other nodes that show an
+//! area (Result record, ENF) draw it with `paint`. Compiled into the `corroborate` program.
 
 use super::*;
 
@@ -22,7 +22,12 @@ impl crate::look::NodeLook for Look {
         let r = ui.max_rect();
         let map = Rect::from_min_size(r.min, Vec2::new(r.width(), r.width() / ROBINSON_ASPECT as f32));
         let area = app.map_input(i).and_then(|r| r.ok()).map(|(a, _)| a);
-        paint(&ui.painter().with_clip_rect(map), map, app.earth.as_ref().map(|t| t.id()), area.as_deref());
+        let p = ui.painter().with_clip_rect(map);
+        paint(&p, map, app.earth.as_ref().map(|t| t.id()), area.as_deref());
+        // Hover: the cell under the pointer.
+        if let Some(h) = ui.ctx().pointer_hover_pos().filter(|h| map.contains(*h)) {
+            p.text(map.left_top() + Vec2::new(6.0, 4.0) * app.zoom, Align2::LEFT_TOP, cell_under(map, h), FontId::proportional(11.0 * app.zoom), TEXT);
+        }
     }
 }
 
@@ -36,36 +41,23 @@ pub fn area_status(a: &Area) -> String {
     }
 }
 
-/// A world map in the Robinson projection. Green: cells the area keeps (where it adds
-/// possibility). Red: cells it rules out (where it subtracts). Grey: no area yet.
-pub fn draw(ui: &mut egui::Ui, earth: Option<egui::TextureId>, area: Option<&Area>) {
-    let w = ui.available_width().clamp(200.0, 1400.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w / ROBINSON_ASPECT as f32), Sense::hover());
-    let p = ui.painter_at(rect);
-    paint(&p, rect, earth, area);
+/// The 1° cell centre nearest to `h` on a map drawn in `rect`, as "lat°, lon°".
+fn cell_under(rect: Rect, h: Pos2) -> String {
     let at = |lat: f64, lon: f64| {
         let (x, y) = robinson(lat, lon);
         Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
     };
-    if let Some(h) = resp.hover_pos() {
-        // The nearest cell centre under the pointer.
-        let mut best = (f32::MAX, 0.0, 0.0);
-        for r in 0..ROWS {
-            for c in (0..COLS).step_by(2) {
-                let (lat, lon) = (89.5 - r as f64, c as f64 - 179.5);
-                let d = at(lat, lon).distance_sq(h);
-                if d < best.0 {
-                    best = (d, lat, lon);
-                }
+    let mut best = (f32::MAX, 0.0, 0.0);
+    for r in 0..ROWS {
+        for c in (0..COLS).step_by(2) {
+            let (lat, lon) = (89.5 - r as f64, c as f64 - 179.5);
+            let d = at(lat, lon).distance_sq(h);
+            if d < best.0 {
+                best = (d, lat, lon);
             }
         }
-        let txt = format!("{:.1}°, {:.1}°", best.1, best.2);
-        p.text(rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, txt, FontId::proportional(11.0), TEXT);
     }
-    ui.colored_label(
-        DIM,
-        "green: an area that adds (the place is here) · red: an area that subtracts (not here) · Robinson projection, 1° cells, lines every 30° · image: NASA Blue Marble (public domain) · coastlines: Natural Earth 1:110m",
-    );
+    format!("{:.1}°, {:.1}°", best.1, best.2)
 }
 
 /// Natural Earth 1:110m coastlines, built into the program: lines of (lat, lon).
@@ -87,23 +79,30 @@ fn coastlines() -> &'static [Vec<(f64, f64)>] {
     })
 }
 
-/// The Earth image warped from its plate carrée grid onto the Robinson shape in 2° × 4° patches:
-/// vertex positions (0..1 across the map) and texture positions, worked out once.
+/// The Earth image warped from its plate carrée grid onto the Robinson shape in 3° × 6° patches
+/// that share their corners: vertex positions (0..1 across the map) and texture positions,
+/// worked out once. 3,600 patches; finer did not look different at node size and cost more.
 fn earth_patches() -> &'static (Vec<(Pos2, Pos2)>, Vec<u32>) {
+    const R: usize = 60;
+    const C: usize = 60;
     static P: std::sync::OnceLock<(Vec<(Pos2, Pos2)>, Vec<u32>)> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let (mut verts, mut idx) = (Vec::new(), Vec::new());
-        for r in 0..90 {
-            let (t, b) = (90.0 - 2.0 * r as f64, 88.0 - 2.0 * r as f64);
-            for c in 0..90 {
-                let (l, rt) = (-180.0 + 4.0 * c as f64, -176.0 + 4.0 * c as f64);
-                let i = verts.len() as u32;
-                for (lat, lon) in [(t, l), (t, rt), (b, rt), (b, l)] {
-                    let (x, y) = robinson(lat, lon);
-                    let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
-                    verts.push((Pos2::new(x as f32, y as f32), uv));
-                }
-                idx.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+        let mut verts = Vec::with_capacity((R + 1) * (C + 1));
+        for r in 0..=R {
+            let lat = 90.0 - 180.0 * r as f64 / R as f64;
+            for c in 0..=C {
+                let lon = -180.0 + 360.0 * c as f64 / C as f64;
+                let (x, y) = robinson(lat, lon);
+                let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
+                verts.push((Pos2::new(x as f32, y as f32), uv));
+            }
+        }
+        let mut idx = Vec::with_capacity(R * C * 6);
+        let at = |r: usize, c: usize| (r * (C + 1) + c) as u32;
+        for r in 0..R {
+            for c in 0..C {
+                let (a, b, d, e) = (at(r, c), at(r, c + 1), at(r + 1, c + 1), at(r + 1, c));
+                idx.extend([a, b, d, a, d, e]);
             }
         }
         (verts, idx)
@@ -246,34 +245,6 @@ impl App {
             Some(Ok((a, _))) => area_status(&a),
             Some(Err(e)) => e,
             None => "no location wired".into(),
-        }
-    }
-
-    pub(crate) fn map_window(&mut self, ui: &mut egui::Ui, i: NodeId) {
-        let earth = self.earth.as_ref().map(|t| t.id());
-        match self.graph.feeder(i, "location") {
-            None => {
-                ui.colored_label(DIM, "wire a location into this node: ENF, Manual data, Combine, Invert or the Result record");
-                draw(ui, earth, None);
-            }
-            Some((from, _)) => match self.area_from(from) {
-                Ok((a, note)) => {
-                    let lab = &self.nodes[from].label;
-                    let al = a.allowed();
-                    ui.label(format!(
-                        "{lab}: {} · {:.2} % of Earth still possible ({:.1} million km²)",
-                        if a.add { "adds (green: here)" } else { "subtracts (red: not here)" },
-                        al.fraction() * 100.0,
-                        al.area_km2() / 1e6
-                    ));
-                    ui.colored_label(if note.contains("CONTRADICTION") { WARN } else { DIM }, note);
-                    draw(ui, earth, Some(&a));
-                }
-                Err(e) => {
-                    ui.colored_label(DIM, format!("{}: {e}", self.nodes[from].label));
-                    draw(ui, earth, None);
-                }
-            },
         }
     }
 }

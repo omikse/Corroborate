@@ -229,8 +229,6 @@ struct App {
     /// Timeline view (UTC seconds when anchored, else source seconds), and whether it follows the end.
     tl: (f64, f64),
     follow: bool,
-    /// Minutes of spectrogram shown in Planes windows (0 = all).
-    spec_minutes: f64,
     mics: Vec<String>,
     /// The Earth image under every map (loaded at the first frame).
     earth: Option<TextureHandle>,
@@ -265,7 +263,6 @@ impl App {
             lut: colormap(),
             tl: (0.0, 600.0),
             follow: true,
-            spec_minutes: 0.0,
             mics: Vec::new(),
             earth: None,
             area_cache: Default::default(),
@@ -1226,40 +1223,6 @@ fn source_info(ui: &mut egui::Ui, st: &Shared) {
     }
 }
 
-fn plot_series(ui: &mut egui::Ui, series: &[(Color32, Vec<(f64, f64, bool)>)], height: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, 3.0, BG);
-    let pts = series.iter().flat_map(|(_, v)| v.iter());
-    let (mut t0, mut t1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for &(t, y, _) in pts {
-        t0 = t0.min(t);
-        t1 = t1.max(t);
-        y0 = y0.min(y);
-        y1 = y1.max(y);
-    }
-    if t0 >= t1 {
-        p.text(rect.center(), Align2::CENTER_CENTER, "no readings yet", FontId::proportional(11.0), DIM);
-        return;
-    }
-    if y1 - y0 < 1e-3 {
-        y0 -= 0.05;
-        y1 += 0.05;
-    }
-    let plot = rect.shrink2(Vec2::new(50.0, 10.0));
-    let x = |t: f64| plot.left() + ((t - t0) / (t1 - t0)) as f32 * plot.width();
-    let y = |v: f64| plot.bottom() - ((v - y0) / (y1 - y0)) as f32 * plot.height();
-    for (c, v) in series {
-        for &(t, val, ok) in v {
-            p.circle_filled(Pos2::new(x(t), y(val)), 1.5, alpha(*c, if ok { 0.95 } else { 0.3 }));
-        }
-    }
-    p.text(Pos2::new(rect.left() + 4.0, plot.top()), Align2::LEFT_TOP, format!("{y1:.3}"), FontId::proportional(10.0), DIM);
-    p.text(Pos2::new(rect.left() + 4.0, plot.bottom()), Align2::LEFT_BOTTOM, format!("{y0:.3}"), FontId::proportional(10.0), DIM);
-    p.text(Pos2::new(plot.left(), rect.bottom()), Align2::LEFT_BOTTOM, format!("{t0:.0} s"), FontId::proportional(10.0), DIM);
-    p.text(Pos2::new(plot.right(), rect.bottom()), Align2::RIGHT_BOTTOM, format!("{t1:.0} s"), FontId::proportional(10.0), DIM);
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
@@ -1352,12 +1315,12 @@ mod canvas_timing {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 780.0))),
             ..Default::default()
         };
-        let mut frame = |app: &mut App| {
+        let frame = |app: &mut App| {
             let out = ctx.run_ui(input(), |ui| {
                 if app.earth.is_none() {
                     app.earth = Some(map_node::load_earth(ui.ctx()));
                 }
-                egui::CentralPanel::default().show_inside(ui, |ui| app.graph_view(ui));
+                egui::CentralPanel::default().show(ui, |ui| app.graph_view(ui));
             });
             let n = ctx.tessellate(out.shapes, out.pixels_per_point).len();
             std::hint::black_box(n);

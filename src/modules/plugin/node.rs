@@ -1,5 +1,5 @@
 //! The Plugin node in the workbench: starting the program and feeding it audio, what it reports,
-//! its window, canvas status, timeline marks and its part of the result file.
+//! what it shows on the canvas, its status line, timeline marks and its part of the result file.
 //! Compiled into the `corroborate` program (see `src/bin/corroborate/main.rs`).
 
 use super::*;
@@ -177,51 +177,6 @@ pub fn status(s: &NodeState) -> Option<String> {
     Some(if first.is_empty() { s.plugin.state.clone() } else { first.to_string() })
 }
 
-pub fn window(ui: &mut egui::Ui, path: &str, st: &Shared) {
-    ui.colored_label(DIM, format!("program: {path}"));
-    let pl = st.lock().unwrap().plugin.clone();
-    ui.label(format!("{} · {}", if pl.name.is_empty() { "plugin" } else { &pl.name }, pl.state));
-    if !pl.about.is_empty() {
-        ui.colored_label(DIM, &pl.about);
-    }
-    if pl.dropped_s > 0.0 {
-        ui.colored_label(WARN, format!("missed {:.0} s of live audio (could not keep up)", pl.dropped_s));
-    }
-    if !pl.status.is_empty() {
-        ui.separator();
-        for line in pl.status.lines() {
-            ui.label(line);
-        }
-    }
-    if !pl.log.is_empty() {
-        ui.colored_label(DIM, format!("log: {}", pl.log));
-    }
-    if !pl.tracks.is_empty() {
-        let c = pl.color.map_or(Color32::WHITE, |[r, g, b]| Color32::from_rgb(r, g, b));
-        let all: Vec<(f64, f64, bool)> = pl.tracks.iter().flat_map(|(_, v)| v.iter().copied()).collect();
-        ui.colored_label(DIM, format!("{} tracks (also drawn on the Planes spectrogram of the same source)", pl.tracks.len()));
-        plot_series(ui, &[(c, all)], 140.0);
-    }
-    if !pl.findings.is_empty() {
-        ui.separator();
-        ui.label(egui::RichText::new(format!("FINDINGS ({})", pl.findings.len())).small().color(DIM));
-        for f in pl.findings.iter().rev().take(40) {
-            ui.label(format!("{:.0}–{:.0} s · {}", f.t_start, f.t_end, f.label)).on_hover_text(&f.detail);
-        }
-    }
-    if !pl.meta.is_empty() {
-        ui.separator();
-        ui.label(egui::RichText::new("FACTS").small().color(DIM));
-        egui::Grid::new(ui.next_auto_id()).num_columns(2).striped(true).show(ui, |ui| {
-            for (k, v) in &pl.meta {
-                ui.colored_label(DIM, k);
-                ui.label(v);
-                ui.end_row();
-            }
-        });
-    }
-}
-
 pub fn marks(s: &NodeState) -> Vec<Mark> {
     let (to, err) = clock(&s.anchor);
     let col = s.plugin.color.map_or(Color32::from_rgb(200, 200, 200), |[r, g, b]| Color32::from_rgb(r, g, b));
@@ -268,8 +223,41 @@ impl App {
     }
 }
 
-/// How this node looks on the canvas: the standard look. Override `NodeLook` methods here to
-/// change it (see `src/bin/corroborate/look.rs`).
+/// Lines of the plugin's own status shown on the canvas.
+const LINES: usize = 5;
+
+/// The Plugin node on the canvas: its name and state, what it is about, missed live audio, its
+/// own status lines, and how many findings, facts and tracks it gave (findings are on the
+/// timeline and in the result file; tracks on the Planes spectrogram of the same source).
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
+        Vec2::new(300.0, standard.y.max(HEAD + 4.0 + (LINES + 3) as f32 * 13.0 + 28.0))
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let pl = app.nodes[i].state.lock().unwrap().plugin.clone();
+        crate::look::area(ui, r, |ui| {
+            let name = if pl.name.is_empty() { "plugin" } else { &pl.name };
+            let state = if pl.state.is_empty() { "not run" } else { &pl.state };
+            crate::look::line(ui, format!("{name} · {state}"), TEXT);
+            if !pl.about.is_empty() {
+                crate::look::line(ui, &pl.about, DIM);
+            }
+            if pl.dropped_s > 0.0 {
+                crate::look::line(ui, format!("missed {:.0} s of live audio (could not keep up)", pl.dropped_s), WARN);
+            }
+            for l in pl.status.lines().take(LINES) {
+                crate::look::line(ui, l, TEXT);
+            }
+            if !pl.findings.is_empty() || !pl.meta.is_empty() || !pl.tracks.is_empty() {
+                crate::look::line(ui, format!("{} findings · {} facts · {} tracks", pl.findings.len(), pl.meta.len(), pl.tracks.len()), DIM);
+            }
+            if !pl.log.is_empty() {
+                crate::look::line(ui, format!("log: {}", pl.log), DIM);
+            }
+        });
+    }
+}

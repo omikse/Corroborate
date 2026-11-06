@@ -25,6 +25,8 @@ pub fn out_dir() -> PathBuf {
     d
 }
 
+// A toolkit: scenarios use what they need.
+#[allow(dead_code)]
 impl Drive {
     /// An empty workbench, 1400 × 780 like the real window.
     pub fn new() -> Self {
@@ -187,4 +189,64 @@ fn sourcer() {
     d.shot("sourcer_file");
     assert!(!d.app().graph.nodes()[s].spec.outputs.is_empty(), "outputs appear with a source");
     assert!(ok, "the file decoded");
+}
+
+/// The default project as a new user sees it, plus one of every other node kind; then the
+/// canvas editors: a Manual field typed in, Combine switched to OR.
+#[test]
+fn all_nodes() {
+    let mut d = Drive::default_project();
+    let a = d.app();
+    a.add(Kind::Map, Pos2::new(560.0, 330.0));
+    a.add(Kind::Invert, Pos2::new(560.0, 560.0));
+    let comb = a.add(Kind::Combine { any: false }, Pos2::new(1050.0, 330.0));
+    a.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(1050.0, 500.0));
+    a.add(Kind::Plugin { path: "my-plugin.exe".into() }, Pos2::new(30.0, 560.0));
+    let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::Manual { .. })).unwrap();
+    d.frames(5);
+    d.shot("all_nodes");
+
+    let rows = |d: &mut Drive| match &d.app().nodes[man].kind {
+        Kind::Manual { rows } => rows.clone(),
+        _ => unreachable!(),
+    };
+    let before = rows(&mut d).len();
+    d.click("+ field");
+    assert_eq!(rows(&mut d).len(), before + 1, "+ field adds a row");
+    // The new row is the lowest in the Manual node; its value box is the last there.
+    let boxes: Vec<Rect> = d.h.query_all_by_role(A11y::TextInput).map(|n| n.rect()).collect();
+    let new_value = (0..boxes.len()).filter(|&k| boxes[k].left() < 340.0 && boxes[k].top() > 300.0).last().unwrap();
+    d.type_into(new_value, "typed on the canvas");
+    assert!(rows(&mut d).last().is_some_and(|(_, v)| v == "typed on the canvas"), "typing edits the new row: {:?}", rows(&mut d));
+
+    d.click("any may hold (OR)");
+    assert!(matches!(d.app().nodes[comb].kind, Kind::Combine { any: true }), "Combine switched to OR");
+    d.shot("all_nodes_edited");
+}
+
+/// Time to work out location areas with the per-frame cache cleared (Manual circle, Invert of
+/// it, the Record stacking it). Run: cargo test --release --bin corroborate area_timing -- --ignored --nocapture
+#[test]
+#[ignore]
+fn area_timing() {
+    let mut app = App::empty();
+    app.default_project();
+    let man = app.nodes.iter().position(|n| matches!(n.kind, Kind::Manual { .. })).unwrap();
+    if let Kind::Manual { rows } = &mut app.nodes[man].kind {
+        rows.retain(|(k, _)| k != "coordinates" && k != "radius_km");
+        rows.push(("coordinates".into(), "50, 15".into()));
+        rows.push(("radius_km".into(), "2500".into()));
+    }
+    let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
+    app.wire(man, "place", inv, "location");
+    let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record { .. })).unwrap();
+    app.wire_record(man, "place", rec);
+    for (name, id) in [("manual", man), ("invert", inv), ("record", rec)] {
+        let t = Instant::now();
+        for _ in 0..20 {
+            app.area_cache.borrow_mut().clear();
+            let _ = std::hint::black_box(app.area_from(id).map(|(a, _)| a.allowed().fraction()));
+        }
+        println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+    }
 }

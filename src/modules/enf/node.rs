@@ -101,25 +101,6 @@ pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
     }
 }
 
-pub fn window(ui: &mut egui::Ui, st: &Shared) {
-    let s = st.lock().unwrap();
-    ui.label(format!("status: {}", s.status));
-    let pts: Vec<(f64, f64, bool)> = s.enf.points.iter().map(|p| (p.t, p.hz / p.harmonic as f64, p.ok)).collect();
-    drop(s);
-    ui.colored_label(DIM, "grid frequency (Hz, folded to the fundamental) over source time; faded = unclear reading");
-    plot_series(ui, &[(Color32::from_rgb(110, 170, 255), pts)], 220.0);
-    let s = st.lock().unwrap();
-    for g in s.enf.segments.iter().rev().take(20) {
-        ui.label(format!("{:.0}–{:.0} s · {:.3} Hz ({:.3}–{:.3}) · h{}", g.t_start, g.t_end, g.mean_hz, g.min_hz, g.max_hz, g.harmonic));
-    }
-    let note = s.enf.area_note.clone();
-    drop(s);
-    if !note.is_empty() {
-        ui.separator();
-        ui.colored_label(if note.starts_with("CONTRADICTION") { WARN } else { TEXT }, format!("area: {note}"));
-    }
-}
-
 pub fn marks(s: &NodeState) -> Vec<Mark> {
     let (to, err) = clock(&s.anchor);
     s.enf
@@ -244,15 +225,6 @@ impl crate::look::NodeLook for Look {
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
         let z = app.zoom;
-        {
-            let st = ui.style_mut();
-            for f in st.text_styles.values_mut() {
-                f.size *= z;
-            }
-            st.spacing.item_spacing *= z;
-            st.spacing.button_padding *= z;
-            st.spacing.interact_size *= z;
-        }
         let r = ui.max_rect();
         let content = Rect::from_min_max(Pos2::new(r.left() + LEFT * z, r.top()), Pos2::new(r.right() - RIGHT * z, r.bottom()));
         let status = Rect::from_min_max(Pos2::new(content.right() - STATUS_W * z, content.top()), content.max);

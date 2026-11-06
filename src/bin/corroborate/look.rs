@@ -83,7 +83,3 @@ pub fn line(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
     ui.add(egui::Label::new(egui::RichText::new(text.into()).small().color(color)).truncate());
 }
 
-/// Small text in one colour, wrapped onto more lines when it does not fit.
-pub fn wrapped(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
-    ui.add(egui::Label::new(egui::RichText::new(text.into()).small().color(color)).wrap());
-}
