@@ -11,7 +11,6 @@
 //! This file draws the graph, the timeline and the windows' frames. What each node shows and does
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
-mod demo;
 #[cfg(test)]
 mod drive;
 mod look;
@@ -199,15 +198,7 @@ fn clean(s: &str) -> String {
 
 // ---------------------------------------------------------------- app
 
-#[derive(PartialEq)]
-enum Mode {
-    Work,
-    Demo,
-}
-
 struct App {
-    mode: Mode,
-    demo: Option<demo::Demo>,
     graph: Graph,
     nodes: Vec<NodeData>,
     pan: Vec2,
@@ -245,8 +236,6 @@ impl App {
     /// An empty workbench: no nodes, nothing loaded.
     fn empty() -> Self {
         Self {
-            mode: Mode::Work,
-            demo: None,
             graph: Graph::new(),
             nodes: Vec::new(),
             pan: Vec2::ZERO,
@@ -276,8 +265,8 @@ impl App {
             // --new: an empty canvas (the old project file is kept as project.bak.txt).
             let dir = corroborate::home().join("settings");
             let _ = std::fs::copy(dir.join("project.txt"), dir.join("project.bak.txt"));
-        } else if !app.load_project() {
-            app.default_project();
+        } else {
+            app.load_project();
         }
         if let Some(src) = start {
             // A path or URL on the command line goes into the first source node.
@@ -301,127 +290,12 @@ impl App {
         id
     }
 
-    /// A wire in a built-in project (default, demo). A port the node no longer has is skipped
-    /// quietly, so a node folder can change its ports without touching these projects.
+    /// A wire made in code (the Result record, tests). A port the node no longer has is skipped
+    /// quietly.
     fn wire(&mut self, a: NodeId, out: &str, b: NodeId, inp: &str) {
         match self.graph.connect(a, out, b, inp) {
             Ok(()) | Err(GraphError::NoOutput { .. } | GraphError::NoInput { .. }) => {}
             Err(e) => self.msg = describe(&e),
-        }
-    }
-
-    /// Demo: a live stream whose place is unknown; ENF hears the mains hum and the world is cut
-    /// to where that grid frequency is used (its own map shows it adding, green). Maps show it
-    /// inverted (red) and stacked in the Result record. The current project is kept as project-before-demo.txt.
-    fn enf_demo(&mut self) {
-        let backup = self.clear_for_demo();
-        let src = self.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 240.0));
-        self.nodes[src].label = "Cornell Lab stream (place unknown)".into();
-        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(240.0, 140.0));
-        let inv = self.add(Kind::Invert, Pos2::new(810.0, 20.0));
-        let map_inv = self.add(Kind::Map, Pos2::new(1060.0, 20.0));
-        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(810.0, 300.0));
-        let map_rec = self.add(Kind::Map, Pos2::new(1060.0, 330.0));
-        self.wire(src, "audio", enf, "audio");
-        self.wire(enf, "location", inv, "location");
-        self.wire(inv, "location", map_inv, "location");
-        self.wire_record(enf, "location", rec);
-        self.wire(rec, "location", map_rec, "location");
-        self.save_project();
-        self.run();
-        self.msg = format!(
-            "ENF demo running: the hum decides the grid in about a minute. Your previous project: {}",
-            backup.map_or("not saved".into(), |b| b.display().to_string())
-        );
-    }
-
-    /// Stops everything and empties the canvas; the current project is kept as project-before-demo.txt.
-    fn clear_for_demo(&mut self) -> Option<std::path::PathBuf> {
-        self.stop_all();
-        self.save_project();
-        let backup = project_file().map(|p| {
-            let b = p.with_file_name("project-before-demo.txt");
-            let _ = std::fs::copy(&p, &b);
-            b
-        });
-        self.graph = Graph::new();
-        self.nodes.clear();
-        self.textures.clear();
-        self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
-        backup
-    }
-
-    /// Demo: the same Cornell Lab live stream, at its known site (Sapsucker Woods, Ithaca NY).
-    /// Planes hears the passes; adsb-check polls real flight data around the site, lists each
-    /// aircraft as heard / not heard, and draws the Doppler curve its real track predicts dashed
-    /// over the Planes spectrogram, so heard and real curves can be compared by eye.
-    fn adsb_demo(&mut self) {
-        let Some(adsb) = plugin_node::bundled().into_iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) else {
-            self.msg = "ADS-B demo: the adsb-check plugin is not next to the program (build it with cargo build --release)".into();
-            return;
-        };
-        let backup = self.clear_for_demo();
-        let src = self.add(Kind::Source { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(20.0, 40.0));
-        self.nodes[src].label = "Cornell Lab stream (Sapsucker Woods)".into();
-        let rows = vec![
-            ("place".into(), "Sapsucker Woods, Ithaca NY, USA (Cornell Lab of Ornithology)".into()),
-            ("coordinates".into(), "42.4797, -76.4514".into()),
-            ("elevation".into(), "335 m".into()),
-        ];
-        let man = self.add(Kind::Manual { rows }, Pos2::new(20.0, 470.0));
-        self.nodes[man].label = "Stream site".into();
-        let planes = self.add(Kind::Planes, Pos2::new(480.0, 40.0));
-        let a = self.add(Kind::Plugin { path: adsb }, Pos2::new(480.0, 560.0));
-        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(1100.0, 560.0));
-        self.wire(src, "audio", planes, "audio");
-        self.wire(src, "audio", a, "audio");
-        self.wire(src, "time", a, "time");
-        self.wire(man, "place", a, "place");
-        self.wire_record(planes, "aircrafts", rec);
-        self.wire_record(a, "findings", rec);
-        self.wire_record(man, "facts", rec);
-        self.save_project();
-        self.run();
-        self.msg = format!(
-            "ADS-B demo running: real flights around the site are polled every 10 s; matches show as ✓ with dashed curves on the Planes spectrogram. Your previous project: {}",
-            backup.map_or("not saved".into(), |b| b.display().to_string())
-        );
-    }
-
-    /// Where the default project puts the bundled ADS-B check (when there is one): under the
-    /// other sources. The layout reads left to right, sources then detectors then the record;
-    /// Planes, the widest, sits under ENF (the `default_layout` test keeps nodes apart).
-    const DEFAULT_ADSB_POS: Pos2 = Pos2::new(30.0, 440.0);
-
-    fn default_project(&mut self) {
-        let src = self.add(Kind::Source { input: String::new() }, Pos2::new(30.0, 40.0));
-        let mut rows = corroborate::modules::manual::defaults();
-        rows.push(("elevation".into(), String::new()));
-        let man = self.add(Kind::Manual { rows }, Pos2::new(30.0, 200.0));
-        let planes = self.add(Kind::Planes, Pos2::new(460.0, 400.0));
-        let enf = self.add(Kind::Enf { grid: String::new() }, Pos2::new(460.0, 40.0));
-        let rec = self.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
-
-        // Wire Planes
-        self.wire(src, "audio", planes, "audio");
-        self.wire_record(planes, "aircrafts", rec);
-
-        // Wire ENF
-        self.wire(src, "audio", enf, "audio");
-        self.wire_record(enf, "location", rec);
-
-        // Wire Manual data
-        self.wire_record(man, "facts", rec);
-
-        // ADS-B check if available
-        let bundled = plugin_node::bundled();
-        if let Some(adsb) = bundled.iter().find(|p| p.contains(corroborate::modules::plugin::ADSB_CHECK)) {
-            let a = self.add(Kind::Plugin { path: adsb.clone() }, Self::DEFAULT_ADSB_POS);
-            self.wire(src, "audio", a, "audio");
-            self.wire(src, "time", a, "time");
-            self.wire(man, "place", a, "place");
-            self.wire_record(a, "findings", rec);
         }
     }
 
@@ -1132,7 +1006,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
             ui.separator();
-            if self.mode == Mode::Work {
+            {
                 // The graph runs always: changes restart it. Recording is in the Result record node.
                 if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
                     self.run();
@@ -1149,30 +1023,6 @@ impl App {
                 if !self.follow && ui.button("Follow timeline").clicked() {
                     self.follow = true;
                 }
-            }
-            ui.separator();
-            if self.mode == Mode::Demo {
-                if ui.button("◀ Back to workspace").clicked() {
-                    self.mode = Mode::Work;
-                }
-            } else {
-                ui.menu_button("Demos", |ui| {
-                    if ui.button("Protest scenario (synthetic, view only)").clicked() {
-                        self.mode = Mode::Demo;
-                        if self.demo.is_none() {
-                            self.demo = Some(demo::Demo::new());
-                        }
-                        ui.close();
-                    }
-                    if ui.button("ENF location: live stream, place unknown").clicked() {
-                        self.enf_demo();
-                        ui.close();
-                    }
-                    if ui.button("ADS-B check: stream passes vs real flights").clicked() {
-                        self.adsb_demo();
-                        ui.close();
-                    }
-                });
             }
             ui.colored_label(DIM, &self.msg);
         });
@@ -1244,12 +1094,6 @@ impl App {
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
         });
-        if self.mode == Mode::Demo {
-            if let Some(d) = self.demo.as_mut() {
-                d.show(ui);
-            }
-            return;
-        }
         egui::Panel::bottom("timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(0.0)).show(ui, |ui| {
             self.timeline_view(ui);
         });
@@ -1271,11 +1115,10 @@ impl App {
 }
 
 fn main() -> eframe::Result {
-    // corroborate [path or URL] [--run] [--demo-enf]: --run starts the saved project at once
-    // (unattended runs); --demo-enf opens and runs the ENF location demo.
+    // corroborate [path or URL] [--run] [--new]: --run starts the saved project at once
+    // (unattended runs); --new opens an empty canvas.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let autorun = args.iter().any(|a| a == "--run");
-    let demo_enf = args.iter().any(|a| a == "--demo-enf");
     let start = args.into_iter().find(|a| !a.starts_with("--"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 780.0]).with_title("Corroborate"),
@@ -1286,11 +1129,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut app = App::new(start, autorun);
-            if demo_enf {
-                app.enf_demo();
-            }
-            Ok(Box::new(app))
+            Ok(Box::new(App::new(start, autorun)))
         }),
     )
 }
@@ -1299,18 +1138,18 @@ fn main() -> eframe::Result {
 mod canvas_timing {
     use super::*;
 
-    /// Time to build and tessellate one canvas frame (no GPU), like the ENF demo: maps, an
+    /// Time to build and tessellate one canvas frame (no GPU): maps, an
     /// inverted area and the record. Run: cargo test --release --bin corroborate canvas -- --ignored --nocapture
     #[test]
     #[ignore]
     fn canvas_frame_time() {
         let ctx = egui::Context::default();
-        let mut app = App::new(None, false);
+        let mut app = App::empty();
         let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
         let man = app.add(Kind::Manual { rows }, Pos2::new(20.0, 420.0));
         let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
         app.wire(man, "place", inv, "location");
-        let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record { .. })).expect("default project has a record");
+        let rec = app.add(Kind::Record { folder: String::new() }, Pos2::new(480.0, 60.0));
         app.wire_record(man, "place", rec);
         for (k, from, out) in [(0, man, "place"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));

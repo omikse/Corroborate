@@ -14,7 +14,7 @@ cargo build --release     # corroborate, planes-view, corroborate-cli and the pl
 cargo test --release
 target/release/corroborate              # the workbench
 target/release/corroborate --run        # open the saved project and press Run
-target/release/corroborate --demo-enf   # the ENF location demo
+target/release/corroborate --new        # an empty canvas
 ```
 
 The tool is one movable folder: everything it keeps lives next to the program, in `settings\`
@@ -22,9 +22,8 @@ The tool is one movable folder: everything it keeps lives next to the program, i
 Nothing goes to system folders.
 
 In the workbench: right-click to add nodes, drag from an output to an input to wire (types must
-match). Nodes have no windows: each shows its data and controls on the canvas. `--new` opens an
-empty project (the old one is copied to `settings\project.bak.txt`). **Demos** has the synthetic protest scenario and the
-ENF location demo.
+match). Nodes have no windows: each shows its data and controls on the canvas. With no saved project the
+canvas starts empty; `--new` opens an empty one (the old project is copied to `settings\project.bak.txt`).
 
 ## Modules
 

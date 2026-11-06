@@ -86,7 +86,7 @@ impl App {
         }
     }
 
-    /// Wire `from.out` into the record's free input (built-in projects, old project files).
+    /// Wire `from.out` into the record's free input (old project files, tests).
     pub(crate) fn wire_record(&mut self, from: NodeId, out: &str, rec: NodeId) {
         self.sync_record_ports();
         if let Some(free) = self.graph.nodes()[rec].spec.inputs.last().map(|p| p.name) {

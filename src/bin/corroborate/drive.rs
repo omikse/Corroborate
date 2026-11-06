@@ -33,13 +33,6 @@ impl Drive {
         Self::with(App::empty())
     }
 
-    /// The default project (source, Planes, ENF, Manual, Record and bundled plugins).
-    pub fn default_project() -> Self {
-        let mut app = App::empty();
-        app.default_project();
-        Self::with(app)
-    }
-
     pub fn with(app: App) -> Self {
         let h = Harness::builder().with_size(Vec2::new(1400.0, 780.0)).wgpu().build_ui_state(
             |ui, app: &mut App| {
@@ -191,12 +184,17 @@ fn sourcer() {
     assert!(ok, "the file decoded");
 }
 
-/// The default project as a new user sees it, plus one of every other node kind; then the
-/// canvas editors: a Manual field typed in, Combine switched to OR.
+/// One of every node kind; then the canvas editors: a Manual field typed in, Combine switched
+/// to OR.
 #[test]
 fn all_nodes() {
-    let mut d = Drive::default_project();
+    let mut d = Drive::new();
     let a = d.app();
+    a.add(Kind::Source { input: String::new() }, Pos2::new(30.0, 40.0));
+    a.add(Kind::Manual { rows: corroborate::modules::manual::defaults() }, Pos2::new(30.0, 200.0));
+    a.add(Kind::Enf { grid: String::new() }, Pos2::new(460.0, 40.0));
+    a.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
+    a.add(Kind::Planes, Pos2::new(460.0, 700.0));
     a.add(Kind::Map, Pos2::new(560.0, 330.0));
     a.add(Kind::Invert, Pos2::new(560.0, 560.0));
     let comb = a.add(Kind::Combine { any: false }, Pos2::new(1050.0, 330.0));
@@ -230,16 +228,11 @@ fn all_nodes() {
 #[ignore]
 fn area_timing() {
     let mut app = App::empty();
-    app.default_project();
-    let man = app.nodes.iter().position(|n| matches!(n.kind, Kind::Manual { .. })).unwrap();
-    if let Kind::Manual { rows } = &mut app.nodes[man].kind {
-        rows.retain(|(k, _)| k != "coordinates" && k != "radius_km");
-        rows.push(("coordinates".into(), "50, 15".into()));
-        rows.push(("radius_km".into(), "2500".into()));
-    }
+    let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
+    let man = app.add(Kind::Manual { rows }, Pos2::new(30.0, 200.0));
     let inv = app.add(Kind::Invert, Pos2::new(250.0, 420.0));
     app.wire(man, "place", inv, "location");
-    let rec = app.nodes.iter().position(|n| matches!(n.kind, Kind::Record { .. })).unwrap();
+    let rec = app.add(Kind::Record { folder: String::new() }, Pos2::new(990.0, 40.0));
     app.wire_record(man, "place", rec);
     for (name, id) in [("manual", man), ("invert", inv), ("record", rec)] {
         let t = Instant::now();
@@ -249,26 +242,4 @@ fn area_timing() {
         }
         println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
-}
-
-/// The default project's nodes do not overlap (at zoom 1, the canvas as a new user sees it).
-#[test]
-fn default_layout() {
-    let mut app = App::empty();
-    app.default_project();
-    // A bundled ADS-B check is only found next to a release build; lay one out as if it were.
-    if !app.nodes.iter().any(|n| matches!(n.kind, Kind::Plugin { .. })) {
-        app.add(Kind::Plugin { path: "adsb-check.exe".into() }, App::DEFAULT_ADSB_POS);
-    }
-    let rects: Vec<(String, Rect)> = (0..app.nodes.len()).map(|i| (app.nodes[i].label.clone(), app.node_rect(Pos2::ZERO, i))).collect();
-    for (l, r) in &rects {
-        println!("{l}: {:.0},{:.0} {:.0}x{:.0}", r.min.x, r.min.y, r.width(), r.height());
-    }
-    for (a, (la, ra)) in rects.iter().enumerate() {
-        for (lb, rb) in &rects[a + 1..] {
-            assert!(!ra.expand(8.0).intersects(*rb), "{la} and {lb} overlap");
-        }
-    }
-    let mut d = Drive::with(app);
-    d.shot("default_layout");
 }
