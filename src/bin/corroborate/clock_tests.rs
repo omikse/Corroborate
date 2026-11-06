@@ -366,3 +366,22 @@ fn play_and_live_playheads() {
     app.go_live();
     assert_eq!(app.playhead_on(&c), Some(3.0));
 }
+
+/// While playing, the sound is the selected node's source audio at its playhead; Planes, fed by
+/// the source, plays the source's audio; paused, nothing.
+#[test]
+fn sound_follows_the_selected_node() {
+    let mut app = App::empty();
+    let s = source(&mut app, 40.0);
+    let pl = app.add(Kind::Planes, Pos2::new(600.0, 40.0));
+    app.wire(s, "audio", pl, "audio");
+    app.nodes[s].state.lock().unwrap().source.push_audio(&[0.5; 1600]);
+    app.update_clocks();
+    app.pick_only(pl);
+    let c = app.clock_of(s).unwrap();
+    app.set_playhead(&c, 0.05);
+    assert!(app.sound_target().is_none(), "paused: no sound");
+    app.ph.playing = true;
+    let (a, t) = app.sound_target().unwrap();
+    assert_eq!((a.lock().unwrap().len(), t), (1600, 0.05));
+}

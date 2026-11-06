@@ -114,10 +114,13 @@ pub struct SourceState {
     pub video_note: String,
     /// ffprobe's view of the source, plus what was opened: key, value.
     pub meta: Vec<(String, String)>,
+    /// The audio itself (16 kHz), for sound at the playhead.
+    pub audio: std::sync::Arc<std::sync::Mutex<Vec<i16>>>,
 }
 
 impl SourceState {
     pub fn push_audio(&mut self, x: &[f32]) {
+        self.audio.lock().unwrap().extend(x.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16));
         for &v in x {
             let (lo, hi, n) = &mut self.acc;
             if *n == 0 {

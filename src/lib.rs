@@ -24,6 +24,8 @@ pub mod plugin;
 pub mod graph;
 pub mod sync;
 pub mod synth;
+#[cfg(feature = "gui")]
+pub mod sound_out;
 pub mod timebase;
 pub mod types;
 

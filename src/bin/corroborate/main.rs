@@ -35,6 +35,7 @@ mod clock_view;
 mod evidence;
 mod timeline;
 mod playhead;
+mod sound;
 mod project;
 mod layout;
 mod look;
@@ -253,6 +254,7 @@ struct App {
     /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
     tls: timeline::TlState,
     ph: playhead::Playheads,
+    sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
 }
@@ -304,6 +306,7 @@ impl App {
             ev: Default::default(),
             tls: Default::default(),
             ph: Default::default(),
+            sound: Default::default(),
         }
     }
 
@@ -1274,6 +1277,7 @@ impl App {
         self.feed_programs();
         self.update_clocks();
         self.playhead_tick(&ctx);
+        self.sound_tick();
         self.record_tick();
         if self.last_project_save.elapsed() > Duration::from_secs(10) {
             self.save_project();
