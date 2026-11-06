@@ -309,3 +309,30 @@ fn drag_a_row_onto_an_event_links_it() {
     assert!(app.tls.pending.is_none() && !app.tls.shift.contains_key("c2"));
     d.shot("timeline_linked");
 }
+
+/// Moving the playhead in SOURCER's waveform moves it on the timeline and in Planes, which is on
+/// the same clock (its audio comes from the source).
+#[test]
+fn playhead_links_sourcer_planes_and_timeline() {
+    let mut d = crate::drive::Drive::new();
+    let s = d.app().add(Kind::Sourcer { input: String::new() }, Pos2::new(40.0, 40.0));
+    let pl = d.app().add(Kind::Planes, Pos2::new(560.0, 40.0));
+    d.app().wire(s, "audio", pl, "audio");
+    d.frames(3);
+    d.type_into(0, &crate::drive::tone_wav().to_string_lossy());
+    assert!(d.wait_until(30.0, |app| app.nodes[s].state.lock().map(|st| st.audio_s > 2.0).unwrap_or(false)), "the file decoded");
+    d.app().pick_only(s);
+    d.frames(3);
+    let r: Rect = d.h.ctx.data(|m| m.get_temp(egui::Id::new(("wave-rect", s)))).expect("waveform drawn");
+    d.click_at(r.center().x, r.center().y);
+    let app = d.app();
+    let clock = app.clock_of(s).unwrap();
+    let t = app.playhead_on(&clock).expect("the click set the playhead");
+    assert!(t > 0.0);
+    assert_eq!(app.clock_of(pl).as_deref(), Some(clock.as_str()));
+    assert!(app.is_active_clock(&clock));
+    d.frames(3);
+    let end = crate::planes_node::view_end(&d.h.ctx, pl).expect("Planes follows the playhead");
+    assert!((end - (t + 80.0)).abs() < 1e-6, "{end} vs {t}");
+    d.shot("playhead_linked");
+}

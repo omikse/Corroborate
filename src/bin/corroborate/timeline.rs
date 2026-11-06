@@ -774,6 +774,36 @@ impl App {
             if ev_hover.is_some() && hover.is_none() {
                 hover = ev_hover;
             }
+            // Playheads: one line per row, stronger in the active group; a click on the ruler
+            // moves the active group's (or, with nothing selected, the UTC one).
+            let ph_col = Color32::from_rgb(255, 210, 90);
+            let active = self.active_clock().map(|c| self.ev.clocks.get(&c));
+            for (li, line) in lines.iter().enumerate() {
+                let r = match line {
+                    Line::Group(r) | Line::Sub(r, _) => *r,
+                };
+                let abs = r.group.kind == Ck::Absolute;
+                let Some(pos) = self.ph.get(abs, &r.group.id) else { continue };
+                let x = tx(pos + shift_of(&self.tls, r, v0));
+                if x < track.left() || x > track.right() {
+                    continue;
+                }
+                let on = active.as_ref().is_some_and(|a| (a.kind == Ck::Absolute && abs) || a.group == r.group.id);
+                let top = area.top() + ruler_h + li as f32 * lane_h;
+                p.line_segment([Pos2::new(x, top), Pos2::new(x, top + lane_h)], Stroke::new(if on { 2.0 } else { 1.0 }, if on { ph_col } else { ph_col.gamma_multiply(0.5) }));
+            }
+            if resp.clicked_by(egui::PointerButton::Primary) {
+                if let Some(h) = resp.interact_pointer_pos().filter(|h| h.y < area.top() + ruler_h && h.x > track.left()) {
+                    let t = v0 + ((h.x - track.left()) / track.width()) as f64 * span;
+                    match active.as_ref().filter(|a| a.kind != Ck::Absolute) {
+                        Some(a) => {
+                            let sh = rows.iter().find(|r| r.group.id == a.group).map_or(0.0, |r| shift_of(&self.tls, r, v0));
+                            self.ph.set(false, &a.group, t - sh);
+                        }
+                        None => self.ph.set(true, "", t),
+                    }
+                }
+            }
             if rows.is_empty() {
                 p.text(Pos2::new(track.left() + 8.0, area.top() + ruler_h + 14.0), Align2::LEFT_CENTER, "findings from detectors and plugins appear here", FontId::proportional(11.0), DIM);
             }

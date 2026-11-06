@@ -77,6 +77,12 @@ struct View {
     band: Option<(f64, f64)>,
 }
 
+/// The right edge of node `i`'s view in audio seconds (None: following the newest audio).
+#[allow(dead_code)]
+pub fn view_end(ctx: &egui::Context, i: NodeId) -> Option<f64> {
+    ctx.data(|d| d.get_temp::<View>(egui::Id::new(("planes-view", i)))).and_then(|v| v.end)
+}
+
 impl Default for View {
     fn default() -> Self {
         Self { span: 160.0, end: None, band: None }
@@ -112,6 +118,15 @@ impl crate::look::NodeLook for Look {
         let z = app.zoom;
         let id = egui::Id::new(("planes-view", i));
         let mut v: View = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // Follow the linked playhead when it moves: centre it (this stops Follow, as a pan does).
+        let seen: u64 = ui.data(|d| d.get_temp(id.with("ph"))).unwrap_or(0);
+        if seen != app.ph.rev {
+            if let Some(t) = app.clock_of(i).and_then(|c| app.playhead_on(&c)) {
+                v.end = Some(t + if v.span > 0.0 { v.span } else { 160.0 } * 0.5);
+                ui.data_mut(|d| d.insert_temp(id, v));
+            }
+            ui.data_mut(|d| d.insert_temp(id.with("ph"), app.ph.rev));
+        }
         let st = app.nodes[i].state.clone();
         let key = st.lock().unwrap().source_key.clone();
         let overlays: Vec<(Color32, Vec<(String, Vec<(f64, f64, bool)>)>)> = app

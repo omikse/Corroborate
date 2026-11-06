@@ -34,6 +34,7 @@ mod drop_menu;
 mod clock_view;
 mod evidence;
 mod timeline;
+mod playhead;
 mod project;
 mod layout;
 mod look;
@@ -251,6 +252,7 @@ struct App {
     ev: evidence::Evidence,
     /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
     tls: timeline::TlState,
+    ph: playhead::Playheads,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
 }
@@ -301,6 +303,7 @@ impl App {
             next_uid: 1,
             ev: Default::default(),
             tls: Default::default(),
+            ph: Default::default(),
         }
     }
 

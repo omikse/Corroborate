@@ -265,6 +265,10 @@ impl crate::look::NodeLook for Look {
             input = t.clone();
         }
         let mut refresh = false;
+        // The playhead on this source's clock (stronger when its group is the active one).
+        let clock = app.clock_of(i).unwrap_or_default();
+        let ph = app.playhead_on(&clock).map(|t| (t, app.is_active_clock(&clock)));
+        let mut set_ph: Option<f64> = None;
         crate::look::area(ui, r, |ui| {
             ui.add_enabled_ui(fed_text.is_none(), |ui| {
                 // Row 1: file, YouTube link or stream URL. The text input overrides this box.
@@ -310,13 +314,17 @@ impl crate::look::NodeLook for Look {
             source_info(ui, &st);
             if !input.trim().is_empty() {
                 ui.add_space(4.0 * z);
-                let cursor = waveform(ui, &st, z);
+                let (cursor, set) = waveform(ui, &st, z, i, ph);
+                set_ph = set;
                 if has_video(&input) {
                     ui.add_space(4.0 * z);
                     video(app, ui, i, &st, cursor, z);
                 }
             }
         });
+        if let Some(t) = set_ph {
+            app.set_playhead(&clock, t);
+        }
         if refresh {
             match corroborate::ingest::list_microphones() {
                 Ok(m) => app.mics = m,
@@ -330,17 +338,19 @@ impl crate::look::NodeLook for Look {
 }
 
 /// The audio so far, min/max per column: the whole recording, or the last 30 s when live.
-/// Returns the time under the pointer.
-fn waveform(ui: &mut egui::Ui, st: &Shared, z: f32) -> Option<f64> {
+/// Draws the playhead `ph` (time, active); a click or drag moves it. Returns the time under the
+/// pointer and where the playhead was moved to.
+fn waveform(ui: &mut egui::Ui, st: &Shared, z: f32, i: NodeId, ph: Option<(f64, bool)>) -> (Option<f64>, Option<f64>) {
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, WAVE_H * z), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, WAVE_H * z), Sense::click_and_drag());
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(("wave-rect", i)), rect));
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 3.0 * z, BG);
     let s = st.lock().unwrap();
     let peaks = &s.source.peaks;
     if peaks.is_empty() {
         p.text(rect.center(), Align2::CENTER_CENTER, "waveform appears at Run", FontId::proportional(10.5 * z), DIM);
-        return None;
+        return (None, None);
     }
     let dt = PEAK as f64 / corroborate::INPUT_SR;
     let first = if s.live { peaks.len().saturating_sub((30.0 / dt) as usize) } else { 0 };
@@ -366,11 +376,21 @@ fn waveform(ui: &mut egui::Ui, st: &Shared, z: f32) -> Option<f64> {
     let t1 = peaks.len() as f64 * dt;
     let span_text = if s.live { format!("last {:.0} s, live", t1 - t0) } else { format!("0 – {}", fmt_secs(t1)) };
     p.text(rect.left_top() + Vec2::new(4.0, 2.0) * z, Align2::LEFT_TOP, span_text, FontId::monospace(9.5 * z), DIM);
-    let hover = resp.hover_pos().filter(|h| rect.contains(*h))?;
-    let t = t0 + ((hover.x - rect.left()) / rect.width()) as f64 * shown.len().max(1) as f64 * dt;
+    let len = shown.len().max(1) as f64 * dt;
+    let t_at = |x: f32| t0 + ((x - rect.left()) / rect.width()) as f64 * len;
+    let set = if resp.clicked() || resp.dragged() { resp.interact_pointer_pos().map(|h| t_at(h.x.clamp(rect.left(), rect.right()))) } else { None };
+    if let Some((t, active)) = set.map(|t| (t, true)).or(ph) {
+        let x = rect.left() + ((t - t0) / len) as f32 * rect.width();
+        if (rect.left()..=rect.right()).contains(&x) {
+            let c = Color32::from_rgb(255, 210, 90);
+            p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(if active { 2.0 } else { 1.0 }, if active { c } else { c.gamma_multiply(0.5) }));
+        }
+    }
+    let Some(hover) = resp.hover_pos().filter(|h| rect.contains(*h)) else { return (None, set) };
+    let t = t_at(hover.x);
     p.line_segment([Pos2::new(hover.x, rect.top()), Pos2::new(hover.x, rect.bottom())], Stroke::new(1.0, TEXT));
     p.text(Pos2::new(hover.x + 4.0 * z, rect.bottom() - 2.0 * z), Align2::LEFT_BOTTOM, fmt_secs(t), FontId::monospace(9.5 * z), TEXT);
-    Some(t)
+    (Some(t), set)
 }
 
 /// The video frame at the waveform's pointer, or the newest one.
