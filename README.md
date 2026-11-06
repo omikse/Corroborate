@@ -33,6 +33,23 @@ In the workbench: right-click to add nodes, drag from an output to an input to w
 match). Nodes have no windows: each shows its data and controls on the canvas. With no saved project the
 canvas starts empty; `--new` opens an empty one (the old project is copied to `settings\project.bak.txt`).
 
+Canvas keys and mouse:
+
+| Do | How |
+|---|---|
+| Zoom | scroll wheel |
+| Pan | middle-drag, or hold Space and drag |
+| Select | click a node; Shift- or Ctrl-click adds or removes; drag a box on empty canvas; Ctrl+A all; Escape none |
+| Move | drag a selected node: all selected nodes move |
+| Delete | Delete or Backspace |
+| Copy, cut, paste, duplicate | Ctrl+C, Ctrl+X, Ctrl+V (at the pointer), Ctrl+D |
+| Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z (moves, wires, settings, names, adding, deleting) |
+| Frame | F or Home: the selection, else every node |
+
+Copied nodes are project-file text, so they paste into another Corroborate window or a text
+editor. Keys go to a text box instead while you type in one. Undoing a setting is logged in the
+result file like any other setting change.
+
 ## Modules
 
 Every node is a module: a folder named by the module's label, under `src/modules/` (and, in the

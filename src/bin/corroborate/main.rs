@@ -3,9 +3,10 @@
 //! the timeline shows every finding on one clock with its time error; the Record node keeps
 //! a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
 //!
-//! Graph: scroll to zoom, drag a node by its header, drag empty space to pan, drag from an output port to an
-//! input port to wire them (types must match), right-click an input to unwire it, right-click
-//! a node or empty space for more (rename, delete). Nodes have no windows: each shows its data and
+//! Graph: scroll to zoom, drag a node to move it, middle-drag (or Space and drag) to pan, drag
+//! from an output port to an input port to wire them (types must match), right-click an input
+//! to unwire it, right-click a node or empty space for more (rename, delete). Selecting several
+//! nodes, delete, copy and paste, undo: canvas.rs. Nodes have no windows: each shows its data and
 //! controls on the canvas.
 //!
 //! This file draws the graph, the timeline and the windows' frames. What each node shows and does
@@ -23,7 +24,10 @@ mod project_tests;
 mod bus_tests;
 #[cfg(test)]
 mod look_tests;
+#[cfg(test)]
+mod canvas_tests;
 mod bus;
+mod canvas;
 mod layout;
 mod look;
 mod nodes;
@@ -258,6 +262,10 @@ struct App {
     looks_at: Instant,
     /// look.rhai scripts, compiled, by module id; and what each node's script last gave.
     scripts: script::Scripts,
+    /// Selected nodes, the selection box and the last copy (canvas.rs).
+    sel: canvas::Selection,
+    /// Undo and redo steps (canvas.rs).
+    history: canvas::History,
 }
 
 const NODE_W: f32 = 210.0;
@@ -298,6 +306,8 @@ impl App {
             looks: HashMap::new(),
             looks_at: Instant::now(),
             scripts: Default::default(),
+            sel: Default::default(),
+            history: Default::default(),
         }
     }
 
@@ -362,11 +372,17 @@ impl App {
 
     /// The project file's text: visible nodes (renumbered), Manual rows and wires, one per line.
     fn project_text(&self) -> String {
-        let mut text = String::from("# corroborate project: node|kind|x|y|label|param[|collapsed], row|node|key|value, wire|from|out|to|in\n");
         // Only visible nodes, renumbered.
         let keep: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
+        self.nodes_text(&keep)
+    }
+
+    /// Nodes `keep` in project-file form (renumbered from 0), with the wires between them: the
+    /// project file, and what copy puts on the clipboard.
+    fn nodes_text(&self, keep: &[NodeId]) -> String {
+        let mut text = String::from("# corroborate project: node|kind|x|y|label|param[|collapsed], row|node|key|value, wire|from|out|to|in\n");
         let new_id = |old: NodeId| keep.iter().position(|&k| k == old);
-        for &i in &keep {
+        for &i in keep {
             let n = &self.nodes[i];
             let (k, param) = (n.kind.spec().name, n.kind.saved_param());
             let folded = if n.collapsed { "|collapsed" } else { "" };
@@ -395,6 +411,13 @@ impl App {
     /// Adds the nodes, rows and wires of a project file's text. Lines it does not understand
     /// are skipped. False when it held no nodes.
     fn load_project_text(&mut self, text: &str) -> bool {
+        !self.append_text(text).is_empty()
+    }
+
+    /// Adds the nodes, rows and wires of project text after the nodes already there (load,
+    /// paste). Lines it does not understand are skipped. Returns the new nodes.
+    fn append_text(&mut self, text: &str) -> Vec<NodeId> {
+        let base = self.nodes.len();
         let mut rows: Vec<(usize, String, String)> = Vec::new();
         let mut wires: Vec<(usize, String, usize, String)> = Vec::new();
         for line in text.lines() {
@@ -413,16 +436,21 @@ impl App {
                 _ => {}
             }
         }
-        if self.nodes.is_empty() {
-            return false;
+        let new: Vec<NodeId> = (base..self.nodes.len()).collect();
+        if new.is_empty() {
+            return new;
         }
+        // Saved numbers count from the first new node.
+        let len = self.nodes.len();
+        let at = |n: usize| n.checked_add(base).filter(|&n| n < len);
+        let wires: Vec<(usize, String, usize, String)> = wires.into_iter().filter_map(|(a, o, b, i)| Some((at(a)?, o, at(b)?, i))).collect();
         for (n, k, v) in rows {
-            if let Some(node) = self.nodes.get_mut(n) {
+            if let Some(node) = at(n).and_then(|n| self.nodes.get_mut(n)) {
                 node.kind.add_row(k, v);
             }
         }
         // A node whose module this tool lacks keeps the ports its saved wires use.
-        for s in 0..self.nodes.len() {
+        for s in base..self.nodes.len() {
             if !matches!(self.nodes[s].kind, Kind::Missing { .. }) {
                 continue;
             }
@@ -450,8 +478,7 @@ impl App {
             }
         }
         self.sync_record_ports();
-        // Graph labels follow the node labels.
-        true
+        new
     }
 
     // ---------------- run
@@ -720,7 +747,7 @@ impl App {
         }
         if let Some(k) = pick {
             let id = self.add(k, at);
-            self.selected = Some(id);
+            self.pick_only(id);
             self.save_project();
             ui.close();
         }
@@ -758,14 +785,17 @@ impl App {
             y += step;
         }
         painter.add(egui::Shape::mesh(dots));
-        if bg.dragged() && self.wiring.is_none() {
+        // Pan: middle-drag, or Space and drag. A plain drag on empty canvas draws a selection box.
+        let space = ui.input(|i| i.key_down(egui::Key::Space));
+        if self.wiring.is_none() && (bg.dragged_by(egui::PointerButton::Middle) || (space && bg.dragged_by(egui::PointerButton::Primary))) {
             self.pan += bg.drag_delta();
         }
-        if bg.clicked() {
-            self.selected = None;
+        if bg.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
+            self.pick_none();
         }
         let origin = area.min;
         self.canvas_origin = origin;
+        self.box_select(ui, &bg, &painter, origin);
         let menu_at = (bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));
         // Scripted looks of the nodes on screen, run again only when what they read changed.
@@ -790,7 +820,8 @@ impl App {
             }
         }
 
-        let mut clicked = None;
+        let mut clicked: Option<(NodeId, egui::Modifiers)> = None;
+        let mut move_by = Vec2::ZERO;
         let mut delete = None;
         let mut drop_on: Option<(NodeId, usize)> = None;
         let mut unwire: Option<(NodeId, &'static str)> = None;
@@ -804,11 +835,26 @@ impl App {
             let rect = self.node_rect(origin, i);
             let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD * self.zoom));
             let resp = ui.interact(rect, egui::Id::new(("node", i)), Sense::click_and_drag());
-            if resp.dragged() && self.wiring.is_none() {
-                self.nodes[i].pos += resp.drag_delta() / self.zoom;
+            if self.wiring.is_none() {
+                let space = ui.input(|i| i.key_down(egui::Key::Space));
+                if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
+                    self.pan += resp.drag_delta();
+                } else if resp.dragged_by(egui::PointerButton::Primary) {
+                    // Dragging a node not selected selects it alone (Shift/Ctrl: adds it); then
+                    // every selected node moves.
+                    if resp.drag_started() && !self.is_picked(i) {
+                        let m = ui.input(|i| i.modifiers);
+                        if m.shift || m.command {
+                            self.pick_toggle(i);
+                        } else {
+                            self.pick_only(i);
+                        }
+                    }
+                    move_by += resp.drag_delta() / self.zoom;
+                }
             }
             if resp.clicked() {
-                clicked = Some(i);
+                clicked = Some((i, ui.input(|i| i.modifiers)));
             }
             let mut fold = false;
             let collapsed = self.nodes[i].collapsed;
@@ -833,7 +879,7 @@ impl App {
                 continue;
             }
             let spec = self.graph.nodes()[i].spec.clone();
-            let is_sel = self.selected == Some(i);
+            let is_sel = self.is_picked(i);
             let in_trail = trail.contains(&i);
             let fade = self.selected.is_some() && !in_trail;
             let frame = self.frame_look(i);
@@ -967,23 +1013,27 @@ impl App {
                 self.save_project();
             }
         }
-        if let Some(i) = delete {
-            if self.recordings.contains_key(&i) {
-                self.record_end(i);
+        if move_by != Vec2::ZERO {
+            for i in self.picked() {
+                self.nodes[i].pos += move_by;
             }
-            self.graph.isolate(i);
-            self.nodes[i].hidden = true;
-            self.sync_record_ports();
-            self.selected = None;
-            self.save_project();
         }
-        if let Some(i) = clicked {
-            self.selected = Some(i);
+        if let Some(i) = delete {
+            self.delete_nodes(&[i]);
         }
+        if let Some((i, m)) = clicked {
+            if m.shift || m.command {
+                self.pick_toggle(i);
+            } else {
+                self.pick_only(i);
+            }
+        }
+        let at = (ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p)).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
+        self.canvas_keys(&ui.ctx().clone(), area, at.to_pos2());
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag header: move · drag empty: pan · drag output to input: wire · right-click input: unwire · right-click: add node / rename / collapse / delete",
+            "scroll: zoom · drag node: move · drag empty: select · middle-drag or Space+drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag output to input: wire · right-click: menus",
             FontId::proportional(11.0),
             DIM,
         );
@@ -1223,6 +1273,7 @@ impl App {
         let ctx = ui.ctx().clone();
 
         let running = self.running();
+        self.history_tick(&ctx);
         self.keep_running();
         self.feed_programs();
         self.record_tick();

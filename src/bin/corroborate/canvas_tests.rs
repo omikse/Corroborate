@@ -1,0 +1,185 @@
+//! Canvas editing driven like a user would (canvas.rs): box select, Shift-click, moving several
+//! nodes, middle-drag pan, Delete, copy/cut/paste/duplicate, undo/redo, frame all. Headless;
+//! screenshots in target/drive/.
+
+use super::drive::Drive;
+use super::*;
+use egui::{Event, Key, Modifiers, PointerButton};
+
+/// Three nodes: Invert location → Combine locations → Map.
+fn three() -> (Drive, NodeId, NodeId, NodeId) {
+    let mut d = Drive::new();
+    let inv = d.app().add(Kind::InvertLocation, Pos2::new(40.0, 60.0));
+    let comb = d.app().add(Kind::CombineLocations { any: false }, Pos2::new(40.0, 330.0));
+    let map = d.app().add(Kind::Map, Pos2::new(700.0, 60.0));
+    d.app().wire(inv, "location", comb, "location 1");
+    d.app().wire(comb, "location", map, "location");
+    d.frames(3);
+    (d, inv, comb, map)
+}
+
+/// Presses `button` at `from`, moves to `to` in steps, releases.
+fn drag(d: &mut Drive, from: Pos2, to: Pos2, button: PointerButton, modifiers: Modifiers) {
+    d.h.hover_at(from);
+    d.h.event(Event::PointerButton { pos: from, button, pressed: true, modifiers });
+    d.frames(1);
+    for k in 1..=6 {
+        d.h.hover_at(from + (to - from) * (k as f32 / 6.0));
+        d.frames(1);
+    }
+    d.h.event(Event::PointerButton { pos: to, button, pressed: false, modifiers });
+    d.frames(2);
+}
+
+fn key(d: &mut Drive, m: Modifiers, k: Key) {
+    d.h.key_press_modifiers(m, k);
+    d.frames(2);
+}
+
+/// Lets a change settle into an undo step.
+fn settle(d: &mut Drive) {
+    d.wait(0.5);
+}
+
+fn visible(d: &mut Drive) -> usize {
+    d.app().nodes.iter().filter(|n| !n.hidden).count()
+}
+
+#[test]
+fn box_select_delete_undo_redo() {
+    let (mut d, inv, comb, map) = three();
+    settle(&mut d);
+    // A box over the two nodes on the left, starting on empty canvas.
+    let o = d.app().canvas_origin;
+    drag(&mut d, o + Vec2::new(10.0, 20.0), o + Vec2::new(300.0, 500.0), PointerButton::Primary, Modifiers::NONE);
+    assert_eq!(d.app().picked(), vec![inv, comb], "box picks the two it touches");
+    assert_eq!(d.app().pan, Vec2::ZERO, "a plain drag on empty canvas does not pan");
+    d.shot("canvas_box_selected");
+    key(&mut d, Modifiers::NONE, Key::Delete);
+    assert_eq!(visible(&mut d), 1, "Delete removes both");
+    assert!(d.app().graph.wires().is_empty(), "their wires go with them");
+    key(&mut d, Modifiers::COMMAND, Key::Z);
+    assert_eq!(visible(&mut d), 3, "undo brings them back");
+    assert_eq!(d.app().graph.wires().len(), 2, "with their wires");
+    key(&mut d, Modifiers::COMMAND, Key::Y);
+    assert_eq!(visible(&mut d), 1, "redo deletes again");
+    key(&mut d, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    assert_eq!(d.msg(), "nothing to redo");
+    key(&mut d, Modifiers::COMMAND, Key::Z);
+    assert!(!d.app().nodes[map].hidden && !d.app().nodes[inv].hidden);
+}
+
+#[test]
+fn shift_click_and_move_together() {
+    let (mut d, inv, comb, map) = three();
+    settle(&mut d);
+    let a = d.node_title(inv);
+    d.click_at(a.x, a.y);
+    let b = d.node_title(map);
+    d.h.hover_at(b);
+    d.frames(1);
+    for pressed in [true, false] {
+        d.h.event_modifiers(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT }, Modifiers::SHIFT);
+        d.frames(1);
+    }
+    d.frames(2);
+    assert_eq!(d.app().picked(), vec![inv, map], "Shift-click adds");
+    let (p_inv, p_map, p_comb) = (d.app().nodes[inv].pos, d.app().nodes[map].pos, d.app().nodes[comb].pos);
+    drag(&mut d, a, a + Vec2::new(60.0, 40.0), PointerButton::Primary, Modifiers::NONE);
+    let moved = d.app().nodes[inv].pos - p_inv;
+    assert!(moved.length() > 50.0, "dragged node moved {moved:?}");
+    assert_eq!(d.app().nodes[map].pos - p_map, moved, "the other selected node moved the same");
+    assert_eq!(d.app().nodes[comb].pos, p_comb, "the unselected node stayed");
+    // Moving is one undo step.
+    settle(&mut d);
+    key(&mut d, Modifiers::COMMAND, Key::Z);
+    assert_eq!((d.app().nodes[inv].pos, d.app().nodes[map].pos), (p_inv, p_map), "undo puts both back");
+}
+
+#[test]
+fn middle_drag_pans() {
+    let (mut d, ..) = three();
+    let o = d.app().canvas_origin;
+    drag(&mut d, o + Vec2::new(400.0, 600.0), o + Vec2::new(450.0, 630.0), PointerButton::Middle, Modifiers::NONE);
+    let pan = d.app().pan;
+    assert!((pan - Vec2::new(50.0, 30.0)).length() < 2.0, "pan {pan:?}");
+    assert!(d.app().picked().is_empty(), "no box from a middle drag");
+}
+
+#[test]
+fn copy_paste_cut_duplicate() {
+    let (mut d, inv, comb, _map) = three();
+    d.app().set_setting(comb, "mode", "any").unwrap();
+    d.app().nodes[comb].label = "my combine".into();
+    d.app().sel.picked = [inv, comb].into();
+    d.h.event(Event::Copy);
+    d.frames(2);
+    let clip = d.app().sel.clip.clone();
+    assert!(clip.starts_with("# corroborate project"), "{clip}");
+    let o = d.app().canvas_origin;
+    d.h.hover_at(o + Vec2::new(900.0, 400.0));
+    d.h.event(Event::Paste(clip.clone()));
+    d.frames(2);
+    assert_eq!(d.app().nodes.len(), 5, "two pasted");
+    let (pi, pc) = (3, 4);
+    assert!(matches!(d.app().nodes[pi].kind, Kind::InvertLocation));
+    assert!(matches!(d.app().nodes[pc].kind, Kind::CombineLocations { any: true }), "settings come along");
+    assert_eq!(d.app().nodes[pc].label, "my combine");
+    assert_eq!(d.app().graph.feeder(pc, "location 1"), Some((pi, "location")), "the wire between them comes along");
+    assert_eq!(d.app().graph.feeder(pi, "location"), None, "wires to nodes not copied do not");
+    assert_eq!(d.app().picked(), vec![pi, pc], "pasted nodes are selected");
+    let x = d.app().nodes[pi].pos.x;
+    assert!((880.0..920.0).contains(&x), "pasted where the pointer is: {x}");
+    // Text from elsewhere on the clipboard: the last copy pastes.
+    d.h.event(Event::Paste("hello".into()));
+    d.frames(2);
+    assert_eq!(visible(&mut d), 7, "plain text pastes the last copy");
+    // Duplicate and cut.
+    key(&mut d, Modifiers::COMMAND, Key::D);
+    assert_eq!(visible(&mut d), 9);
+    d.h.event(Event::Cut);
+    d.frames(2);
+    assert_eq!(visible(&mut d), 7, "cut removes the selection");
+    d.shot("canvas_pasted");
+}
+
+#[test]
+fn undo_of_a_setting_is_logged() {
+    let (mut d, _inv, comb, _map) = three();
+    settle(&mut d);
+    d.app().set_setting(comb, "mode", "any").unwrap();
+    settle(&mut d);
+    let logged = d.app().changes.len();
+    key(&mut d, Modifiers::COMMAND, Key::Z);
+    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: false }), "undo puts the setting back");
+    let c = d.app().changes.last().unwrap();
+    assert_eq!((c.name.as_str(), c.old.as_str(), c.new.as_str()), ("mode", "any", "all"));
+    assert_eq!(d.app().changes.len(), logged + 1);
+}
+
+#[test]
+fn keys_leave_text_boxes_alone() {
+    let mut d = Drive::new();
+    let man = d.app().add(Kind::ManualData { rows: vec![("note".into(), "abc".into())] }, Pos2::new(40.0, 60.0));
+    d.frames(3);
+    d.app().pick_only(man);
+    d.type_into(0, "xyz");
+    key(&mut d, Modifiers::NONE, Key::Backspace);
+    assert_eq!(visible(&mut d), 1, "Backspace in a text box deletes text, not the node");
+}
+
+#[test]
+fn select_all_and_frame() {
+    let (mut d, ..) = three();
+    key(&mut d, Modifiers::COMMAND, Key::A);
+    assert_eq!(d.app().picked().len(), 3);
+    key(&mut d, Modifiers::NONE, Key::Escape);
+    assert!(d.app().picked().is_empty());
+    d.app().pan = Vec2::new(-3000.0, -2000.0);
+    key(&mut d, Modifiers::NONE, Key::F);
+    let area = Rect::from_min_size(d.app().canvas_origin, Vec2::new(1400.0, 500.0));
+    let o = d.app().canvas_origin;
+    let r = d.app().node_rect(o, 2);
+    assert!(area.expand(400.0).contains_rect(r), "F brings the nodes back on screen: {r:?}");
+    d.shot("canvas_framed");
+}
