@@ -73,9 +73,9 @@ min_quality = "good"
 name = "time of recording"
 at = 98
 kind = "time"
-about = "Start of the recording (UTC) found by matching the hum track against the grid log of the wired place, around the wired time. Says whether it confirms that time."
-needs = ["audio", "time", "location"]
-when = "a log of that grid covers the time"
+about = "Start of the recording (UTC) found by matching the hum track against the grid log store: around the wired time (confirms it or not), or blind over all the logs of the hum's grids (those meeting the wired place, if any). Given only for a clear match."
+needs = ["audio", "grid logs (time, location optional)"]
+when = "a log of the recording's grid covers the time"
 source = "Grigoras 2005; Hajj-Ahmad et al."
 min_quality = "good"
 

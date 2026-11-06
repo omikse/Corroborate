@@ -263,30 +263,44 @@ fn enf_quality() {
     }
 }
 
-/// A real recording's hum dated against the grid log: ENF with a claimed time and place wired
-/// in (Value nodes). ENF_F32: raw 16 kHz mono f32le audio; ENF_UTC: its claimed start (ISO 8601);
-/// ENF_LAT, ENF_LON: the claimed place. Writes `enf_date.png`.
+/// A real recording's hum dated against the grid log store (CORROBORATE_GRID_LOGS). ENF_F32: raw
+/// 16 kHz mono f32le audio. Optional, wired in as Value nodes: ENF_UTC, its claimed start (ISO
+/// 8601); ENF_LAT and ENF_LON, the claimed place. Without them the match is blind. Writes
+/// `enf_date.png`.
 #[test]
 #[ignore]
 fn enf_date() {
-    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+    let var = |k: &str| std::env::var(k).ok();
     let mut d = Drive::new();
     let e = d.app().add(Kind::Enf { grid: String::new() }, Pos2::new(300.0, 40.0));
-    let t = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), var("ENF_UTC")), ("error_s".into(), "1".into())] }, Pos2::new(20.0, 60.0));
-    let l = d.app().add(Kind::Value { ty: "location".into(), rows: vec![("lat".into(), var("ENF_LAT")), ("lon".into(), var("ENF_LON")), ("radius_km".into(), "5".into())] }, Pos2::new(20.0, 260.0));
-    d.app().wire(t, "value", e, "time");
-    d.app().wire(l, "value", e, "location");
+    if let Some(utc) = var("ENF_UTC") {
+        let t = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), utc), ("error_s".into(), "1".into())] }, Pos2::new(20.0, 60.0));
+        d.app().wire(t, "value", e, "time");
+    }
+    if let (Some(lat), Some(lon)) = (var("ENF_LAT"), var("ENF_LON")) {
+        let l = d.app().add(Kind::Value { ty: "location".into(), rows: vec![("lat".into(), lat), ("lon".into(), lon), ("radius_km".into(), "5".into())] }, Pos2::new(20.0, 260.0));
+        d.app().wire(l, "value", e, "location");
+    }
     let job = d.app().enf_job(e);
-    assert!(job.claimed.is_some() && job.place.is_some(), "time and place wired: {}", d.msg());
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
     let b = std::fs::read(var("ENF_F32")).unwrap();
     let x: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let mut r = crate::enf_node::start(&job);
     for (k, block) in x.chunks(16_000).enumerate() {
         crate::enf_node::push(&mut r, block, &None, (k + 1) as f64);
     }
+    let t = std::time::Instant::now();
     crate::enf_node::flush(&mut r);
+    println!("match took {:.1} s", t.elapsed().as_secs_f64());
     job.state.lock().unwrap().done = true;
-    println!("{:?}", job.state.lock().unwrap().enf.dated);
+    {
+        let s = job.state.lock().unwrap();
+        match &s.enf.dated {
+            Some(Ok(dt)) => println!("{}\n{}", dt.verdict(), dt.lines().join("\n")),
+            other => println!("{other:?}"),
+        }
+        println!("area: {}", s.enf.area_note);
+    }
     println!("time of recording: {:?}", d.app().value_from(e, "time of recording"));
     d.frames(3);
     d.shot("enf_date");

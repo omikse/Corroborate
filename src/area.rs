@@ -165,11 +165,36 @@ pub struct GridRegion {
     pub polygon: Vec<(f64, f64)>,
 }
 
-/// The grid-frequency map: regions with their nominal frequency, and where the data came from.
+/// A synchronous area: one grid, one frequency everywhere in it at any second (what a grid
+/// frequency log covers). Its parts can join or leave at dates (UTC s; None: always).
+#[derive(Clone, Debug)]
+pub struct SyncArea {
+    pub id: String,
+    pub name: String,
+    pub hz: f64,
+    pub parts: Vec<(Vec<(f64, f64)>, Option<f64>, Option<f64>)>,
+}
+
+impl SyncArea {
+    /// The cells of the area at UTC time `t` (all parts ever, when None).
+    pub fn mask_at(&self, t: Option<f64>) -> WorldMask {
+        let polys: Vec<&[(f64, f64)]> = self
+            .parts
+            .iter()
+            .filter(|(_, from, to)| t.is_none_or(|t| from.is_none_or(|f| t >= f) && to.is_none_or(|e| t < e)))
+            .map(|(p, _, _)| p.as_slice())
+            .collect();
+        WorldMask::from_polygons(&polys)
+    }
+}
+
+/// The grid-frequency map: regions with their nominal frequency, the synchronous areas, and
+/// where the data came from.
 #[derive(Clone, Debug)]
 pub struct GridMap {
     pub source: String,
     pub regions: Vec<GridRegion>,
+    pub areas: Vec<SyncArea>,
 }
 
 impl GridMap {
@@ -194,7 +219,33 @@ impl GridMap {
             return Err("no regions".into());
         }
         let source = j.get("source").and_then(Json::str).unwrap_or("unknown").to_string();
-        Ok(GridMap { source, regions })
+        let poly = |b: Option<&Json>| -> Vec<(f64, f64)> { b.map_or(&[][..], Json::arr).iter().filter_map(|p| Some((p.arr().first()?.num()?, p.arr().get(1)?.num()?))).collect() };
+        let date = |v: Option<&Json>, what: &str| -> Result<Option<f64>, String> {
+            match v.and_then(Json::str) {
+                None => Ok(None),
+                Some(s) => crate::timebase::parse_iso8601(s).map(Some).ok_or(format!("{what}: not a date: {s}")),
+            }
+        };
+        let mut areas = Vec::new();
+        for a in j.get("synchronous_areas").map_or(&[][..], Json::arr) {
+            let id = a.get("id").and_then(Json::str).unwrap_or("?").to_string();
+            let hz = a.get("frequency_hz").and_then(Json::num).ok_or(format!("synchronous area {id}: no frequency_hz"))?;
+            let mut parts = Vec::new();
+            for p in a.get("parts").map_or(&[][..], Json::arr) {
+                let b = poly(p.get("bounds"));
+                if b.len() < 3 {
+                    return Err(format!("synchronous area {id}: a part needs at least 3 [lat, lon] points"));
+                }
+                parts.push((b, date(p.get("from"), &id)?, date(p.get("to"), &id)?));
+            }
+            let name = a.get("name").and_then(Json::str).unwrap_or(&id).to_string();
+            areas.push(SyncArea { id, name, hz, parts });
+        }
+        Ok(GridMap { source, regions, areas })
+    }
+
+    pub fn area(&self, id: &str) -> Option<&SyncArea> {
+        self.areas.iter().find(|a| a.id == id)
     }
 
     /// Regions whose frequency matches the measured nominal (50 or 60 Hz).
@@ -232,6 +283,28 @@ pub const ROBINSON_ASPECT: f64 = 0.8487 * std::f64::consts::PI / 1.3523;
 
 #[cfg(test)]
 mod tests {
+    /// The shipped synchronous areas: places fall in the right grid, and parts join at their
+    /// dates (the Baltic states moved from their own area to Continental Europe in 2025).
+    #[test]
+    fn synchronous_areas() {
+        use super::*;
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/modules/Grid frequencies (50 or 60 Hz)/grid-frequencies.json")).unwrap();
+        let g = GridMap::parse(&doc).unwrap();
+        let t = |s: &str| crate::timebase::parse_iso8601(s);
+        let at = |lat: f64, lon: f64, when: Option<f64>| -> Vec<&str> {
+            let p = WorldMask::circle(lat, lon, 1.0);
+            g.areas.iter().filter(|a| !a.mask_at(when).and(&p).is_empty()).map(|a| a.id.as_str()).collect()
+        };
+        assert_eq!(at(51.54, -0.48, None), ["GB"], "Hillingdon");
+        assert_eq!(at(48.0, 7.85, None), ["CE"], "Freiburg");
+        assert_eq!(at(59.33, 18.07, None), ["Nordic"], "Stockholm");
+        assert_eq!(at(53.35, -6.26, None), ["IE"], "Dublin");
+        assert_eq!(at(54.69, 25.28, t("2024-06-01")), ["Baltic"], "Vilnius 2024");
+        assert_eq!(at(54.69, 25.28, t("2025-06-01")), ["CE"], "Vilnius 2025");
+        assert_eq!(at(50.45, 30.52, t("2021-06-01")), Vec::<&str>::new(), "Kyiv 2021");
+        assert_eq!(at(50.45, 30.52, t("2023-06-01")), ["CE"], "Kyiv 2023");
+    }
+
     #[test]
     fn robinson_corners() {
         let (x, y) = robinson(0.0, 0.0);

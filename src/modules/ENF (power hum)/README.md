@@ -83,6 +83,55 @@ meridian are not handled.
 
 The default file is rough boxes per country group: borders are off by up to a few hundred km.
 
+It also lists the **synchronous areas** (one grid, one frequency everywhere at any second: what a
+grid frequency log covers), each as location data that can change over time:
+
+```json
+"synchronous_areas": [
+  {"id": "CE", "name": "Continental Europe", "frequency_hz": 50, "parts": [
+    {"bounds": [[lat, lon], ...]},
+    {"from": "2022-03-16", "bounds": [...]},
+    {"from": "2025-02-09", "bounds": [...]}
+  ]}
+]
+```
+
+A part with `from`/`to` (UTC dates) belongs to the area only then: Ukraine and Moldova joined
+Continental Europe on 2022-03-16, the Baltic states on 2025-02-09 (before that `Baltic`, with
+Russia's grid). Shipped: GB, CE, Nordic, IE (Ireland), Baltic; outlines rough, at 1°. The `id` is
+the grid's folder in the grid log store.
+
+## Grid log store and dating
+
+`grid logs\` next to the program (or `CORROBORATE_GRID_LOGS`): `<grid id>\YYYY-MM.bin`, one file
+per grid and UTC month, 1 s, the frequency minus 50 Hz in 0.1 mHz steps (i16, missing marked), a
+small header (`grid_store.rs`); `index.json` lists each grid's months and how full they are. About
+5 MB a month per grid. 60 Hz grids would need the base in the header (none stored yet).
+
+Filled from raw downloads (untrusted, many formats) by
+`corroborate-cli grid-logs <downloads folder>`, which reads only new or changed files
+(`imported.txt`) — run it again after a download tops up (`grid_import.rs`):
+
+| Folder | Grid | Time stamps |
+|---|---|---|
+| `neso\` `f-YYYY-M.csv`, `fnew-…` (some zipped) | GB | with offset (`+0100`); 2014 `dd/mm/yyyy` UK local; `fnew` UTC |
+| `zenodo_2012_2021\YYYY_cleansed.zip` | CE (TransnetBW), Nordic (Fingrid) | naive local with summer time (CET, EET) |
+| `energy_charts\YYYY-MM-DD.json` | CE (Fraunhofer ISE, Freiburg) | unix seconds |
+
+At the end of a file the node matches the counted readings against the store (`log_match.rs`):
+grids of the hum's frequency, limited to those meeting a wired `location`; around a wired `time`
+(±1 h) or blind over every second of their logs. Every start is scored at once by FFT
+correlation (rms of hum minus log smoothed over the 16 s window, mean removed: a recorder's clock
+error shifts the track), in parallel blocks; blind over all of GB 2014–2026 takes seconds. A match
+counts when its error is under 10 mHz and the next best (2 min away, or in another grid) is at
+least 2× worse. The node shows GRID LOG MATCH: the verdict (time confirmed / not; dated / no clear
+match), what was searched, the best start and grid, its error, the runner-up, the offset. A clear
+match gives the `time of recording` output; with no place wired it also sets the location output
+to that grid's area at that time (blind place).
+
+Hillingdon council stream (YouTube, 7 July 2016, on-screen timer 18:29:08 UTC): found 18:29:07 UTC
+with the time and place wired, 4.1 mHz against 37 mHz next best.
+
 ## Use cases
 
 What the hum can tell, from published research and tools (checked 2026-11-06). Status: **now**

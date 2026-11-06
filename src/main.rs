@@ -16,6 +16,10 @@ USAGE:
       ffmpeg -i <src> -ac 1 -ar 16000 -f f32le - | corroborate-cli listen --stdin
   corroborate-cli synth <out.wav>
       Write a 10-minute test recording with two passes, a 60 Hz hum and noise.
+  corroborate-cli grid-logs <raw folder>
+      Convert grid frequency downloads (neso\\, energy_charts\\, zenodo_2012_2021\\) into the grid
+      log store ENF matches against: `grid logs\\` next to the program, or CORROBORATE_GRID_LOGS.
+      Only new or changed files are read.
 
 OPTIONS:
   --modules <list>   comma-separated: planes, enf (default: planes,enf)
@@ -105,6 +109,14 @@ fn main() {
         "file" => run_file(&a),
         "listen" => run_listen(&a),
         "synth" => run_synth(&a),
+        "grid-logs" => {
+            let raw = a.pos.clone().ok_or("grid-logs: missing <raw folder>".to_string());
+            raw.and_then(|raw| {
+                let store = corroborate::modules::enf::grid_store::Store::new(corroborate::modules::enf::grid_store::default_dir());
+                eprintln!("store: {}", store.dir.display());
+                corroborate::modules::enf::grid_import::import_all(std::path::Path::new(&raw), &store, &mut |l| eprintln!("{l}"))
+            })
+        }
         _ => Err(USAGE.into()),
     };
     if let Err(e) = r {

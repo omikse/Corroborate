@@ -4,6 +4,8 @@
 
 use super::*;
 use corroborate::module::{Finding, Module};
+use corroborate::area::SyncArea;
+use corroborate::modules::enf::grid_store::Store;
 use corroborate::modules::enf::log_match::{self, Dated};
 use corroborate::modules::enf::{quality, sections, Enf, EnfPoint, EnfSegment, Level, Quality};
 
@@ -97,6 +99,11 @@ pub fn push(r: &mut EnfRun, x: &[f32], anchor: &Option<Anchor>, audio_s: f64) {
     };
 }
 
+/// The grid log store the node matches against.
+fn log_match_store() -> Store {
+    Store::new(corroborate::modules::enf::grid_store::default_dir())
+}
+
 /// End of input: runs still open are reported.
 pub fn flush(r: &mut EnfRun) {
     let found = r.enf.flush();
@@ -105,19 +112,42 @@ pub fn flush(r: &mut EnfRun) {
     if let Some(f) = s.enf.nominal {
         s.status = format!("{f:.0} Hz grid, {} runs", s.enf.segments.len());
     }
-    // With a claimed time and place: match against that place's grid log.
-    let (Some((claimed, err)), Some(place)) = (r.job.claimed, &r.job.place) else { return };
+    // Match against the grid log store: the grids of the hum's frequency (those that meet the
+    // wired place, if any), around the wired time if any, else over all their logs.
+    let Some(nominal) = s.enf.nominal else { return };
     let pts = s.enf.points.clone();
+    s.status = "matching the hum against the grid logs…".into();
     drop(s);
-    let dated = match log_match::source_for(place) {
-        None => Err("no grid log known for the wired place (only Great Britain for now)".to_string()),
-        Some(src) => {
-            let dur = pts.last().map_or(0.0, |p| p.t) + 60.0;
-            log_match::load(src, claimed - log_match::SEARCH_S - 60.0, claimed + log_match::SEARCH_S + dur)
-                .and_then(|log| log_match::date(&pts, &log, claimed, log_match::SEARCH_S, err.max(10.0)))
-        }
+    let store = log_match_store();
+    let have = store.grids();
+    let areas: Vec<&SyncArea> = match &r.job.grid {
+        Ok(g) => g.areas.iter().filter(|a| (a.hz - nominal).abs() < 5.0 && have.contains(&a.id)).collect(),
+        Err(_) => Vec::new(),
     };
-    r.job.state.lock().unwrap().enf.dated = Some(dated);
+    let grids: Vec<String> = areas.iter().filter(|a| r.job.place.as_ref().is_none_or(|p| !a.mask_at(None).and(p).is_empty())).map(|a| a.id.clone()).collect();
+    let dated = if have.is_empty() {
+        Err(format!("no grid logs in {} (corroborate-cli grid-logs <downloads> fills it)", store.dir.display()))
+    } else {
+        log_match::date(&pts, &store, &grids, r.job.claimed)
+    };
+    let mut s = r.job.state.lock().unwrap();
+    if let Some(f) = s.enf.nominal {
+        s.status = format!("{f:.0} Hz grid, {} runs", s.enf.segments.len());
+    }
+    // Blind place: a clear match puts the recording in that grid's area at that time.
+    if let (Ok(d), None) = (&dated, &r.job.place) {
+        if let Some(a) = areas.iter().find(|a| a.id == d.best.grid).filter(|_| d.confirmed) {
+            let mut m = a.mask_at(Some(d.start()));
+            let mut note = format!("hum matches the {} grid log ({}) at {}", a.name, a.id, timebase::fmt_utc(d.start()));
+            if let Some((p, label)) = &r.job.prior {
+                m = m.and(p);
+                note = format!("{note}; limited to {label}");
+            }
+            s.enf.area = Some(Arc::new(m));
+            s.enf.area_note = note;
+        }
+    }
+    s.enf.dated = Some(dated);
 }
 
 /// The area on the node's location output.
@@ -192,9 +222,10 @@ pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data:
                 .collect(),
         )),
         "time of recording" => match &s.enf.dated {
-            Some(Ok(d)) => Ok(Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(d.start), error_s: 1.0, source: format!("ENF matched to {}: {}", d.log, d.verdict()) }),
+            Some(Ok(d)) if d.confirmed => Ok(Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(d.start()), error_s: 1.0, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()) }),
+            Some(Ok(d)) => Err(format!("{}: best {} in {}, not clear enough", d.verdict(), timebase::fmt_utc(d.start()), d.best.grid)),
             Some(Err(e)) => Err(e.clone()),
-            None => Err("needs a wired time and location, and the whole file run".into()),
+            None => Err("matched against the grid logs at the end of a file".into()),
         },
         _ => Err("nothing on this output yet".into()),
     }
@@ -451,7 +482,7 @@ impl crate::look::NodeLook for Look {
             // The time of recording matched against the grid log.
             if let Some(d) = &dated {
                 ui.add_space(4.0 * z);
-                ui.label(egui::RichText::new("TIME CHECK").small().color(DIM));
+                ui.label(egui::RichText::new("GRID LOG MATCH").small().color(DIM));
                 match d {
                     Ok(d) => {
                         ui.add(egui::Label::new(egui::RichText::new(d.verdict()).color(if d.confirmed { GOOD } else { WARN })).wrap());
