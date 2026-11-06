@@ -42,13 +42,11 @@ fn full_project() -> App {
     let src = a.add(Kind::Sourcer { input: r"C:\Media\field recording 03.wav".into() }, Pos2::new(30.0, 40.0));
     let vid = a.add(Kind::Sourcer { input: "https://www.youtube.com/watch?v=x10vL6_47Dw".into() }, Pos2::new(30.0, 200.0));
     let mic = a.add(Kind::Sourcer { input: "mic:Microphone (USB Audio Device)".into() }, Pos2::new(30.0, 360.0));
-    let rows = vec![
-        ("coordinates".to_string(), "50.08, 14.42".to_string()),
-        ("radius_km".to_string(), "25".to_string()),
-        ("notes".to_string(), "Příbram, ½ km from the road: 30 °C".to_string()),
-        ("empty".to_string(), String::new()),
-    ];
-    let man = a.add(Kind::ManualData { rows }, Pos2::new(30.0, 520.0));
+    let mut man = crate::drive::place(50.08, 14.42, 25.0);
+    if let Kind::Value { rows, .. } = &mut man {
+        rows.iter_mut().find(|(k, _)| k == "note").unwrap().1 = "Příbram, ½ km from the road: 30 °C".into();
+    }
+    let man = a.add(man, Pos2::new(30.0, 520.0));
     let planes = a.add(Kind::Planes, Pos2::new(500.0, 700.0));
     let enf = a.add(Kind::Enf { grid: r"D:\grids\eu.json".into() }, Pos2::new(500.0, 40.0));
     a.add(Kind::GridFrequencies { path: r"D:\grids\eu.json".into() }, Pos2::new(500.0, 400.0));
@@ -66,19 +64,19 @@ fn full_project() -> App {
     a.wire(src, "audio", enf, "audio");
     a.wire(vid, "audio", plug, "audio");
     a.wire(vid, "time", plug, "time");
-    a.wire(man, "place", plug, "place");
+    a.wire(man, "value", plug, "place");
     a.wire(enf, "location", inv, "location");
     a.wire(inv, "location", map, "location");
-    a.wire(man, "place", comb, "location 1");
+    a.wire(man, "value", comb, "location 1");
     a.wire(enf, "location", comb, "location 2");
     a.wire_record(planes, "aircrafts", rec);
     a.wire_record(comb, "location", rec);
-    a.wire_record(man, "facts", rec);
+    a.wire_record(man, "value", rec);
     a.wire_record(mic, "audio", rec);
     a
 }
 
-/// Every node kind, setting, label, position, Manual row and wire survives save and load, and
+/// Every node kind, setting, label, position, Value field and wire survives save and load, and
 /// saving the loaded project gives the same file.
 #[test]
 fn round_trip_every_kind() {
@@ -114,14 +112,14 @@ fn saves_through_a_file() {
 #[test]
 fn separators_in_text_do_not_shift_fields() {
     let mut a = App::empty();
-    let man = a.add(Kind::ManualData { rows: vec![("a|b".into(), "line 1\nline 2".into()), ("after".into(), "kept".into())] }, Pos2::new(30.0, 40.0));
+    let man = a.add(Kind::Value { ty: "text".into(), rows: vec![("a|b".into(), "line 1\nline 2".into()), ("after".into(), "kept".into())] }, Pos2::new(30.0, 40.0));
     a.nodes[man].label = "two\r\nlines | here".into();
     let src = a.add(Kind::Sourcer { input: "C:\\x|y.wav".into() }, Pos2::new(400.0, 40.0));
     let b = reload(&a);
     assert_eq!(b.nodes.len(), 2);
     assert_eq!(b.nodes[man].label, "two  lines   here");
     match &b.nodes[man].kind {
-        Kind::ManualData { rows } => assert_eq!(rows, &[("a b".to_string(), "line 1 line 2".to_string()), ("after".to_string(), "kept".to_string())]),
+        Kind::Value { rows, .. } => assert_eq!(rows, &[("a b".to_string(), "line 1 line 2".to_string()), ("after".to_string(), "kept".to_string())]),
         k => panic!("{k:?}"),
     }
     assert!(matches!(&b.nodes[src].kind, Kind::Sourcer { input } if input == "C:\\x y.wav"));
@@ -195,17 +193,16 @@ fn damaged_files_load_what_they_can() {
 #[test]
 fn made_on_the_canvas() {
     let mut d = Drive::new();
-    for label in [Kind::Map.default_label(), Kind::ManualData { rows: vec![] }.default_label()] {
+    for label in [Kind::Map.default_label(), Kind::Value { ty: String::new(), rows: vec![] }.default_label()] {
         d.click("Add node");
         d.click(&label);
     }
     assert_eq!(d.app().nodes.len(), 2, "two nodes added from the menu");
-    d.click("+ field");
-    d.type_into(0, "coordinates");
+    d.type_into(0, "49.5");
     let back = reload(d.app());
     let want = describe_project(d.app());
     assert_eq!(want, describe_project(&back));
-    assert!(want.iter().any(|l| l.contains("\"coordinates\"")), "{want:#?}");
+    assert!(want.iter().any(|l| l.contains("\"lat\"") && l.contains("49.5")), "{want:#?}");
     d.shot("project_made_on_canvas");
 }
 

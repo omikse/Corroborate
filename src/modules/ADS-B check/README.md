@@ -18,11 +18,12 @@ Passes heard with no aircraft in the data are listed too (planes without ADS-B, 
 status sums it up as heard/expected by distance: the detector's real range at that site.
 
 To try it: a SOURCER on a live stream from a known site (for example the Cornell Lab FeederWatch
-stream, 42.4797, -76.4514, 335 m), wired into Planes and this plugin, with a Manual data node for the site.
+stream, 42.4797, -76.4514, 335 m), wired into Planes and this plugin, with a Value node of type
+location for the site wired into its `place` input.
 
 It needs:
-- the site: Manual data `coordinates` (lat, lon) and an `elevation` field in metres (add it with **+ field**);
-  then switch the plugin off and on so it starts with them;
+- the site: the Value node's latitude, longitude and elevation (metres); it is passed to the
+  plugin when it starts (as `coordinates` and `elevation`), and a change restarts it;
 - the UTC of the audio: recordings made with REC carry it; live sources use this PC's clock;
 - flight data: for files, every `adsb*.jsonl` next to the file; live, it polls adsb.lol every 10 s itself, waiting longer when the API asks it to.
   `tools/adsb-log.py` logs the aircraft around a point while you record:

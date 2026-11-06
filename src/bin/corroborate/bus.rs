@@ -4,7 +4,7 @@
 //! - **Outboxes**: what a program sends on an output (`{"type":"out",…}`, protocol 2) is kept in
 //!   its node's state, one value per output: lists (events, tracks) grow, the rest is replaced.
 //! - **Built-in modules** are read through the same call: a location from `area_from`, a time from
-//!   the node's UTC anchor, a plugin's findings and facts, Manual data's facts.
+//!   the node's UTC anchor, a plugin's findings and facts, a Value node's value.
 //! - **Programs on protocol 2** (`Kind::Module`) start when the graph runs, with their settings as
 //!   `--set name=value`; each wired input is sent at start and again whenever its value changes;
 //!   audio comes from the source job when an audio output is wired in.
@@ -160,6 +160,7 @@ impl App {
         }
         let s = self.nodes[from].state.lock().unwrap();
         match (kind, &self.nodes[from].kind) {
+            (_, Kind::Value { ty, rows }) => corroborate::modules::value::data(ty, rows),
             (PortKind::Location, _) => {
                 drop(s);
                 self.area_from(from).map(|(area, note)| Data::Location { area, note })
@@ -169,10 +170,6 @@ impl App {
                 s.plugin.findings.iter().map(|f| Event { t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: 0.0 }).collect(),
             )),
             (PortKind::Json, Kind::Plugin { .. }) => Ok(Data::Json(json_object(&s.plugin.meta))),
-            (PortKind::Json, Kind::ManualData { rows }) => {
-                let filled: Vec<(String, String)> = rows.iter().filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty()).cloned().collect();
-                Ok(Data::Json(json_object(&filled)))
-            }
             (PortKind::Audio | PortKind::Video, _) => Err("a stream, not a value".into()),
             _ => Err("nothing on this output yet".into()),
         }

@@ -6,7 +6,7 @@
 
 use corroborate::core::{NodeSpec, Port, PortKind, Role};
 use corroborate::module_manifest::{self as mm, Manifest};
-use corroborate::modules::{combine_locations, enf, grid_frequencies, invert_location, manual_data, map, planes, plugin, result_record, sourcer};
+use corroborate::modules::{combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 pub enum Kind {
     Sourcer { input: String },
-    /// Facts typed in by a person: date, time, place, coordinates, notes, own fields.
-    ManualData { rows: Vec<(String, String)> },
+    /// One value of any type typed in by a person: the type's id and its fields (a list type's
+    /// items as `1.field`, `2.field`, …).
+    Value { ty: String, rows: Vec<(String, String)> },
     Planes,
     /// The grid-frequency file it reads (empty: the bundled file).
     Enf { grid: String },
@@ -55,7 +56,7 @@ impl Kind {
         let set = |k: &str| settings.iter().find(|(q, _)| q == k).map(|(_, v)| v.as_str());
         Some(match id {
             "sourcer" => Kind::Sourcer { input: String::new() },
-            "manual-data" => Kind::ManualData { rows: manual_data::defaults() },
+            "value" => Kind::Value { ty: "location".into(), rows: value::defaults("location") },
             "planes" => Kind::Planes,
             "enf" => Kind::Enf { grid: String::new() },
             "grid-frequencies" => Kind::GridFrequencies { path: String::new() },
@@ -71,7 +72,7 @@ impl Kind {
         let label = |m: &Manifest| modules().into_iter().find(|x| x.id == m.id).map_or(m.label.clone(), |x| x.label);
         match self {
             Kind::Sourcer { .. } => label(sourcer::manifest()),
-            Kind::ManualData { .. } => label(manual_data::manifest()),
+            Kind::Value { .. } => label(value::manifest()),
             Kind::Planes => label(planes::manifest()),
             Kind::Enf { .. } => label(enf::manifest()),
             Kind::GridFrequencies { .. } => label(grid_frequencies::manifest()),
@@ -88,7 +89,7 @@ impl Kind {
     pub fn spec(&self) -> NodeSpec {
         match self {
             Kind::Sourcer { .. } => sourcer::spec(),
-            Kind::ManualData { .. } => manual_data::spec(),
+            Kind::Value { ty, .. } => value::spec(ty),
             Kind::Planes => planes::spec(),
             Kind::Enf { .. } => enf::spec(),
             Kind::GridFrequencies { .. } => grid_frequencies::spec(),
@@ -110,7 +111,8 @@ impl Kind {
             Kind::Sourcer { input } => input.clone(),
             Kind::CombineLocations { any } => combine_locations::mode(*any).into(),
             Kind::Missing { param, .. } => param.clone(),
-            Kind::ManualData { .. } | Kind::Planes | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
+            Kind::Value { ty, .. } => ty.clone(),
+            Kind::Planes | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
         }
     }
 
@@ -128,7 +130,7 @@ impl Kind {
             Some("plugin") => Kind::Plugin { path: find_program(&param) },
             Some("result-record") => Kind::ResultRecord { folder: param },
             Some("combine-locations") => Kind::CombineLocations { any: combine_locations::is_any(&param) },
-            Some("manual-data") => Kind::ManualData { rows: Vec::new() },
+            Some("value") => Kind::Value { ty: if param.is_empty() { "location".into() } else { param }, rows: Vec::new() },
             Some(id) => Kind::of_id(id, &[]).unwrap_or(Kind::Missing { name: name.into(), param, rows: Vec::new() }),
             None => match modules().into_iter().find(|m| m.id == name).and_then(Kind::module) {
                 Some(k) => k,
@@ -143,20 +145,21 @@ impl Kind {
         (m.protocol == 2 && m.program.is_some()).then(|| Kind::Module { settings: m.default_settings(), m: Arc::new(m) })
     }
 
-    /// Lines a project file keeps under the node: Manual's rows, a module's settings.
+    /// Lines a project file keeps under the node: a Value's fields, a module's settings.
     pub fn rows(&self) -> &[(String, String)] {
         match self {
-            Kind::ManualData { rows } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } => rows,
+            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } => rows,
             _ => &[],
         }
     }
 
     /// The node's settings by the names its module.toml declares (SOURCER's `source`, Combine's
-    /// `mode`, a bus module's own), as look.rhai and the setting editors see them. Manual's rows
-    /// are given too, for a script to read.
+    /// `mode`, a bus module's own), as look.rhai and the setting editors see them. A Value's
+    /// fields are given too, for a script to read.
     pub fn settings(&self) -> Vec<(String, String)> {
         match self {
             Kind::Sourcer { input } => vec![("source".into(), input.clone())],
+            Kind::Value { ty, rows } => std::iter::once(("type".to_string(), ty.clone())).chain(rows.iter().cloned()).collect(),
             Kind::CombineLocations { any } => vec![("mode".into(), combine_locations::mode(*any).into())],
             _ => self.rows().to_vec(),
         }
@@ -167,6 +170,10 @@ impl Kind {
         match (self, name) {
             (Kind::Sourcer { input }, "source") => *input = v,
             (Kind::CombineLocations { any }, "mode") => *any = combine_locations::is_any(&v),
+            (Kind::Value { ty, rows }, "type") => {
+                *rows = value::defaults(&v);
+                *ty = v;
+            }
             (Kind::Module { settings, .. }, _) => match settings.iter_mut().find(|(k, _)| k == name) {
                 Some((_, x)) => *x = v,
                 None => settings.push((name.to_string(), v)),
@@ -175,11 +182,11 @@ impl Kind {
         }
     }
 
-    /// A row from a project file: a Manual row, a module setting (a value its checks refuse
+    /// A row from a project file: a Value's field, a module setting (a value its checks refuse
     /// keeps the default), a missing module's row as it was.
     pub fn add_row(&mut self, k: String, v: String) {
         match self {
-            Kind::ManualData { rows } | Kind::Missing { rows, .. } => rows.push((k, v)),
+            Kind::Value { rows, .. } | Kind::Missing { rows, .. } => rows.push((k, v)),
             Kind::Module { m, settings } => {
                 if let Some(Ok(v)) = m.setting(&k).map(|s| s.check(&v)) {
                     if let Some(slot) = settings.iter_mut().find(|(n, _)| *n == k) {
@@ -355,7 +362,7 @@ mod tests {
     /// Names older project files used load as today's modules.
     #[test]
     fn old_names_load() {
-        for (old, id) in [("source", "sourcer"), ("file", "sourcer"), ("manual", "manual-data"), ("record", "result-record"), ("invert", "invert-location"), ("combine", "combine-locations")] {
+        for (old, id) in [("source", "sourcer"), ("file", "sourcer"), ("record", "result-record"), ("invert", "invert-location"), ("combine", "combine-locations")] {
             assert_eq!(Kind::from_saved(old, String::new()).spec().name, id, "{old}");
         }
         assert!(matches!(Kind::from_saved("mic", "USB".into()), Kind::Sourcer { input } if input == "mic:USB"));
@@ -416,7 +423,7 @@ program = \"clap.exe\"
         let heads: Vec<&str> = m.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(heads, ["Sources", "Detectors", "Data", "Plugins", "Output", "Location", "View"]);
         let labels: Vec<&str> = m.iter().flat_map(|(_, e)| e.iter().map(|(l, _)| l.as_str())).collect();
-        for want in ["SOURCER", "Manual data", "Planes (Doppler)", "ENF (power hum)", "ADS-B check", "Metadata", "Combine locations (all)", "Combine locations (any)", "Invert location", "Map"] {
+        for want in ["SOURCER", "Value", "Planes (Doppler)", "ENF (power hum)", "ADS-B check", "Metadata", "Combine locations (all)", "Combine locations (any)", "Invert location", "Map"] {
             assert!(labels.contains(&want), "{want} missing from {labels:?}");
         }
     }

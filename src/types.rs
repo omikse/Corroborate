@@ -16,6 +16,7 @@
 //! name = "lat"             # a single field named "value" is the JSON itself (text, file, json)
 //! type = "number"          # number | text | datetime (UTC text, sent as Unix seconds) | bool | choice | file
 //! label = "latitude"       # shown instead of the name
+//! required = true          # a value needs it (default false)
 //! unit = "°"
 //! min = -90                # number: its range; choice: choices = ["a", "b"]
 //! max = 90
@@ -66,6 +67,8 @@ pub struct Field {
     pub ty: FieldType,
     pub unit: String,
     pub default: String,
+    /// A value of the type needs it.
+    pub required: bool,
 }
 
 impl Field {
@@ -137,6 +140,10 @@ impl TypeDef {
     /// written (they are JSON already).
     pub fn json(&self, values: &[(String, String)]) -> Result<String, String> {
         let get = |n: &str| values.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str()).unwrap_or("");
+        let empty: Vec<&str> = self.fields.iter().filter(|f| f.required && get(&f.name).trim().is_empty()).map(|f| f.label.as_str()).collect();
+        if !empty.is_empty() {
+            return Err(format!("fill in {}", empty.join(", ")));
+        }
         if let [f] = &self.fields[..] {
             if f.name == "value" {
                 if self.id == "json" {
@@ -219,7 +226,12 @@ pub fn parse(text: &str) -> Result<TypeDef, String> {
         if fields.iter().any(|q| q.name == name) {
             return Err(format!("[[field]] {name} is declared twice"));
         }
-        let field = Field { label: string(f, "label")?.unwrap_or_else(|| name.clone()), name, ty, unit: string(f, "unit")?.unwrap_or_default(), default };
+        let required = match f.get("required") {
+            None => false,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(_) => return Err(format!("[[field]] {name}: `required` must be true or false")),
+        };
+        let field = Field { label: string(f, "label")?.unwrap_or_else(|| name.clone()), name, ty, unit: string(f, "unit")?.unwrap_or_default(), default, required };
         field.check(&field.default).map_err(|e| format!("[[field]] default: {e}"))?;
         fields.push(field);
     }
@@ -394,7 +406,8 @@ mod tests {
         let loc = lookup("location").unwrap();
         let v = |a: &[(&str, &str)]| a.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
         assert_eq!(loc.json(&v(&[("lat", "50"), ("lon", "14.4"), ("add", "true")])).unwrap(), "{\"lat\": 50, \"lon\": 14.4, \"add\": true}");
-        assert!(loc.json(&v(&[("lat", "95")])).unwrap_err().contains("outside"));
+        assert!(loc.json(&v(&[("lat", "95"), ("lon", "0")])).unwrap_err().contains("outside"));
+        assert_eq!(loc.json(&v(&[("lat", "50")])).unwrap_err(), "fill in longitude");
         let time = lookup("time").unwrap();
         assert_eq!(time.json(&v(&[("utc0", "1970-01-01 00:01:00")])).unwrap(), "{\"utc0\": 60}");
         assert!(time.json(&v(&[("utc0", "yesterday")])).unwrap_err().contains("UTC"));

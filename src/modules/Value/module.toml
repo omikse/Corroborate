@@ -1,0 +1,17 @@
+# One value of any data type, typed in on the canvas: a place, a time, a note, events, or a type a
+# module brings. Its output takes the type picked; its editor is the type's fields (type.toml).
+id = "value"
+label = "Value"
+category = "Sources"
+order = 2
+role = "reference"
+
+[[output]]
+name = "value"
+kind = "location"
+
+# The type's id (src/types.rs). Changing it starts the fields again.
+[[setting]]
+name = "type"
+type = "text"
+default = "location"

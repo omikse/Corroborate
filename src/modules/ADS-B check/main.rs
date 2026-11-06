@@ -482,10 +482,11 @@ impl<W: Write> Check<W> {
 
 // ---------------------------------------------------------------- input
 
-/// Site from MANUAL DATA: `coordinates` "lat, lon" and optional `elevation` (m, leading number).
+/// The site from the Value node wired into `place`: `coordinates` "lat, lon" and optional
+/// `elevation` (m, leading number).
 fn site_from(manual: &[(String, String)]) -> Result<(Site, String), String> {
     let get = |k: &str| manual.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
-    let coords = get("coordinates").ok_or("needs the site: fill MANUAL DATA coordinates (lat, lon), then switch this plugin off and on in the Plugins menu")?;
+    let coords = get("coordinates").ok_or("needs the site: wire a Value node of type location (latitude, longitude, elevation) into place")?;
     let nums: Vec<f64> = coords.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|s| s.parse().ok()).collect();
     let (lat, lon) = match nums[..] {
         [lat, lon, ..] if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) => (lat, lon),

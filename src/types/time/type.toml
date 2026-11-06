@@ -6,6 +6,7 @@ description = "A moment in UTC (Coordinated Universal Time) with its error: when
 
 [[field]]
 name = "utc0"
+required = true
 type = "datetime"
 label = "time (UTC)"
 

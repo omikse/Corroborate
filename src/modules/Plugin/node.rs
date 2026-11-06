@@ -58,11 +58,11 @@ impl PluginState {
 pub struct PluginJob {
     pub path: String,
     pub state: Shared,
-    /// Manual data rows from a Manual node wired into the plugin.
+    /// What Value nodes wired into the plugin hold (name, value).
     pub manual: Vec<(String, String)>,
 }
 
-/// Start the plugin on a source with the source's arguments plus the Manual data wired into it.
+/// Start the plugin on a source with the source's arguments plus the values wired into it.
 /// Returns the channel feeding its stdin.
 pub fn start(p: &PluginJob, source_args: &[String], dir: &std::path::Path) -> Option<SyncSender<Vec<f32>>> {
     let mut a = source_args.to_vec();
@@ -203,9 +203,9 @@ pub fn json(path: &str, s: &NodeState) -> String {
 }
 
 impl App {
-    /// What a plugin node needs for a run: its program and the Manual data wired into it.
+    /// What a plugin node needs for a run: its program and the values wired into it.
     pub(crate) fn plugin_job(&self, i: NodeId, path: &str) -> PluginJob {
-        PluginJob { path: path.to_string(), state: self.nodes[i].state.clone(), manual: self.manual_rows_into(i) }
+        PluginJob { path: path.to_string(), state: self.nodes[i].state.clone(), manual: self.value_args_into(i) }
     }
 }
 

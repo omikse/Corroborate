@@ -6,6 +6,7 @@ description = "An area of the Earth in 1° cells that either adds (the place is 
 
 [[field]]
 name = "lat"
+required = true
 type = "number"
 label = "latitude"
 unit = "°"
@@ -14,6 +15,7 @@ max = 90
 
 [[field]]
 name = "lon"
+required = true
 type = "number"
 label = "longitude"
 unit = "°"
@@ -27,6 +29,12 @@ label = "radius"
 unit = "km"
 min = 0
 default = 25
+
+[[field]]
+name = "elevation"
+type = "number"
+label = "elevation"
+unit = "m"
 
 [[field]]
 name = "add"

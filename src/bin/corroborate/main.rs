@@ -45,8 +45,8 @@ mod enf_node;
 mod grid_frequencies_node;
 #[path = "../../modules/Invert location/node.rs"]
 mod invert_location_node;
-#[path = "../../modules/Manual data/node.rs"]
-mod manual_data_node;
+#[path = "../../modules/Value/node.rs"]
+mod value_node;
 #[path = "../../modules/Map/node.rs"]
 mod map_node;
 #[path = "../../modules/Planes (Doppler)/node.rs"]
@@ -502,7 +502,10 @@ impl App {
         let n = &self.nodes[from];
         match &n.kind {
             Kind::Enf { .. } => enf_node::area_out(&n.state),
-            Kind::ManualData { rows } => manual_data_node::area_out(rows),
+            Kind::Value { ty, rows } => match corroborate::modules::value::data(ty, rows)? {
+                corroborate::data::Data::Location { area, note } => Ok((area, note)),
+                _ => Err("this value is not a location".into()),
+            },
             Kind::ResultRecord { .. } => self.record_area_out(from),
             Kind::CombineLocations { any } => self.combine_area_out(from, *any),
             Kind::InvertLocation => self.invert_area_out(from),
@@ -594,9 +597,9 @@ impl App {
                 // A program gets its settings when it starts.
                 s.push_str(&format!("{i}:{settings:?}|"));
             }
-            if let Kind::ManualData { rows } = &n.kind {
-                // Plugins read the place when they start.
-                if self.graph.targets(i, "place").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
+            if let Kind::Value { rows, .. } = &n.kind {
+                // Plugins read the values wired into them when they start.
+                if self.graph.targets(i, "value").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
                     s.push_str(&format!("{i}:{rows:?}|"));
                 }
             }
@@ -660,7 +663,7 @@ impl App {
                 Kind::Enf { .. } => enf_node::json(&s),
                 Kind::GridFrequencies { path } => grid_frequencies_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
-                Kind::ManualData { rows } => manual_data_node::json(rows),
+                Kind::Value { ty, rows } => value_node::json(ty, rows),
                 Kind::Sourcer { .. } => sourcer_node::json(&s),
                 Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } => String::new(),
                 Kind::Missing { name, .. } => format!(",\"module_missing\":\"{}\"", json_escape(name)),
@@ -912,7 +915,7 @@ impl App {
                     let s = self.nodes[i].state.lock().unwrap();
                     let st = match &self.nodes[i].kind {
                         Kind::Plugin { .. } | Kind::Module { .. } => plugin_node::status(&s).unwrap_or_else(|| s.status.clone()),
-                        Kind::ManualData { rows } => manual_data_node::status(rows),
+                        Kind::Value { ty, rows } => value_node::status(ty, rows),
                         Kind::Map => self.map_status(i),
                         Kind::CombineLocations { .. } | Kind::InvertLocation => match self.area_from(i) {
                             Ok((a, _)) => map_node::area_status(&a),
@@ -1191,7 +1194,12 @@ impl App {
                     self.add_menu(ui, at);
                 });
                 ui.menu_button("Types", |ui| {
-                    let _ = self.types_menu(ui);
+                    if let Some(ty) = self.types_menu(ui) {
+                        let at = Pos2::new(400.0, 300.0) - self.pan;
+                        let n = self.add(Kind::Value { ty: ty.into(), rows: corroborate::modules::value::defaults(ty) }, at);
+                        self.pick_only(n);
+                        self.save_project();
+                    }
                 });
                 if ui.button("Results folder").clicked() {
                     let d = results_dir();
@@ -1326,13 +1334,12 @@ mod canvas_timing {
     fn canvas_frame_time() {
         let ctx = egui::Context::default();
         let mut app = App::empty();
-        let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
-        let man = app.add(Kind::ManualData { rows }, Pos2::new(20.0, 420.0));
+        let man = app.add(crate::drive::place(50.0, 15.0, 2500.0), Pos2::new(20.0, 420.0));
         let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
-        app.wire(man, "place", inv, "location");
+        app.wire(man, "value", inv, "location");
         let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(480.0, 60.0));
-        app.wire_record(man, "place", rec);
-        for (k, from, out) in [(0, man, "place"), (1, inv, "location"), (2, rec, "location")] {
+        app.wire_record(man, "value", rec);
+        for (k, from, out) in [(0, man, "value"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));
             app.wire(from, out, m, "location");
         }

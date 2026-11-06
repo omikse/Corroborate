@@ -177,6 +177,15 @@ impl Drive {
 }
 
 /// A 3 s 440 Hz tone with 50 Hz hum, as a WAV file in target/drive/.
+/// A Value node of type location: a circle of `radius_km` around a point.
+pub fn place(lat: f64, lon: f64, radius_km: f64) -> Kind {
+    let mut rows = corroborate::modules::value::defaults("location");
+    for (k, v) in [("lat", lat), ("lon", lon), ("radius_km", radius_km)] {
+        rows.iter_mut().find(|(q, _)| q == k).unwrap().1 = v.to_string();
+    }
+    Kind::Value { ty: "location".into(), rows }
+}
+
 pub fn tone_wav() -> PathBuf {
     let p = out_dir().join("tone.wav");
     let spec = hound::WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
@@ -214,14 +223,14 @@ fn sourcer() {
     assert!(ok, "the file decoded");
 }
 
-/// One of every node kind; then the canvas editors: a Manual field typed in, Combine switched
+/// One of every node kind; then the canvas editors: a Value field typed in, Combine switched
 /// to OR (its look.rhai's list), which is a logged setting change.
 #[test]
 fn all_nodes() {
     let mut d = Drive::new();
     let a = d.app();
     a.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 40.0));
-    a.add(Kind::ManualData { rows: corroborate::modules::manual_data::defaults() }, Pos2::new(30.0, 200.0));
+    a.add(Kind::Value { ty: "location".into(), rows: corroborate::modules::value::defaults("location") }, Pos2::new(30.0, 200.0));
     a.add(Kind::Enf { grid: String::new() }, Pos2::new(460.0, 40.0));
     a.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(990.0, 40.0));
     a.add(Kind::Planes, Pos2::new(460.0, 700.0));
@@ -230,22 +239,20 @@ fn all_nodes() {
     let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(1050.0, 330.0));
     a.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(1050.0, 500.0));
     a.add(Kind::Plugin { path: "my-plugin.exe".into() }, Pos2::new(30.0, 560.0));
-    let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::ManualData { .. })).unwrap();
+    let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::Value { .. })).unwrap();
     d.frames(5);
     d.shot("all_nodes");
 
-    let rows = |d: &mut Drive| match &d.app().nodes[man].kind {
-        Kind::ManualData { rows } => rows.clone(),
+    let note = |d: &mut Drive| match &d.app().nodes[man].kind {
+        Kind::Value { rows, .. } => rows.iter().find(|(k, _)| k == "note").unwrap().1.clone(),
         _ => unreachable!(),
     };
-    let before = rows(&mut d).len();
-    d.click("+ field");
-    assert_eq!(rows(&mut d).len(), before + 1, "+ field adds a row");
-    // The new row is the lowest in the Manual node; its value box is the last there.
+    // The note is the last text box in the Value node.
+    let r = { let a = d.app(); a.node_rect(a.canvas_origin, man) };
     let boxes: Vec<Rect> = d.h.query_all_by_role(A11y::TextInput).map(|n| n.rect()).collect();
-    let new_value = (0..boxes.len()).filter(|&k| boxes[k].left() < 340.0 && boxes[k].top() > 300.0).last().unwrap();
-    d.type_into(new_value, "typed on the canvas");
-    assert!(rows(&mut d).last().is_some_and(|(_, v)| v == "typed on the canvas"), "typing edits the new row: {:?}", rows(&mut d));
+    let last = (0..boxes.len()).filter(|&k| r.contains(boxes[k].center())).last().unwrap();
+    d.type_into(last, "typed on the canvas");
+    assert_eq!(note(&mut d), "typed on the canvas", "typing edits the field");
 
     let r = { let a = d.app(); a.node_rect(a.canvas_origin, comb) };
     d.h.query_all_by_role(A11y::ComboBox).find(|n| r.contains(n.rect().center())).expect("Combine's mode list").click();
@@ -256,19 +263,18 @@ fn all_nodes() {
     d.shot("all_nodes_edited");
 }
 
-/// Time to work out location areas with the per-frame cache cleared (Manual circle, Invert of
+/// Time to work out location areas with the per-frame cache cleared (a Value's circle, Invert of
 /// it, the Record stacking it). Run: cargo test --release --bin corroborate area_timing -- --ignored --nocapture
 #[test]
 #[ignore]
 fn area_timing() {
     let mut app = App::empty();
-    let rows = vec![("coordinates".to_string(), "50, 15".to_string()), ("radius_km".to_string(), "2500".to_string())];
-    let man = app.add(Kind::ManualData { rows }, Pos2::new(30.0, 200.0));
+    let man = app.add(place(50.0, 15.0, 2500.0), Pos2::new(30.0, 200.0));
     let inv = app.add(Kind::InvertLocation, Pos2::new(250.0, 420.0));
-    app.wire(man, "place", inv, "location");
+    app.wire(man, "value", inv, "location");
     let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(990.0, 40.0));
-    app.wire_record(man, "place", rec);
-    for (name, id) in [("manual", man), ("invert", inv), ("record", rec)] {
+    app.wire_record(man, "value", rec);
+    for (name, id) in [("value", man), ("invert", inv), ("record", rec)] {
         let t = Instant::now();
         for _ in 0..20 {
             app.area_cache.borrow_mut().clear();
@@ -283,9 +289,9 @@ fn area_timing() {
 fn collapse_node() {
     let mut d = Drive::new();
     let a = d.app();
-    let man = a.add(Kind::ManualData { rows: corroborate::modules::manual_data::defaults() }, Pos2::new(30.0, 60.0));
+    let man = a.add(place(50.0, 15.0, 100.0), Pos2::new(30.0, 60.0));
     let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(400.0, 60.0));
-    a.wire(man, "place", comb, "location 1");
+    a.wire(man, "value", comb, "location 1");
     d.frames(3);
     let tall = { let a = d.app(); a.node_rect(a.canvas_origin, comb).height() };
     let p = d.node_title(comb);

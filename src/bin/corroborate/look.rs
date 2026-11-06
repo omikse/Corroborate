@@ -34,7 +34,7 @@ pub trait NodeLook: Sync {
 pub fn of(kind: &Kind) -> &'static dyn NodeLook {
     match kind {
         Kind::Sourcer { .. } => &sourcer_node::Look,
-        Kind::ManualData { .. } => &manual_data_node::Look,
+        Kind::Value { .. } => &value_node::Look,
         Kind::Planes => &planes_node::Look,
         Kind::Enf { .. } => &enf_node::Look,
         Kind::GridFrequencies { .. } => &grid_frequencies_node::Look,

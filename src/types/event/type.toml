@@ -6,6 +6,7 @@ description = "Timed findings (a clap, a plane passing): each has a start, an en
 
 [[field]]
 name = "t_start"
+required = true
 type = "number"
 label = "start"
 unit = "s"

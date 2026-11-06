@@ -161,7 +161,7 @@ fn undo_of_a_setting_is_logged() {
 #[test]
 fn keys_leave_text_boxes_alone() {
     let mut d = Drive::new();
-    let man = d.app().add(Kind::ManualData { rows: vec![("note".into(), "abc".into())] }, Pos2::new(40.0, 60.0));
+    let man = d.app().add(Kind::Value { ty: "text".into(), rows: vec![("value".into(), "abc".into())] }, Pos2::new(40.0, 60.0));
     d.frames(3);
     d.app().pick_only(man);
     d.type_into(0, "xyz");
@@ -213,4 +213,48 @@ fn types_menu() {
     d.shot("types_menu");
     let (give, take) = types_menu::users("location");
     assert!(give.iter().any(|m| m == "Combine locations") && take.iter().any(|m| m == "Map"), "{give:?} {take:?}");
+}
+
+/// A Value node of type location draws its circle on a Map; one of type time goes into the
+/// Result record's file; the Types menu adds one of the type clicked; changing its type starts
+/// its fields again and drops wires that no longer fit.
+#[test]
+fn value_nodes() {
+    let mut d = Drive::new();
+    let place = d.app().add(crate::drive::place(48.85, 2.35, 800.0), Pos2::new(30.0, 40.0));
+    let map = d.app().add(Kind::Map, Pos2::new(420.0, 40.0));
+    d.app().wire(place, "value", map, "location");
+    let mut time = Kind::Value { ty: "time".into(), rows: corroborate::modules::value::defaults("time") };
+    if let Kind::Value { rows, .. } = &mut time {
+        rows[0].1 = "2026-11-04 20:06:39".into();
+    }
+    let time = d.app().add(time, Pos2::new(30.0, 330.0));
+    let rec = d.app().add(Kind::ResultRecord { folder: String::new() }, Pos2::new(800.0, 330.0));
+    d.app().wire_record(time, "value", rec);
+    d.frames(5);
+    assert!(d.app().map_status(map).contains('%'), "the map shows the place: {}", d.app().map_status(map));
+    let json = d.app().result_json(&[time, rec]);
+    assert!(json.contains("\"utc0\":1793822799"), "{json}");
+    assert!(json.contains("\"type\":\"time\",\"value\":{\"utc0\": 1793822799"), "{json}");
+    d.shot("value_place_and_time");
+
+    // Types → Event adds a Value node of events.
+    d.click("Types");
+    d.click("Event");
+    let ev = d.app().nodes.len() - 1;
+    assert!(matches!(&d.app().nodes[ev].kind, Kind::Value { ty, .. } if ty == "event"));
+    assert_eq!(d.app().graph.nodes()[ev].spec.outputs[0].kind, PortKind::Event);
+    d.click("+ item");
+    let items = |d: &mut Drive| match &d.app().nodes[ev].kind {
+        Kind::Value { rows, .. } => corroborate::modules::value::items(rows).len(),
+        _ => 0,
+    };
+    assert_eq!(items(&mut d), 2, "+ item adds an item");
+    d.shot("value_events");
+
+    // The place becomes a text: its fields start again and the wire to the map goes.
+    d.app().set_value_type(place, "text");
+    assert!(matches!(&d.app().nodes[place].kind, Kind::Value { ty, rows } if ty == "text" && rows == &[("value".to_string(), String::new())]));
+    assert_eq!(d.app().graph.feeder(map, "location"), None, "a text does not fit the map");
+    assert!(d.app().changes.iter().any(|c| c.node == place && c.name == "type" && c.old == "location" && c.new == "text"), "logged");
 }

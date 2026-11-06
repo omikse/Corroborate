@@ -10,12 +10,14 @@ type = "text"
 
 [[field]]
 name = "t"
+required = true
 type = "number"
 label = "time"
 unit = "s"
 
 [[field]]
 name = "value"
+required = true
 type = "number"
 
 [[field]]

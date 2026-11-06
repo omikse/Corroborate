@@ -1,5 +1,5 @@
 //! The data bus end to end: a program on protocol 2 (examples/bus_echo.rs, built by
-//! `cargo test`) in a module folder, fed a location by Manual data; its event goes into a Result
+//! `cargo test`) in a module folder, fed a location by a Value node; its event goes into a Result
 //! record and its location on to a Map, through the same calls built-in modules use.
 //! Run: cargo test --bin corroborate bus_tests -- --nocapture
 
@@ -75,12 +75,11 @@ fn pump(app: &mut App, mut done: impl FnMut(&App) -> bool) -> bool {
 #[test]
 fn program_on_the_bus() {
     let mut app = App::empty();
-    let rows = vec![("coordinates".to_string(), "50.08, 14.42".to_string()), ("radius_km".to_string(), "300".to_string())];
-    let man = app.add(Kind::ManualData { rows }, Pos2::new(30.0, 40.0));
+    let man = app.add(crate::drive::place(50.08, 14.42, 300.0), Pos2::new(30.0, 40.0));
     let echo = app.add(Kind::module(echo_module("program_on_the_bus")).unwrap(), Pos2::new(300.0, 40.0));
     let map = app.add(Kind::Map, Pos2::new(600.0, 40.0));
     let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(600.0, 300.0));
-    app.wire(man, "place", echo, "place");
+    app.wire(man, "value", echo, "place");
     app.wire(echo, "place", map, "location");
     app.wire_record(echo, "seen", rec);
     assert_eq!(app.graph.wires().len(), 3, "the module's declared ports take wires");
@@ -97,15 +96,15 @@ fn program_on_the_bus() {
     assert!(json.contains("\"label\":\"place seen\""), "{json}");
     assert!(json.contains("\"kind\":\"events\""), "{json}");
     assert!(json.contains("\"setting\":\"label\",\"old\":\"got a place\",\"new\":\"place seen\""), "the change is kept: {json}");
-    // The location it sent back reaches the map as the same area Manual data gives.
+    // The location it sent back reaches the map as the same area the Value node gives.
     let (sent_back, _) = app.area_from(echo).expect("a location from the program");
     let (from_manual, _) = app.area_from(man).unwrap();
     assert_eq!(sent_back.cells, from_manual.cells);
     assert!(app.map_status(map).contains('%') || !app.map_status(map).is_empty());
 
     // A changed input is sent again.
-    if let Kind::ManualData { rows } = &mut app.nodes[man].kind {
-        rows[1].1 = "1000".into();
+    if let Kind::Value { rows, .. } = &mut app.nodes[man].kind {
+        rows.iter_mut().find(|(k, _)| k == "radius_km").unwrap().1 = "1000".into();
     }
     app.area_cache.borrow_mut().clear();
     let bigger = app.area_from(man).unwrap().0.allowed().fraction();
@@ -235,4 +234,31 @@ fn module_brings_its_type() {
     assert!(matches!(app.graph.connect(a, "place", b, "place"), Err(GraphError::TypeConflict(_))));
     corroborate::types::set_module_types(&other, Vec::new());
     assert!(app.graph.connect(a, "place", b, "place").is_ok(), "fixed: wires again");
+}
+
+/// A value of a type a module brings goes through its program and back: Value (spot) → the
+/// echo program → its output, checked against the type's fields on the way.
+#[test]
+fn custom_type_on_the_bus() {
+    let mut m = echo_module("custom_type_on_the_bus");
+    let dir = m.folder.clone().unwrap();
+    std::fs::create_dir_all(dir.join("types")).unwrap();
+    std::fs::write(dir.join("types").join("spot.toml"), SPOT_TYPE).unwrap();
+    let text = MANIFEST.replace("kind = \"location\"", "kind = \"spot\"");
+    std::fs::write(dir.join("module.toml"), &text).unwrap();
+    mm::discover(dir.parent().unwrap());
+    let folder = m.folder.take();
+    m = mm::parse(&text).unwrap();
+    m.folder = folder;
+    let mut app = App::empty();
+    let v = app.add(Kind::Value { ty: "spot".into(), rows: vec![("lat".into(), "50.5".into()), ("name".into(), "hill".into())] }, Pos2::new(30.0, 40.0));
+    let echo = app.add(Kind::module(m).unwrap(), Pos2::new(300.0, 40.0));
+    app.wire(v, "value", echo, "place");
+    assert_eq!(app.graph.wires().len(), 1);
+    app.run();
+    let back = pump(&mut app, |a| a.value_from(echo, "place").is_ok());
+    let st = app.nodes[echo].state.lock().unwrap().plugin.clone();
+    assert!(back, "the spot came back: state {} log {}", st.state, st.log);
+    assert_eq!(app.value_from(echo, "place").unwrap(), Data::Custom { kind: "spot", json: r#"{"lat":50.5,"name":"hill"}"#.into() });
+    app.stop_all();
 }

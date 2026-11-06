@@ -5,8 +5,9 @@
 //!
 //! - **arguments**: `--source <path or URL>` and `--file` or `--live`, so a plugin can read the
 //!   source's own metadata; `--utc0 <unix s> --utc-source <text>` when the UTC of the first sample
-//!   is already known (files); and `--manual key=value` for each filled MANUAL DATA field, as it
-//!   was when the plugin started. Plugins that only need audio can ignore them all.
+//!   is already known (files); and `--manual key=value` for each filled field of the Value nodes
+//!   wired into it (a latitude and longitude also as `coordinates=lat, lon`), as they were when
+//!   the plugin started. Plugins that only need audio can ignore them all.
 //! - **stdin**: the audio, raw f32 little-endian, mono, 16 000 Hz, from the first sample of the
 //!   source. End of input means the source ended: report what is still held, then exit.
 //! - **stdout**: one JSON object per line. Times are seconds from the first sample; frequencies Hz.

@@ -14,8 +14,6 @@ pub mod enf;
 pub mod grid_frequencies;
 #[path = "modules/Invert location/mod.rs"]
 pub mod invert_location;
-#[path = "modules/Manual data/mod.rs"]
-pub mod manual_data;
 #[path = "modules/Map/mod.rs"]
 pub mod map;
 #[path = "modules/Plugin/mod.rs"]
@@ -26,6 +24,8 @@ pub mod planes;
 pub mod result_record;
 #[path = "modules/SOURCER/mod.rs"]
 pub mod sourcer;
+#[path = "modules/Value/mod.rs"]
+pub mod value;
 
 /// Every module built into the program, by its module.toml: those with Rust code here, and the
 /// program-only ones (Metadata, ADS-B check) whose code is a binary of its own.
@@ -37,7 +37,7 @@ pub fn builtin() -> Vec<&'static crate::module_manifest::Manifest> {
     let embedded = |m: &'static OnceLock<Manifest>, text: &'static str| -> &'static Manifest { m.get_or_init(|| parse(text).expect("its module.toml (checked by tests)")) };
     vec![
         sourcer::manifest(),
-        manual_data::manifest(),
+        value::manifest(),
         planes::manifest(),
         enf::manifest(),
         grid_frequencies::manifest(),
