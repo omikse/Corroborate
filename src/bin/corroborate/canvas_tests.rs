@@ -310,7 +310,8 @@ fn value_nodes() {
     d.app().set_value_type(place, "text");
     assert!(matches!(&d.app().nodes[place].kind, Kind::Value { ty, rows } if ty == "text" && rows == &[("value".to_string(), String::new())]));
     assert_eq!(d.app().graph.feeder(map, "location"), None, "a text does not fit the map");
-    assert!(d.app().changes.iter().any(|c| c.node == place && c.name == "type" && c.old == "location" && c.new == "text"), "logged");
+    let uid = d.app().nodes[place].uid.clone();
+    assert!(d.app().changes.iter().any(|c| c.node == uid && c.name == "type" && c.old == "location" && c.new == "text"), "logged");
 }
 
 /// A wire dragged from a dot onto empty canvas offers the modules that fit its type; the one

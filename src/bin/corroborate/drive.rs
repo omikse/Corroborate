@@ -259,7 +259,8 @@ fn all_nodes() {
     d.frames(2);
     d.click("any");
     assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: true }), "Combine switched to OR");
-    assert!(d.app().changes.iter().any(|c| c.node == comb && c.name == "mode" && c.new == "any"), "the change is logged");
+    let uid = d.app().nodes[comb].uid.clone();
+    assert!(d.app().changes.iter().any(|c| c.node == uid && c.name == "mode" && c.new == "any"), "the change is logged");
     d.shot("all_nodes_edited");
 }
 

@@ -189,6 +189,9 @@ fn clock(a: &Option<Anchor>) -> (impl Fn(f64) -> f64 + '_, f64) {
 // ---------------------------------------------------------------- project
 
 struct NodeData {
+    /// Stable id: unique in the project, never reused, saved in the project file (`id=`).
+    /// Settings changes, clocks and evidence name a node by it; `NodeId` is only its index.
+    uid: String,
     kind: Kind,
     label: String,
     pos: Pos2,
@@ -268,6 +271,8 @@ struct App {
     /// The project file chosen with Open or Save as; None is the untitled one,
     /// settings\project.txt (project.rs).
     project_path: Option<PathBuf>,
+    /// The number of the next stable node id (`n<number>`), saved with the project.
+    next_uid: u64,
 }
 
 const NODE_W: f32 = 210.0;
@@ -313,6 +318,7 @@ impl App {
             sel: Default::default(),
             history: Default::default(),
             project_path: None,
+            next_uid: 1,
         }
     }
 
@@ -345,7 +351,9 @@ impl App {
 
     fn add(&mut self, kind: Kind, pos: Pos2) -> NodeId {
         let id = self.graph.add(kind.default_label(), kind.spec());
-        self.nodes.push(NodeData { label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default(), collapsed: false });
+        let uid = format!("n{}", self.next_uid);
+        self.next_uid += 1;
+        self.nodes.push(NodeData { uid, label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default(), collapsed: false });
         id
     }
 
@@ -385,15 +393,17 @@ impl App {
     }
 
     /// Nodes `keep` in project-file form (renumbered from 0), with the wires between them: the
-    /// project file, and what copy puts on the clipboard.
+    /// project file, and what copy puts on the clipboard. Each node keeps its stable id
+    /// (`id=`); `next|` is the number of the next new id.
     fn nodes_text(&self, keep: &[NodeId]) -> String {
-        let mut text = String::from("# corroborate project: node|kind|x|y|label|param[|collapsed], row|node|key|value, wire|from|out|to|in\n");
+        let mut text = String::from("# corroborate project: node|kind|x|y|label|param|id=<id>[|collapsed], row|node|key|value, wire|from|out|to|in, next|<id number>\n");
+        text.push_str(&format!("next|{}\n", self.next_uid));
         let new_id = |old: NodeId| keep.iter().position(|&k| k == old);
         for &i in keep {
             let n = &self.nodes[i];
             let (k, param) = (n.kind.spec().name, n.kind.saved_param());
             let folded = if n.collapsed { "|collapsed" } else { "" };
-            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}{folded}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param)));
+            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}|id={}{folded}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param), n.uid));
         }
         for (ni, &i) in keep.iter().enumerate() {
             for (k, v) in self.nodes[i].kind.rows() {
@@ -418,25 +428,32 @@ impl App {
     /// Adds the nodes, rows and wires of a project file's text. Lines it does not understand
     /// are skipped. False when it held no nodes.
     fn load_project_text(&mut self, text: &str) -> bool {
-        !self.append_text(text).is_empty()
+        !self.append_text(text, true).is_empty()
     }
 
     /// Adds the nodes, rows and wires of project text after the nodes already there (load,
-    /// paste). Lines it does not understand are skipped. Returns the new nodes.
-    fn append_text(&mut self, text: &str) -> Vec<NodeId> {
+    /// paste). Lines it does not understand are skipped. Returns the new nodes. `keep_ids`
+    /// (loading) keeps the saved stable ids; pasted nodes, and nodes saved without one, get new ids.
+    fn append_text(&mut self, text: &str, keep_ids: bool) -> Vec<NodeId> {
         let base = self.nodes.len();
+        let mut saved_ids: Vec<(NodeId, String)> = Vec::new();
+        let (counter, mut saved_next) = (self.next_uid, 0);
         let mut rows: Vec<(usize, String, String)> = Vec::new();
         let mut wires: Vec<(usize, String, usize, String)> = Vec::new();
         for line in text.lines() {
             let f: Vec<&str> = line.split('|').collect();
             match f.as_slice() {
-                ["node", k, x, y, label, param, rest @ ..] if rest.len() <= 1 => {
+                ["next", n] => saved_next = n.trim().parse().unwrap_or(0),
+                ["node", k, x, y, label, param, rest @ ..] if rest.len() <= 2 => {
                     let kind = Kind::from_saved(k, param.to_string());
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
                     if !label.trim().is_empty() {
                         self.nodes[id].label = label.to_string();
                     }
-                    self.nodes[id].collapsed = rest.first().is_some_and(|f| f.trim() == "collapsed");
+                    self.nodes[id].collapsed = rest.iter().any(|f| f.trim() == "collapsed");
+                    if let Some(u) = rest.iter().find_map(|f| f.trim().strip_prefix("id=")).filter(|u| !u.is_empty()) {
+                        saved_ids.push((id, u.to_string()));
+                    }
                 }
                 ["row", n, k, v] => rows.push((n.parse().unwrap_or(usize::MAX), k.to_string(), v.to_string())),
                 ["wire", a, o, b, i] => wires.push((a.parse().unwrap_or(usize::MAX), o.to_string(), b.parse().unwrap_or(usize::MAX), i.to_string())),
@@ -446,6 +463,29 @@ impl App {
         let new: Vec<NodeId> = (base..self.nodes.len()).collect();
         if new.is_empty() {
             return new;
+        }
+        // Ids: a saved one is kept (loading) unless a node already has it; the counter moves
+        // past the saved `next|` and every kept id, so none is given out again; every other new
+        // node gets a fresh one.
+        self.next_uid = counter;
+        let mut fresh: Vec<NodeId> = new.clone();
+        if keep_ids {
+            self.next_uid = self.next_uid.max(saved_next);
+            let mut taken: std::collections::HashSet<String> = self.nodes[..base].iter().map(|n| n.uid.clone()).collect();
+            for (i, u) in saved_ids {
+                if !taken.insert(u.clone()) {
+                    continue;
+                }
+                if let Some(num) = u.strip_prefix('n').and_then(|n| n.parse::<u64>().ok()) {
+                    self.next_uid = self.next_uid.max(num + 1);
+                }
+                self.nodes[i].uid = u;
+                fresh.retain(|&f| f != i);
+            }
+        }
+        for i in fresh {
+            self.nodes[i].uid = format!("n{}", self.next_uid);
+            self.next_uid += 1;
         }
         // Saved numbers count from the first new node.
         let len = self.nodes.len();

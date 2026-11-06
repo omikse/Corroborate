@@ -132,7 +132,7 @@ impl App {
     /// selects them. Text that is not Corroborate nodes is ignored.
     pub(crate) fn paste(&mut self, text: &str, at: Pos2) -> Vec<NodeId> {
         let text = if text.trim_start().starts_with(CLIP_HEAD) { text.to_string() } else { return Vec::new() };
-        let new = self.append_text(&text);
+        let new = self.append_text(&text, false);
         if new.is_empty() {
             return new;
         }
@@ -280,7 +280,7 @@ impl App {
                         let was = old.iter().find(|(k, _)| *k == name).map(|(_, o)| o.clone()).unwrap_or_default();
                         if was != v && !self.nodes[i].hidden {
                             let label = n.label.clone();
-                            self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: i, label, name, old: was, new: v });
+                            self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name, old: was, new: v });
                         }
                     }
                     let d = &mut self.nodes[i];

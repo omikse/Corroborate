@@ -271,3 +271,44 @@ fn new_open_save_as() {
     assert_eq!(std::fs::read_to_string(&file).unwrap().lines().filter(|l| l.starts_with("node|")).count(), 3, "saves go to the opened file");
     d.shot("project_opened");
 }
+
+#[test]
+fn stable_ids_survive_save_delete_and_load() {
+    let mut a = App::empty();
+    let n: Vec<NodeId> = (0..3).map(|k| a.add(Kind::Map, Pos2::new(40.0, 40.0 + 200.0 * k as f32))).collect();
+    let uids: Vec<String> = n.iter().map(|&i| a.nodes[i].uid.clone()).collect();
+    assert_eq!(uids, ["n1", "n2", "n3"]);
+    a.delete_nodes(&[n[0]]);
+    let mut b = reload(&a);
+    let kept: Vec<&str> = b.nodes.iter().map(|n| n.uid.as_str()).collect();
+    assert_eq!(kept, ["n2", "n3"], "the ids stay with their nodes, not their places");
+    let c = b.add(Kind::Map, Pos2::ZERO);
+    assert_eq!(b.nodes[c].uid, "n4", "an id is never given out again");
+    // Delete the newest and reload: its id is still not reused.
+    b.delete_nodes(&[c]);
+    let mut d = reload(&b);
+    let e = d.add(Kind::Map, Pos2::ZERO);
+    assert_eq!(d.nodes[e].uid, "n5");
+}
+
+#[test]
+fn pasted_nodes_get_new_ids() {
+    let mut a = App::empty();
+    let m = a.add(Kind::Map, Pos2::ZERO);
+    let text = a.nodes_text(&[m]);
+    let p = a.paste(&text, Pos2::new(300.0, 0.0));
+    assert_eq!(p.len(), 1);
+    assert_ne!(a.nodes[p[0]].uid, a.nodes[m].uid);
+    let mut uids: Vec<&str> = a.nodes.iter().map(|n| n.uid.as_str()).collect();
+    uids.dedup();
+    assert_eq!(uids.len(), 2);
+}
+
+#[test]
+fn old_files_without_ids_get_new_ones() {
+    let mut a = App::empty();
+    assert!(a.load_project_text("node|map|0|0||\nnode|map|0|200||\n"));
+    let uids: Vec<&str> = a.nodes.iter().map(|n| n.uid.as_str()).collect();
+    assert_eq!(uids, ["n1", "n2"]);
+    assert!(a.project_text().contains("|id=n2"));
+}

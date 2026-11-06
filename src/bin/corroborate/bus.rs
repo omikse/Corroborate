@@ -44,7 +44,8 @@ impl Drop for Program {
 #[derive(Clone, Debug)]
 pub struct SettingChange {
     pub utc: f64,
-    pub node: NodeId,
+    /// The node's stable id.
+    pub node: String,
     pub label: String,
     pub name: String,
     pub old: String,
@@ -274,7 +275,7 @@ impl App {
             return Ok(());
         }
         self.nodes[i].kind.put_setting(name, v.clone());
-        self.changes.push(SettingChange { utc: timebase::now_unix(), node: i, label, name: name.to_string(), old, new: v });
+        self.changes.push(SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name: name.to_string(), old, new: v });
         self.save_project();
         Ok(())
     }
@@ -296,13 +297,14 @@ impl App {
 
     /// Changes made to the settings of nodes `ids`, oldest first, for the result file.
     pub(crate) fn changes_json(&self, ids: &[NodeId]) -> String {
+        let uids: Vec<&str> = ids.iter().map(|&i| self.nodes[i].uid.as_str()).collect();
         let c: Vec<String> = self
             .changes
             .iter()
-            .filter(|c| ids.contains(&c.node))
+            .filter(|c| uids.contains(&c.node.as_str()))
             .map(|c| {
                 format!(
-                    "{{\"utc\":\"{}\",\"node\":{},\"label\":\"{}\",\"setting\":\"{}\",\"old\":\"{}\",\"new\":\"{}\"}}",
+                    "{{\"utc\":\"{}\",\"node\":\"{}\",\"label\":\"{}\",\"setting\":\"{}\",\"old\":\"{}\",\"new\":\"{}\"}}",
                     timebase::fmt_utc(c.utc),
                     c.node,
                     json_escape(&c.label),
