@@ -12,6 +12,8 @@
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
 mod demo;
+#[cfg(test)]
+mod drive;
 mod look;
 mod nodes;
 mod runtime;
@@ -180,6 +182,10 @@ struct NodeData {
 }
 
 fn project_file() -> Option<PathBuf> {
+    // Tests drive the workbench headless (see drive.rs) and never read or write a project.
+    if cfg!(test) {
+        return None;
+    }
     Some(corroborate::home().join("settings").join("project.txt"))
 }
 
@@ -238,8 +244,9 @@ const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
 impl App {
-    fn new(start: Option<String>, autorun: bool) -> Self {
-        let mut app = Self {
+    /// An empty workbench: no nodes, nothing loaded.
+    fn empty() -> Self {
+        Self {
             mode: Mode::Work,
             demo: None,
             graph: Graph::new(),
@@ -263,7 +270,11 @@ impl App {
             earth: None,
             area_cache: Default::default(),
             last_project_save: Instant::now(),
-        };
+        }
+    }
+
+    fn new(start: Option<String>, autorun: bool) -> Self {
+        let mut app = Self::empty();
         if std::env::args().any(|a| a == "--new") {
             // --new: an empty canvas (the old project file is kept as project.bak.txt).
             let dir = corroborate::home().join("settings");
@@ -1251,6 +1262,14 @@ fn plot_series(ui: &mut egui::Ui, series: &[(Color32, Vec<(f64, f64, bool)>)], h
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frame(ui);
+    }
+}
+
+impl App {
+    /// One frame of the whole workbench. Separate from `eframe::App` so tests can drive it
+    /// headless (drive.rs).
+    fn frame(&mut self, ui: &mut egui::Ui) {
         if self.earth.is_none() {
             self.earth = Some(map_node::load_earth(ui.ctx()));
         }
