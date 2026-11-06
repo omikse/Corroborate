@@ -59,7 +59,7 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
         let file = DIRECT.iter().filter(|e| **e != ".m3u8").any(|e| path.split('?').next().unwrap_or("").ends_with(e));
         return Ok((url.to_string(), !file));
     }
-    let out = corroborate::no_window(&mut std::process::Command::new("yt-dlp"))
+    let out = ytdlp()
         .args(["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])
         .output()
         .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
@@ -71,7 +71,44 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
         // Not live: YouTube refuses its direct links to ffmpeg (403), so yt-dlp downloads the
         // video into recordings\ and it is read as a file. The copy stays there as evidence.
         Some(_) if out.status.success() => download(url).map(|p| (p, false)),
-        _ => Err(format!("yt-dlp: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no URL returned"))),
+        _ => Err(ytdlp_error("yt-dlp", &out.stderr, "no URL returned")),
+    }
+}
+
+/// Extra yt-dlp options the user put in `settings\yt-dlp.txt` (one per line, `#` comments),
+/// e.g. `--cookies-from-browser firefox` or `--cookies C:\path\cookies.txt` when YouTube asks
+/// to sign in. Read at every call, so a change needs no restart.
+fn ytdlp_extra() -> Vec<String> {
+    std::fs::read_to_string(corroborate::home().join("settings").join("yt-dlp.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .flat_map(|l| match l.split_once(' ') {
+            Some((k, v)) => vec![k.to_string(), v.trim().trim_matches('"').to_string()],
+            None => vec![l.to_string()],
+        })
+        .collect()
+}
+
+/// yt-dlp with no window and the user's extra options.
+fn ytdlp() -> std::process::Command {
+    let mut c = std::process::Command::new("yt-dlp");
+    corroborate::no_window(&mut c).args(ytdlp_extra());
+    c
+}
+
+/// yt-dlp's last error line; when YouTube asks to sign in, how to give yt-dlp the cookies.
+fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
+    let e = String::from_utf8_lossy(stderr);
+    let last = e.lines().last().unwrap_or(none).to_string();
+    if last.contains("Sign in") || last.contains("cookies") {
+        format!(
+            "{what}: {last} — put `--cookies-from-browser firefox` (or chrome, edge) or `--cookies <cookies.txt>` in {}",
+            corroborate::home().join("settings").join("yt-dlp.txt").display()
+        )
+    } else {
+        format!("{what}: {last}")
     }
 }
 
@@ -80,7 +117,7 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
 fn download(url: &str) -> Result<String, String> {
     let dir = corroborate::home().join("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-    let out = corroborate::no_window(&mut std::process::Command::new("yt-dlp"))
+    let out = ytdlp()
         .args(["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o"])
         .arg(dir.join("%(extractor)s %(id)s.%(ext)s"))
         .arg(url)
@@ -89,7 +126,7 @@ fn download(url: &str) -> Result<String, String> {
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => Ok(p.trim().to_string()),
-        _ => Err(format!("yt-dlp download: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no file written"))),
+        _ => Err(ytdlp_error("yt-dlp download", &out.stderr, "no file written")),
     }
 }
 
