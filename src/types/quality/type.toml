@@ -1,0 +1,49 @@
+# A signal quality verdict: is a detector's signal good enough, and why. The ENF node gives one.
+id = "quality"
+label = "Quality"
+color = "#8cdc6e"
+flow = "value"
+description = "How good a detector's signal is: a level (good, weak or none), the verdict in words, and the numbers it rests on, each next to what it needs."
+
+[[field]]
+name = "level"
+required = true
+type = "text"
+label = "level (good, weak, none)"
+
+[[field]]
+name = "verdict"
+type = "text"
+label = "verdict"
+
+[[field]]
+name = "score_db"
+type = "number"
+label = "score"
+unit = "dB"
+
+[[field]]
+name = "kept"
+type = "number"
+label = "readings kept"
+min = 0
+
+[[field]]
+name = "total"
+type = "number"
+label = "readings"
+min = 0
+
+[[field]]
+name = "longest_run_s"
+type = "number"
+label = "longest clean run"
+unit = "s"
+min = 0
+
+[[field]]
+name = "err_hz"
+type = "number"
+label = "error"
+unit = "Hz"
+min = 0

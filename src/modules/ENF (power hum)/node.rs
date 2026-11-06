@@ -117,26 +117,62 @@ pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
     }
 }
 
+/// The quality verdict as JSON (the `quality` type's fields, plus harmonics, steady, rejected).
+fn quality_json(q: &Quality) -> String {
+    let num = |v: f64| if v.is_finite() { format!("{v:.5}") } else { "null".into() };
+    let rej: Vec<String> = q.rejected.iter().map(|(r, n)| format!("\"{}\":{n}", r.label())).collect();
+    format!(
+        "{{\"level\":\"{}\",\"verdict\":\"{}\",\"kept\":{},\"total\":{},\"score_db\":{},\"longest_run_s\":{:.1},\"err_hz\":{},\"harmonics\":{:?},\"steady\":{},\"rejected\":{{{}}}}}",
+        q.level.word(),
+        q.verdict(),
+        q.kept,
+        q.total,
+        num(q.score_db),
+        q.longest_run_s,
+        num(q.err_hz),
+        q.harmonics,
+        q.steady,
+        rej.join(",")
+    )
+}
+
+/// The level an output's use case needs (module.toml `min_quality`), if it says.
+pub fn min_level(out: &str) -> Option<Level> {
+    let s = corroborate::modules::enf::manifest().sockets.iter().find(|s| s.name == out)?.min_quality.clone()?;
+    Some(match s.as_str() {
+        "good" => Level::Good,
+        "weak" => Level::Weak,
+        _ => Level::None,
+    })
+}
+
+/// The values on the ENF node's outputs other than location (see `area_out`): the quality and
+/// the hum track. An output whose use case needs a better signal than there is gives none, and
+/// says what it needs.
+pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data::Data, String> {
+    use corroborate::data::{Data, TrackPoint};
+    let q = s.enf.quality.as_ref().ok_or("no readings yet")?;
+    if let Some(need) = min_level(out) {
+        if q.level < need {
+            return Err(format!("needs {} signal, now {}", need.word(), q.level.word()));
+        }
+    }
+    match out {
+        "quality" => Ok(Data::Custom { kind: "quality", json: quality_json(q) }),
+        "hum track" => Ok(Data::Tracks(
+            sections(&s.enf.points)
+                .iter()
+                .map(|p| TrackPoint { clock: clock.to_string(), id: "hum".into(), t: p.t, value: p.hz, ok: p.ok })
+                .collect(),
+        )),
+        _ => Err("nothing on this output yet".into()),
+    }
+}
+
 pub fn json(s: &NodeState) -> String {
     let p: Vec<String> = s.enf.segments.iter().map(|e| e.to_json(s.anchor.as_ref())).collect();
     let frac = s.enf.area.as_ref().map_or("null".to_string(), |a| format!("{:.5}", a.fraction()));
-    let q = s.enf.quality.as_ref().map_or("null".to_string(), |q| {
-        let num = |v: f64| if v.is_finite() { format!("{v:.5}") } else { "null".into() };
-        let rej: Vec<String> = q.rejected.iter().map(|(r, n)| format!("\"{}\":{n}", r.label())).collect();
-        format!(
-            "{{\"level\":\"{}\",\"verdict\":\"{}\",\"kept\":{},\"total\":{},\"score_db\":{},\"longest_run_s\":{:.1},\"err_hz\":{},\"harmonics\":{:?},\"steady\":{},\"rejected\":{{{}}}}}",
-            q.level.word(),
-            q.verdict(),
-            q.kept,
-            q.total,
-            num(q.score_db),
-            q.longest_run_s,
-            num(q.err_hz),
-            q.harmonics,
-            q.steady,
-            rej.join(",")
-        )
-    });
+    let q = s.enf.quality.as_ref().map_or("null".to_string(), quality_json);
     format!(
         ",\"hum_runs\":[{}],\"quality\":{q},\"area_fraction_of_earth\":{frac},\"area_note\":\"{}\"",
         p.join(","),

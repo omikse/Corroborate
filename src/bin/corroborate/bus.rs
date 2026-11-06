@@ -175,6 +175,7 @@ impl App {
                 drop(s);
                 self.area_from(from).map(|(area, note)| Data::Location { area, note, site: None })
             }
+            (_, Kind::Enf { .. }) => crate::enf_node::value(&s, out, &clock),
             (PortKind::Time, _) => s
                 .anchor
                 .as_ref()

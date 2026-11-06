@@ -23,6 +23,14 @@
 //! [[output]]                   # what it gives
 //! name = "location"
 //! kind = "location"
+//! title = "Grid 50/60 Hz"      # (optional, any output) what it is for, shown on the node:
+//! status = "built"             #   built (default) | planned | possible: planned and possible
+//!                              #   ones are ghost sockets, drawn greyed, nothing to wire
+//! about = "Where this hum's frequency is used."
+//! needs = ["audio"]            #   inputs or data it needs
+//! when = "hum in the recording"
+//! source = "Grigoras 2005"
+//! min_quality = "weak"         #   the node's signal quality it needs: none | weak | good
 //!
 //! [[setting]]                  # a value the person sets on the node: the only way the GUI
 //! name = "threshold"           # changes processing. type: text|path|number|bool|choice
@@ -62,6 +70,38 @@ use std::sync::Mutex;
 
 /// The Add node headings that come first, in this order. Other categories follow alphabetically.
 pub const CATEGORIES: [&str; 7] = ["Sources", "Detectors", "Data", "Plugins", "Output", "Location", "View"];
+
+/// How far an output's use case is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// A real output: it can be wired and gives values.
+    Built,
+    /// Will be built: drawn on the node, nothing to wire.
+    Planned,
+    /// Could be built (seen in papers or tools): drawn on the node, nothing to wire.
+    Possible,
+}
+
+/// What an output is for, as module.toml describes it. Every [[output]] with any of these keys
+/// has one; `planned` and `possible` ones are not in `outputs` (ghost sockets: listed and drawn,
+/// never wired), so the graph and wiring code never see them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Socket {
+    pub name: String,
+    /// Shown on the node instead of the name.
+    pub label: Option<String>,
+    pub kind: PortKind,
+    pub status: Status,
+    pub about: String,
+    /// Inputs (or data) it needs.
+    pub needs: Vec<String>,
+    /// When it works.
+    pub when: String,
+    /// Where the method comes from.
+    pub source: String,
+    /// The node's signal quality it needs to give anything: "none", "weak" or "good".
+    pub min_quality: Option<String>,
+}
 
 /// One more entry in Add node for the same module, with settings of its own.
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +353,8 @@ pub struct Manifest {
     pub role: Role,
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
+    /// What the outputs are for, in declared order, ghost sockets included (see `Socket`).
+    pub sockets: Vec<Socket>,
     pub settings: Vec<Setting>,
     /// How its program talks: 1 audio in, findings out; 2 the data bus (ports and settings).
     pub protocol: u32,
@@ -441,12 +483,47 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
     let mut anchors: Vec<(String, String)> = Vec::new();
     let mut many: Option<String> = None;
+    let mut sockets: Vec<Socket> = Vec::new();
     let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
         for p in tables(k)? {
             let name = p.get("name").and_then(|x| x.as_str()).ok_or(format!("a [[{k}]] has no `name`"))?;
             let kind = p.get("kind").and_then(|x| x.as_str()).ok_or(format!("[[{k}]] {name} has no `kind`"))?;
             let kind = port_kind(kind).ok_or(format!("[[{k}]] {name}: kind \"{kind}\" is not a type: add types\\{kind}\\type.toml, or types\\{kind}.toml in the module's folder"))?;
+            // What an output is for (status, about, needs, when, source, min_quality).
+            const KEYS: [&str; 7] = ["status", "title", "about", "needs", "when", "source", "min_quality"];
+            if KEYS.iter().any(|q| p.contains_key(*q)) {
+                if k != "output" {
+                    return Err(format!("[[{k}]] {name}: status, title, about, needs, when, source and min_quality go on an [[output]]"));
+                }
+                let text = |q: &str| -> Result<String, String> {
+                    match p.get(q) {
+                        None => Ok(String::new()),
+                        Some(toml::Value::String(s)) => Ok(s.clone()),
+                        Some(_) => Err(format!("[[output]] {name}: `{q}` must be text in quotes")),
+                    }
+                };
+                let status = match text("status")?.as_str() {
+                    "" | "built" => Status::Built,
+                    "planned" => Status::Planned,
+                    "possible" => Status::Possible,
+                    s => return Err(format!("[[output]] {name}: status \"{s}\" must be built, planned or possible")),
+                };
+                let min_quality = match text("min_quality")?.as_str() {
+                    "" => None,
+                    q @ ("none" | "weak" | "good") => Some(q.to_string()),
+                    q => return Err(format!("[[output]] {name}: min_quality \"{q}\" must be none, weak or good")),
+                };
+                let label = Some(text("title")?).filter(|s| !s.is_empty());
+                let needs = strings(p.get("needs"), "needs")?;
+                if v.iter().any(|q| q.name == name) || sockets.iter().any(|s| s.name == name) {
+                    return Err(format!("[[{k}]] {name} is declared twice"));
+                }
+                sockets.push(Socket { name: name.to_string(), label, kind, status, about: text("about")?, needs, when: text("when")?, source: text("source")?, min_quality });
+                if status != Status::Built {
+                    continue;
+                }
+            }
             let required = match p.get("required") {
                 None => req_default,
                 Some(toml::Value::Boolean(b)) => *b,
@@ -597,6 +674,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         role,
         inputs,
         outputs,
+        sockets,
         settings,
         protocol,
         frame,
@@ -693,6 +771,51 @@ mod tests {
         assert!(e.contains("required"), "{e}");
     }
 
+    /// Use cases on outputs: built ones are real outputs, planned and possible ones are ghost
+    /// sockets (listed, not in the spec); a bad status or min_quality says so.
+    #[test]
+    fn output_sockets() {
+        let m = parse(
+            r#"id = "a"
+label = "a"
+[[output]]
+name = "location"
+kind = "location"
+title = "Grid 50/60 Hz"
+about = "Where the hum is used."
+min_quality = "weak"
+[[output]]
+name = "sync"
+kind = "link"
+status = "planned"
+needs = ["audio", "audio 2"]
+[[output]]
+name = "edits"
+kind = "event"
+status = "possible"
+[[output]]
+name = "plain"
+kind = "text"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.spec().outputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["location", "plain"]);
+        let s: Vec<(&str, Status)> = m.sockets.iter().map(|s| (s.name.as_str(), s.status)).collect();
+        assert_eq!(s, [("location", Status::Built), ("sync", Status::Planned), ("edits", Status::Possible)]);
+        assert_eq!(m.sockets[0].label.as_deref(), Some("Grid 50/60 Hz"));
+        assert_eq!(m.sockets[0].min_quality.as_deref(), Some("weak"));
+        assert_eq!(m.sockets[1].needs, ["audio", "audio 2"]);
+        let bad = |extra: &str| parse(&format!("id = \"a\"\nlabel = \"a\"\n[[output]]\nname = \"x\"\nkind = \"text\"\n{extra}")).unwrap_err();
+        assert!(bad("status = \"soon\"").contains("built, planned or possible"));
+        assert!(bad("min_quality = \"great\"").contains("none, weak or good"));
+        let e = parse("id = \"a\"\nlabel = \"a\"\n[[input]]\nname = \"x\"\nkind = \"text\"\nstatus = \"planned\"").unwrap_err();
+        assert!(e.contains("[[output]]"), "{e}");
+        // Modules without these keys have no sockets and the same outputs as before.
+        let plain = parse("id = \"a\"\nlabel = \"a\"\n[[output]]\nname = \"x\"\nkind = \"text\"").unwrap();
+        assert!(plain.sockets.is_empty());
+        assert_eq!(plain.outputs.len(), 1);
+    }
+
     #[test]
     fn categories_known_first_then_alphabetical() {
         let m = |id: &str, label: &str, cat: &str, order: Option<i64>| Manifest {
@@ -708,6 +831,7 @@ mod tests {
             role: Role::Transform,
             inputs: vec![],
             outputs: vec![],
+            sockets: vec![],
             settings: vec![],
             protocol: 1,
             frame: FrameLook::default(),

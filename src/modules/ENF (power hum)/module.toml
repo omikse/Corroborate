@@ -12,6 +12,159 @@ name = "audio"
 kind = "audio"
 required = true
 
+# Each output is a use case of the hum (README "Use cases"). Built ones give values; planned and
+# possible ones are drawn greyed on the node with this text on hover, nothing to wire.
+# min_quality: the signal quality verdict the use case needs (none, weak, good).
+
 [[output]]
 name = "location"
 kind = "location"
+title = "grid 50/60 Hz"
+about = "Where this hum's nominal frequency (50 or 60 Hz) is used: wire it into a Map to see the coverage."
+needs = ["audio"]
+when = "hum in the recording"
+source = "grid frequencies by country (grid data file)"
+min_quality = "weak"
+
+[[output]]
+name = "quality"
+kind = "quality"
+title = "quality"
+about = "Is the hum good enough, and why: level, verdict, score, readings kept, longest clean run, error."
+needs = ["audio"]
+when = "always"
+min_quality = "none"
+
+[[output]]
+name = "hum track"
+kind = "track"
+title = "hum track"
+about = "The grid frequency over the recording's time, readings that count marked ok."
+needs = ["audio"]
+when = "hum in the recording"
+source = "Grigoras 2005; libhum"
+min_quality = "weak"
+
+[[output]]
+name = "sync recordings"
+kind = "link"
+status = "planned"
+about = "Offset between two recordings' clocks from how their hum drifts together, with its error."
+needs = ["audio", "audio 2"]
+when = "recordings overlap in time, same grid"
+source = "Su et al. 2014"
+min_quality = "good"
+
+[[output]]
+name = "time of recording"
+kind = "anchor"
+status = "planned"
+about = "UTC time of the recording: the hum track matched against a grid frequency log."
+needs = ["audio", "grid log"]
+when = "a log of that grid covers the time"
+source = "Grigoras 2005; Hajj-Ahmad et al."
+min_quality = "good"
+
+[[output]]
+name = "which grid"
+kind = "location"
+status = "possible"
+about = "Which grid within one nominal frequency (e.g. Great Britain, Continental Europe, Nordic)."
+needs = ["audio", "grid logs"]
+when = "logs of the candidate grids for that time"
+source = "IEEE SP Cup 2016"
+min_quality = "weak"
+
+[[output]]
+name = "edits"
+kind = "event"
+status = "possible"
+about = "Cuts, splices and inserts: breaks in hum frequency or phase, for the cut detector."
+needs = ["audio"]
+when = "clear hum"
+source = "tamper detection papers (README)"
+min_quality = "good"
+
+[[output]]
+name = "speed change"
+kind = "event"
+status = "possible"
+about = "Speed change or resampling: a steady 50.4 Hz hum means 0.8 % faster."
+needs = ["audio"]
+when = "clear hum"
+min_quality = "good"
+
+[[output]]
+name = "clock drift"
+kind = "link"
+status = "possible"
+about = "The device's sample-rate error in ppm, for the clocks; also tape speed wander."
+needs = ["audio", "grid log or audio 2"]
+when = "long recording"
+source = "Su et al. 2014"
+min_quality = "good"
+
+[[output]]
+name = "claimed time check"
+kind = "event"
+status = "possible"
+about = "A contradiction when the hum doesn't match the log at the claimed time."
+needs = ["audio", "time", "grid log"]
+when = "a claimed time and a log"
+min_quality = "good"
+
+[[output]]
+name = "fake live stream"
+kind = "event"
+status = "possible"
+about = "A pre-recorded loop: the hum doesn't match the grid's near-real-time data."
+needs = ["audio", "live grid data"]
+when = "a live stream"
+min_quality = "good"
+
+[[output]]
+name = "grid event time"
+kind = "anchor"
+status = "possible"
+about = "Time from a published grid event (a power plant trip) found in the audio."
+needs = ["audio", "grid event list"]
+when = "an event during the recording"
+min_quality = "good"
+
+[[output]]
+name = "re-recording"
+kind = "event"
+status = "possible"
+about = "Audio played back and recorded again: two hum signatures overlaid."
+needs = ["audio"]
+when = "clear hum"
+min_quality = "weak"
+
+[[output]]
+name = "deepfake hint"
+kind = "event"
+status = "possible"
+about = "Weak hint: no or incoherent hum where one is expected."
+needs = ["audio"]
+when = "mains nearby expected"
+min_quality = "none"
+
+[[output]]
+name = "place within grid"
+kind = "location"
+status = "possible"
+about = "Rough location within one grid by trilateration of small hum differences."
+needs = ["audio", "recordings at known sites"]
+when = "simultaneous recordings, research stage"
+source = "Garg, Hajj-Ahmad, Wu 2021"
+min_quality = "good"
+
+[[output]]
+name = "hum from video"
+kind = "track"
+status = "possible"
+about = "The same hum track from silent video: mains light flicker through the rolling shutter."
+needs = ["video"]
+when = "mains lighting in view"
+source = "Vatansever, Dirik, Memon 2019"
+min_quality = "good"

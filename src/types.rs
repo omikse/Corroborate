@@ -248,7 +248,7 @@ macro_rules! builtin_types {
 pub fn builtin() -> &'static [Arc<TypeDef>] {
     static B: OnceLock<Vec<Arc<TypeDef>>> = OnceLock::new();
     B.get_or_init(|| {
-        builtin_types!("audio", "video", "time", "location", "track", "event", "file", "text", "json", "any", "anchor", "link")
+        builtin_types!("audio", "video", "time", "location", "track", "event", "file", "text", "json", "any", "anchor", "link", "quality")
             .iter()
             .map(|t| Arc::new(parse(t).expect("built-in type.toml (checked by tests)")))
             .collect()
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn builtin_types_read() {
         let ids: Vec<&str> = builtin().iter().map(|t| t.id).collect();
-        assert_eq!(ids, ["audio", "video", "time", "location", "track", "event", "file", "text", "json", "any", "anchor", "link"]);
+        assert_eq!(ids, ["audio", "video", "time", "location", "track", "event", "file", "text", "json", "any", "anchor", "link", "quality"]);
         let flow = |id| lookup(id).unwrap().flow;
         assert_eq!((flow("audio"), flow("event"), flow("location")), (Flow::Stream, Flow::List, Flow::Value));
         assert_eq!(lookup("location").unwrap().color, [0xc7, 0x85, 0xc9]);
@@ -438,7 +438,7 @@ mod tests {
         let get = |id: &str| all.iter().find(|t| t.id == id).unwrap().clone();
         assert_eq!(get("location").color, [1, 2, 3]);
         assert_eq!(get("spectrum").flow, Flow::Stream);
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), 14);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -451,7 +451,7 @@ color = \"{col}\"")).unwrap();
             Arc::new(t)
         };
         let (all, conflicts) = merge(&[], &[t("spectrum", "#445566", "a"), t("spectrum", "#445566", "b"), t("tick", "#000000", "a")]);
-        assert_eq!((all.len(), conflicts.len()), (14, 0), "the same type twice is one type");
+        assert_eq!((all.len(), conflicts.len()), (15, 0), "the same type twice is one type");
         let (_, conflicts) = merge(&[], &[t("spectrum", "#445566", "a"), t("spectrum", "#ffffff", "b"), t("location", "#000000", "c")]);
         assert_eq!(conflicts, [("spectrum", vec!["a".to_string(), "b".to_string()]), ("location", vec!["built in".to_string(), "c".to_string()])]);
     }
