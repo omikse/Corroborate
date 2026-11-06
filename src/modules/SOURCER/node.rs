@@ -59,6 +59,10 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
         let file = DIRECT.iter().filter(|e| **e != ".m3u8").any(|e| path.split('?').next().unwrap_or("").ends_with(e));
         return Ok((url.to_string(), !file));
     }
+    // Downloaded before: read the copy, no yt-dlp call (no network, no sign-in check).
+    if let Some(p) = downloaded(url) {
+        return Ok((p, false));
+    }
     let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
@@ -141,8 +145,65 @@ fn download(url: &str) -> Result<String, String> {
     let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o", &template, url])?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().rev().find(|l| !l.trim().is_empty()) {
-        Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => Ok(p.trim().to_string()),
+        Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => {
+            let p = p.trim().to_string();
+            remember(url, &p);
+            Ok(p)
+        }
         _ => Err(ytdlp_error("yt-dlp download", &out.stderr, "no file written")),
+    }
+}
+
+/// `recordings\downloads.txt`: one `url<TAB>file` line per download, so the same link is read
+/// from its copy without asking yt-dlp again.
+fn downloads_list() -> std::path::PathBuf {
+    corroborate::home().join("recordings").join("downloads.txt")
+}
+
+/// The URL as a key: trimmed, and for YouTube just the video id (watch?v=, youtu.be/, shorts/,
+/// live/, with or without extra parameters).
+fn url_key(url: &str) -> String {
+    let u = url.trim();
+    let id = |s: &str| s.split(['&', '?', '#', '/']).next().unwrap_or("").to_string();
+    if u.contains("youtube.com/") || u.contains("youtu.be/") {
+        for mark in ["v=", "youtu.be/", "shorts/", "live/", "embed/"] {
+            if let Some((_, rest)) = u.split_once(mark) {
+                let v = id(rest);
+                if !v.is_empty() {
+                    return format!("youtube {v}");
+                }
+            }
+        }
+    }
+    u.to_string()
+}
+
+/// The file an earlier download of this URL left, if it is still there.
+fn downloaded(url: &str) -> Option<String> {
+    let key = url_key(url);
+    let text = std::fs::read_to_string(downloads_list()).ok()?;
+    text.lines().rev().filter_map(|l| l.split_once('\t')).find(|(k, p)| url_key(k) == key && std::path::Path::new(p).exists()).map(|(_, p)| p.to_string())
+}
+
+fn remember(url: &str, path: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(downloads_list()) {
+        let _ = writeln!(f, "{}\t{path}", url.trim());
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::url_key;
+
+    #[test]
+    fn youtube_links_share_a_key() {
+        let k = url_key("https://www.youtube.com/watch?v=qJ4EtDtDAr0");
+        assert_eq!(k, "youtube qJ4EtDtDAr0");
+        assert_eq!(url_key("https://youtu.be/qJ4EtDtDAr0?t=30"), k);
+        assert_eq!(url_key("https://www.youtube.com/watch?feature=share&v=qJ4EtDtDAr0&t=5s"), k);
+        assert_eq!(url_key("https://www.youtube.com/live/qJ4EtDtDAr0"), k);
+        assert_eq!(url_key(" https://example.com/a "), "https://example.com/a");
     }
 }
 

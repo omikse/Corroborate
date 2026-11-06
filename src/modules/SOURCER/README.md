@@ -13,7 +13,9 @@ decodes. Files, YouTube videos and media files on a server are read as recording
 live streams and microphones are read live (UTC (Coordinated Universal Time) from the PC clock at
 first audio). yt-dlp says whether a page is live. A video that is not live is downloaded by yt-dlp into
 `recordings\` first (YouTube refuses its direct links to ffmpeg), with its picture (at most 480 lines),
-and kept there as evidence.
+and kept there as evidence. `recordings\downloads.txt` lists each link with its file, so a later run
+(any change upstream or downstream) reads the copy without calling yt-dlp; YouTube links match by video
+id. Delete the file in `recordings\` to download again.
 
 When YouTube answers "Sign in to confirm you're not a bot", the SOURCER asks again with the cookies
 of a browser signed in to YouTube (yt-dlp reads them locally: Firefox, then Edge, Chrome, Brave;
