@@ -135,7 +135,11 @@ impl App {
         if let Some(r) = self.recordings.get(&i) {
             return format!("● recording {}", sourcer_node::fmt_secs(timebase::now_unix() - r.started));
         }
-        self.record_notes.get(&i).cloned().unwrap_or_else(|| "not recording".into())
+        let note = self.record_notes.get(&i).cloned().unwrap_or_else(|| "not recording".into());
+        match crate::evidence::comparable_note(&crate::evidence::not_comparable(&self.ev.clocks, &self.input_clocks(i))) {
+            Some(w) => format!("{note} · {w}"),
+            None => note,
+        }
     }
 
     pub(crate) fn record_json(&self, i: NodeId) -> String {

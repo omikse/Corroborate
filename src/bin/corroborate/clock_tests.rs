@@ -385,3 +385,29 @@ fn sound_follows_the_selected_node() {
     let (a, t) = app.sound_target().unwrap();
     assert_eq!((a.lock().unwrap().len(), t), (1600, 0.05));
 }
+
+/// Times on clock groups with nothing linking them are listed as not comparable and warned
+/// about; the result file carries the clocks, the evidence and the events with their UTC.
+#[test]
+fn not_comparable_and_the_result_file() {
+    use crate::evidence::{comparable_note, not_comparable};
+    use corroborate::clock::{solve, Anchor as An, Link};
+    let clocks = solve(
+        &[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }],
+        &[Link { a: "b".into(), t_a: 0.0, b: "c".into(), t_b: 1.0, error_s: 1.0, from: "manual".into(), enabled: true }],
+    );
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(not_comparable(&clocks, &s(&["b", "c", ""])).is_empty(), "linked: comparable");
+    assert!(not_comparable(&clocks, &s(&["a", "utc"])).is_empty(), "both absolute");
+    let nc = not_comparable(&clocks, &s(&["a", "b", "z"]));
+    assert_eq!(nc.len(), 3);
+    assert!(comparable_note(&nc).unwrap().contains("3 clock groups"));
+    assert!(comparable_note(&[]).is_none());
+
+    let mut app = App::empty();
+    let a = source(&mut app, 40.0);
+    anchor(&app, a, 1000.0, 2.0);
+    app.update_clocks();
+    let j = app.result_json(&[a]);
+    assert!(j.contains("\"clocks\":[{") && j.contains("\"kind\":\"absolute\"") && j.contains("\"type\":\"anchor\"") && j.contains("\"not_comparable\":[]"), "{j}");
+}

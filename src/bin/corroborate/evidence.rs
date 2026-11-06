@@ -237,3 +237,133 @@ impl App {
         true
     }
 }
+
+/// The groups of `clocks` (empty ones skipped) when they are not all one group: times on
+/// different groups cannot be compared, as nothing links them. Each: (group, its clocks).
+pub fn not_comparable(clocks: &clock::Clocks, used: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut g: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in used.iter().filter(|c| !c.is_empty()) {
+        let i = clocks.get(c);
+        let key = if i.kind == clock::Kind::Absolute { clock::UTC.to_string() } else { i.group };
+        g.entry(key).or_default().insert(c.clone());
+    }
+    if g.len() < 2 {
+        return Vec::new();
+    }
+    g.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+}
+
+/// The warning a node shows when its times are on clocks with no link between them.
+pub fn comparable_note(groups: &[(String, Vec<String>)]) -> Option<String> {
+    (!groups.is_empty()).then(|| format!("! times on {} clock groups with no link between them: not comparable", groups.len()))
+}
+
+impl App {
+    /// The result file's time part: every clock, every piece of evidence (with its switch and
+    /// contradictions), the events of the nodes `ids` with their clock and UTC ± error when known,
+    /// and the clock groups that cannot be compared.
+    pub(crate) fn clocks_json(&self, ids: &[NodeId]) -> String {
+        let c = &self.ev.clocks;
+        let ev_key = |e: &clock::Ev| match *e {
+            clock::Ev::Anchor(i) => self.ev.anchors.get(i).map(|a| a.key()),
+            clock::Ev::Link(i) => self.ev.links.get(i).map(|l| l.key()),
+        };
+        let clocks: Vec<String> = c
+            .clocks
+            .iter()
+            .map(|(id, i)| {
+                let bd: Vec<String> = i.breakdown.iter().map(|(e, v)| format!("{{\"evidence\":\"{}\",\"variance\":{v}}}", json_escape(&ev_key(e).unwrap_or_default()))).collect();
+                format!(
+                    "{{\"id\":\"{}\",\"kind\":\"{}\",\"group\":\"{}\",\"offset\":{},\"error_s\":{},\"breakdown\":[{}]}}",
+                    json_escape(id),
+                    match i.kind {
+                        clock::Kind::Absolute => "absolute",
+                        clock::Kind::Relative => "relative",
+                        clock::Kind::None => "unanchored",
+                    },
+                    json_escape(&i.group),
+                    i.offset,
+                    i.error_s,
+                    bd.join(",")
+                )
+            })
+            .collect();
+        let z = |e: clock::Ev| c.contradictions.iter().find(|(x, _)| *x == e).map_or("null".to_string(), |(_, z)| format!("{z:.2}"));
+        let mut evidence: Vec<String> = self
+            .ev
+            .anchors
+            .iter()
+            .enumerate()
+            .map(|(k, a)| {
+                format!(
+                    "{{\"type\":\"anchor\",\"key\":\"{}\",\"from\":\"{}\",\"clock\":\"{}\",\"t\":{},\"utc\":{},\"error_s\":{},\"enabled\":{},\"contradiction_z\":{}}}",
+                    json_escape(&a.key()),
+                    json_escape(&a.from),
+                    json_escape(&a.clock),
+                    a.t,
+                    a.utc,
+                    a.error_s,
+                    a.enabled,
+                    z(clock::Ev::Anchor(k))
+                )
+            })
+            .collect();
+        evidence.extend(self.ev.links.iter().enumerate().map(|(k, l)| {
+            format!(
+                "{{\"type\":\"link\",\"key\":\"{}\",\"from\":\"{}\",\"a\":\"{}\",\"t_a\":{},\"b\":\"{}\",\"t_b\":{},\"error_s\":{},\"enabled\":{},\"contradiction_z\":{}}}",
+                json_escape(&l.key()),
+                json_escape(&l.from),
+                json_escape(&l.a),
+                l.t_a,
+                json_escape(&l.b),
+                l.t_b,
+                l.error_s,
+                l.enabled,
+                z(clock::Ev::Link(k))
+            )
+        }));
+        let (events, _) = self.timeline_events();
+        let events: Vec<_> = events.into_iter().filter(|(i, _)| ids.contains(i)).collect();
+        let ev_j: Vec<String> = events
+            .iter()
+            .map(|(i, e)| {
+                let utc = c.to_utc(&e.clock, e.t_start).map_or("null".to_string(), |(u, ce)| format!("{u},\"utc_error_s\":{}", ce.hypot(e.error_s)));
+                format!(
+                    "{{\"node\":\"{}\",\"clock\":\"{}\",\"t_start\":{},\"t_end\":{},\"label\":\"{}\",\"error_s\":{},\"utc\":{utc}}}",
+                    json_escape(&self.nodes[*i].uid),
+                    json_escape(&e.clock),
+                    e.t_start,
+                    e.t_end,
+                    json_escape(&e.label),
+                    e.error_s
+                )
+            })
+            .collect();
+        let used: Vec<String> = events.iter().map(|(_, e)| e.clock.clone()).collect();
+        let nc: Vec<String> = not_comparable(c, &used)
+            .iter()
+            .map(|(g, cs)| format!("{{\"group\":\"{}\",\"clocks\":[{}]}}", json_escape(g), cs.iter().map(|x| format!("\"{}\"", json_escape(x))).collect::<Vec<_>>().join(",")))
+            .collect();
+        format!(
+            ",\"clocks\":[{}],\"evidence\":[{}],\"events\":[{}],\"not_comparable\":[{}]",
+            clocks.join(","),
+            evidence.join(","),
+            ev_j.join(","),
+            nc.join(",")
+        )
+    }
+
+    /// The clocks of the times wired into a node's inputs.
+    pub(crate) fn input_clocks(&self, i: NodeId) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.graph.nodes()[i].spec.inputs {
+            let Some((from, port)) = self.graph.feeder(i, p.name) else { continue };
+            match self.value_from(from, port) {
+                Ok(corroborate::data::Data::Events(v)) => out.extend(v.into_iter().map(|e| e.clock)),
+                Ok(corroborate::data::Data::Time { clock, .. }) => out.push(clock),
+                _ => {}
+            }
+        }
+        out
+    }
+}

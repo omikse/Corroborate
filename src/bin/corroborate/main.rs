@@ -735,11 +735,12 @@ impl App {
             })
             .collect();
         format!(
-            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires and setting changes are the evidence trail; anchor error_s is an estimate from the anchor's source\",\"nodes\":[\n{}\n],\"wires\":[{}],\"setting_changes\":{}}}\n",
+            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires and setting changes are the evidence trail; anchor error_s is an estimate from the anchor's source\",\"nodes\":[\n{}\n],\"wires\":[{}],\"setting_changes\":{}{}}}\n",
             timebase::fmt_utc(timebase::now_unix()),
             nodes_j.join(",\n"),
             wires.join(","),
-            self.changes_json(ids)
+            self.changes_json(ids),
+            self.clocks_json(ids)
         )
     }
 
