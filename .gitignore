@@ -12,3 +12,4 @@ recordings/
 doppler-2*/
 *.doppler.json
 app/
+tests/data/

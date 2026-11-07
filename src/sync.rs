@@ -151,23 +151,16 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
     }
     let center: Vec<f64> = sums.iter().map(|&(s, n)| if n > 0 { s / n as f64 } else { 0.0 }).collect();
 
-    // Unknowns: offset and rate of each solvable stream, then times of events touching them.
-    // The reference stream has none: its offset and rate are zero by definition (the gauge).
+    // Unknowns: offset and rate of each solvable stream. The reference stream has none: its
+    // offset and rate are zero by definition (the gauge). Event times are unknowns too, but each
+    // appears only in its own observations, so it is eliminated exactly (Schur complement) and
+    // worked out afterwards: the system stays as small as the streams however many events.
     let is_ref = |i: usize| reference == Some(i);
     let s_idx: Vec<Option<usize>> = {
         let mut k = 0;
         (0..n_streams).map(|i| (solvable[i] && !is_ref(i)).then(|| { k += 2; k - 2 })).collect()
     };
-    let n_s = 2 * s_idx.iter().flatten().count();
-    let mut e_idx: Vec<Option<usize>> = vec![None; n_events];
-    let mut k = n_s;
-    for o in obs.iter().filter(|o| solvable[o.stream]) {
-        if e_idx[o.event].is_none() {
-            e_idx[o.event] = Some(k);
-            k += 1;
-        }
-    }
-    let n = k;
+    let n = 2 * s_idx.iter().flatten().count();
     let mut a = vec![vec![0.0; n]; n];
     let mut b = vec![0.0; n];
     // Each row: coefficients (index, value), target, weight.
@@ -179,14 +172,36 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
             }
         }
     };
+    // Row of an observation: c·x - T_k = y with c its stream's terms and y = -t_ik
+    // (offset_i + rate_i (t - c_i) - T_k = -t_ik). Per event, with u = Σ w c, v = Σ w y and
+    // W = Σ w over its observations, eliminating T_k adds Σ w c cᵀ - u uᵀ / W and Σ w c y - u v / W,
+    // and T_k = (u·x - v) / W.
+    let terms = |o: &Obs| -> Vec<(usize, f64)> { s_idx[o.stream].map_or(Vec::new(), |si| vec![(si, 1.0), (si + 1, o.t - center[o.stream])]) };
+    let mut by_event: Vec<Vec<&Obs>> = vec![Vec::new(); n_events];
     for o in obs.iter().filter(|o| solvable[o.stream]) {
-        let ei = e_idx[o.event].unwrap();
-        let w = 1.0 / (o.error_s * o.error_s);
-        // offset_i + rate_i (t - c_i) - T_k = -t_ik
-        match s_idx[o.stream] {
-            Some(si) => add(&[(si, 1.0), (si + 1, o.t - center[o.stream]), (ei, -1.0)], -o.t, w),
-            None => add(&[(ei, -1.0)], -o.t, w),
+        by_event[o.event].push(o);
+    }
+    // Per event: u (merged by index), v, W.
+    let mut elim: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::with_capacity(n_events);
+    for ev in &by_event {
+        let (mut u, mut v, mut ww): (Vec<(usize, f64)>, f64, f64) = (Vec::new(), 0.0, 0.0);
+        for o in ev {
+            let w = 1.0 / (o.error_s * o.error_s);
+            let c = terms(o);
+            add(&c, -o.t, w);
+            for (i, ci) in c {
+                match u.iter_mut().find(|x| x.0 == i) {
+                    Some(x) => x.1 += w * ci,
+                    None => u.push((i, w * ci)),
+                }
+            }
+            v -= w * o.t;
+            ww += w;
         }
+        if ww > 0.0 {
+            add(&u, v, -1.0 / ww);
+        }
+        elim.push((u, v, ww));
     }
     if absolute {
         for an in anchors {
@@ -230,11 +245,16 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
         let si = s_idx[s]?;
         Some(t + x[si] + x[si + 1] * (t - center[s]))
     };
+    // Event times, back from the eliminated rows.
+    let event_t: Vec<Option<f64>> = elim
+        .iter()
+        .map(|(u, v, ww)| (*ww > 0.0 && inv.is_some()).then(|| (u.iter().map(|&(i, ui)| ui * x[i]).sum::<f64>() - v) / ww))
+        .collect();
     let residuals = obs
         .iter()
-        .map(|o| match (at(o.stream, o.t), e_idx[o.event]) {
-            (Some(s), Some(ei)) => {
-                let r = s - x[ei];
+        .map(|o| match (at(o.stream, o.t), event_t[o.event]) {
+            (Some(s), Some(te)) => {
+                let r = s - te;
                 (r, r / o.error_s)
             }
             _ => (f64::NAN, f64::NAN),
