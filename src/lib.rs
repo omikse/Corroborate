@@ -4,6 +4,7 @@
 //! - `modules::planes`: aircraft Doppler curves. Whitened low-band STFT (`spectro`) →
 //!   Viterbi ridge (`ridge`) → straight-pass Doppler fit (`fit`) → gates (`detect`).
 //! - `modules::enf`: ENF (Electrical Network Frequency), the mains hum and its drift.
+//! - `audio_match`: which recordings hear the same sound, as links between their clocks.
 //! - `core`: the workbench types: values with error and source, locations with radius,
 //!   times with error, typed ports and node roles.
 //! - `data`: the data bus: one value type per port kind and its JSON form.
@@ -12,6 +13,7 @@
 //!   (Coordinated Universal Time) anchors; `synth` makes test audio.
 
 pub mod area;
+pub mod audio_match;
 pub mod clock;
 pub mod core;
 pub mod data;

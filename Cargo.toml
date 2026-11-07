@@ -8,6 +8,8 @@ autobins = false
 
 [dependencies]
 hound = "3.5.1"
+# Audio fingerprints (Wang landmarks) for the audio match: which recordings overlap, roughly where.
+audiofp = { version = "=0.4.3", default-features = false }
 realfft = "3.5.1"
 # GUI only; `cargo build --no-default-features` gives the lean headless CLI and plugins.
 eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
