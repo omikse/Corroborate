@@ -505,7 +505,7 @@ impl App {
         let cg = self.canvas_groups();
         let look = |r: &Row| -> (Color32, String) {
             match cg.groups.iter().position(|g| g.id == r.group.id && g.kind == r.group.kind) {
-                Some(g) => (cg.groups[g].color, clock_view::group_label(g)),
+                Some(g) => (cg.groups[g].color, clock_view::group_label(cg.nums[g])),
                 None => (r.group.color, String::new()),
             }
         };
@@ -703,21 +703,42 @@ impl App {
                 if sub.is_none() && !number.is_empty() {
                     p.text(Pos2::new(track.left() - 6.0, top + 10.0), Align2::RIGHT_CENTER, &number, FontId::proportional(13.0), alpha(col, faint.max(0.7)));
                 }
+                // Anchors and links of this group that disagree with the rest (Sync list in red).
+                let disagree = self
+                    .ev
+                    .clocks
+                    .contradictions
+                    .iter()
+                    .filter(|(ev, _)| {
+                        let c = match ev {
+                            Ev::Anchor(i) => self.ev.anchors.get(*i).map(|a| a.clock.clone()),
+                            Ev::Link(i) => self.ev.links.get(*i).map(|l| if l.a == corroborate::clock::UTC { l.b.clone() } else { l.a.clone() }),
+                        };
+                        c.is_some_and(|c| self.ev.clocks.get(&c).group == r.group.id)
+                    })
+                    .count();
                 let (title, note) = match sub {
                     None => {
-                        let info = self.ev.clocks.get(&r.group.id);
-                        let kind = match r.group.kind {
-                            Ck::Absolute => format!("UTC · ± {}", clock_view::err_text(r.subs.iter().map(|s| self.ev.clocks.get(&s.clock).error_s).fold(0.0, f64::max) * sig)),
-                            Ck::Relative => format!("relative · ± {}", clock_view::err_text(info.error_s * sig)),
+                        // The worst clock error in the group: the reference clock itself has none.
+                        let worst = clock_view::err_text(r.subs.iter().map(|s| self.ev.clocks.get(&s.clock).error_s).fold(0.0, f64::max) * sig);
+                        let mut kind = match r.group.kind {
+                            Ck::Absolute => format!("UTC · ± {worst}"),
+                            // Zero is the start of the reference clock's source, named so it is
+                            // clear what the ruler counts from.
+                            Ck::Relative => format!("0 = start of {} · ± {worst}", self.clock_name(&r.group.id)),
                             Ck::None => "no anchor: no time scale".to_string(),
                         };
+                        if disagree > 0 {
+                            kind = format!("{kind} · {disagree} disagree");
+                        }
                         let who = if r.subs.len() == 1 { r.subs[0].name.clone() } else { format!("{} sources", r.subs.len()) };
                         (format!("{} {who}", if self.tls.expanded.contains(&r.group.id) { "v" } else { ">" }), kind)
                     }
                     Some(s) => (format!("   {}", s.name), format!("   {} events", s.events.len())),
                 };
                 p.text(Pos2::new(area.left() + 10.0, top + 10.0), Align2::LEFT_CENTER, title, FontId::proportional(12.0), alpha(TEXT, faint));
-                p.text(Pos2::new(area.left() + 10.0, top + 22.0), Align2::LEFT_CENTER, note, FontId::proportional(9.5), DIM);
+                let note_col = if sub.is_none() && disagree > 0 { Color32::from_rgb(235, 80, 80) } else { DIM };
+                p.text(Pos2::new(area.left() + 10.0, top + 22.0), Align2::LEFT_CENTER, note, FontId::proportional(9.5), note_col);
                 if sub.is_none() && resp.clicked_by(egui::PointerButton::Primary) && resp.interact_pointer_pos().is_some_and(|h| label_rect.contains(h)) {
                     toggle = Some(r.group.id.clone());
                 }

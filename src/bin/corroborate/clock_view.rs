@@ -16,7 +16,7 @@ use super::*;
 use corroborate::clock::{self, Clocks, Ev, Kind as Ck};
 use corroborate::data::Data;
 use corroborate::timebase;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Group colours: the first is UTC's, the rest go round in order of kind then id.
 pub const PALETTE: [Color32; 8] = [
@@ -71,6 +71,25 @@ pub struct Group {
 pub struct CanvasGroups {
     pub groups: Vec<Group>,
     pub of_node: Vec<Vec<usize>>,
+    /// Each group's number (1°, 2°…), kept while the group lives (see `App::group_nums`).
+    pub nums: Vec<usize>,
+}
+
+/// Numbers for `ids` (groups in use), kept from `known` where it has them; a new group takes
+/// the smallest free number. Groups gone give theirs up. Merged groups keep the number of the
+/// one whose id the merge keeps (a relative group is named by its reference clock).
+pub fn number_groups(known: &mut BTreeMap<String, usize>, ids: &[&str]) -> Vec<usize> {
+    known.retain(|k, _| ids.contains(&k.as_str()));
+    ids.iter()
+        .map(|id| {
+            if let Some(&n) = known.get(*id) {
+                return n;
+            }
+            let n = (1..).find(|n| !known.values().any(|v| v == n)).unwrap_or(1);
+            known.insert(id.to_string(), n);
+            n
+        })
+        .collect()
 }
 
 /// The group each of `used` clocks is in, absolute first, with its colour.
@@ -111,9 +130,9 @@ pub fn outline_alpha(kind: Ck) -> f32 {
     }
 }
 
-/// `1°`, `2°`…: the name of the group at index `g` of `canvas_groups`, on the canvas and the timeline.
-pub fn group_label(g: usize) -> String {
-    format!("{}°", g + 1)
+/// `1°`, `2°`…: a group's name from its number, on the canvas and the timeline.
+pub fn group_label(n: usize) -> String {
+    format!("{n}°")
 }
 
 fn timey(k: PortKind) -> bool {
@@ -242,7 +261,16 @@ impl App {
     pub(crate) fn canvas_groups(&self) -> CanvasGroups {
         let per: Vec<Vec<String>> = (0..self.nodes.len()).map(|i| if self.nodes[i].hidden { Vec::new() } else { self.node_clocks(i) }).collect();
         let used: BTreeSet<String> = per.iter().flatten().cloned().collect();
-        let groups = groups_of(&self.ev.clocks, &used);
+        let mut groups = groups_of(&self.ev.clocks, &used);
+        let ids: Vec<&str> = groups.iter().map(|g| g.id.as_str()).collect();
+        let nums = number_groups(&mut self.group_nums.borrow_mut(), &ids);
+        // Colour by number, so a group keeps its colour when others come and go; UTC keeps the
+        // first colour.
+        for (g, &n) in groups.iter_mut().zip(&nums) {
+            if g.kind != Ck::Absolute {
+                g.color = PALETTE[1 + (n - 1) % (PALETTE.len() - 1)];
+            }
+        }
         let of_node = per
             .iter()
             .map(|cs| {
@@ -252,7 +280,7 @@ impl App {
                 g
             })
             .collect();
-        CanvasGroups { groups, of_node }
+        CanvasGroups { groups, of_node, nums }
     }
 
     /// The name of the source a clock belongs to.
@@ -331,7 +359,7 @@ impl App {
                 .map(|i| self.node_rect(origin, i))
                 .min_by(|a, b| (a.top() + a.left()).total_cmp(&(b.top() + b.left())));
             if let Some(r) = first {
-                painter.text(r.left_top() + Vec2::new(2.0, -12.0) * z, Align2::LEFT_BOTTOM, group_label(g), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
+                painter.text(r.left_top() + Vec2::new(2.0, -12.0) * z, Align2::LEFT_BOTTOM, group_label(cg.nums[g]), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
             }
         }
         for w in self.graph.wires() {

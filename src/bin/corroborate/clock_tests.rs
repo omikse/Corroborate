@@ -472,3 +472,45 @@ fn timeline_lanes_per_group() {
     assert!(ys[1] - ys[0] > 40.0, "the dated lane has its own ruler above the lane: {ys:?}");
     d.shot("timeline_lanes");
 }
+
+/// Group numbers stay with their group: others leaving or a merge do not renumber the rest.
+#[test]
+fn group_numbers_stay_put() {
+    use crate::clock_view::number_groups;
+    let mut known = Default::default();
+    assert_eq!(number_groups(&mut known, &["a", "b", "c"]), vec![1, 2, 3]);
+    // b merged into a (the merge keeps a's id): c stays 3.
+    assert_eq!(number_groups(&mut known, &["a", "c"]), vec![1, 3]);
+    // A new group takes the smallest free number.
+    assert_eq!(number_groups(&mut known, &["a", "c", "d"]), vec![1, 3, 2]);
+}
+
+/// Linking two groups keeps what the user watches: the active group's playhead moves into the
+/// merged group at the same moment on its clock; the other group's playhead and shift go.
+#[test]
+fn playheads_carry_over_a_merge() {
+    use corroborate::clock::Link;
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let b = source(app, 40.0);
+    let c = source(app, 330.0);
+    for i in [b, c] {
+        app.nodes[i].state.lock().unwrap().audio_s = 100.0;
+    }
+    d.frames(3);
+    let app = d.app();
+    let (cb, cc) = (app.clock_of(b).unwrap(), app.clock_of(c).unwrap());
+    app.set_playhead(&cb, 12.0);
+    app.set_playhead(&cc, 3.0);
+    app.tls.shift.insert(cc.clone(), 50.0);
+    app.pick_only(c);
+    // b 30 s is c 0 s.
+    app.ev.manual_links.push(Link { a: cb.clone(), t_a: 30.0, b: cc.clone(), t_b: 0.0, error_s: 1.0, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    let g = app.ev.clocks.get(&cc).group.clone();
+    assert_eq!(app.ev.clocks.get(&cb).group, g, "one group now");
+    let at = app.playhead_on(&cc).unwrap();
+    assert!((at - 3.0).abs() < 1e-6, "the watched source is still at 3 s: {at}");
+    assert_eq!(app.ph.floating.len(), 1, "one playhead for the one group");
+    assert!(app.tls.shift.keys().all(|k| *k == g), "shifts of groups gone are dropped");
+}

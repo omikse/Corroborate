@@ -228,6 +228,9 @@ struct App {
     earth: Option<TextureHandle>,
     /// Areas worked out this frame, by node (see `area_from`).
     area_cache: std::cell::RefCell<HashMap<NodeId, Result<(Arc<Area>, String), String>>>,
+    /// Group id → its number (1°, 2°…) while the group lives, so numbers and colours stay put
+    /// when other groups come, go or merge (clock_view::number_groups).
+    group_nums: std::cell::RefCell<std::collections::BTreeMap<String, usize>>,
     last_project_save: Instant,
     /// Where the canvas starts on screen (last frame); tests use it to find nodes.
     canvas_origin: Pos2,
@@ -292,6 +295,7 @@ impl App {
             mics: Vec::new(),
             earth: None,
             area_cache: Default::default(),
+            group_nums: Default::default(),
             last_project_save: Instant::now(),
             canvas_origin: Pos2::ZERO,
             programs: HashMap::new(),

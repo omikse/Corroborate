@@ -1,7 +1,9 @@
 //! Linked playheads. Every absolute group shares one position (in UTC); each floating group has its
 //! own (in the time of the group's reference clock). A view asks for the playhead on its own clock
 //! and the solved clocks convert it, so moving it in one view moves it in every linked one.
-//! Unanchored groups follow nobody. The selected node's group has the active playhead.
+//! Unanchored groups follow nobody. The selected node's group has the active playhead. When new
+//! evidence merges or splits groups, each playhead moves to its clocks' new group at the same
+//! moment; on a clash the active group's wins (evidence.rs `carry_playheads`).
 //!
 //! Play on a SOURCER (or Space) plays and pauses: the active playhead moves in real time and
 //! linked views follow. A live source's playhead stops at "now", the newest audio received, and

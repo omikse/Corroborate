@@ -130,9 +130,50 @@ impl App {
     pub(crate) fn update_clocks(&mut self) {
         let (an, ln) = self.gather_evidence();
         if an != self.ev.anchors || ln != self.ev.links {
-            self.ev.clocks = clock::solve(&an, &ln);
+            let new = clock::solve(&an, &ln);
+            self.carry_playheads(&new);
+            self.ev.clocks = new;
             (self.ev.anchors, self.ev.links) = (an, ln);
         }
+    }
+
+    /// Groups merged or split by new evidence: each playhead moves to the group its clocks are in
+    /// now, at the same moment. A group that already has one keeps it, unless the moving one is
+    /// the active group's (what the user is watching wins). Shifts of groups gone are dropped.
+    fn carry_playheads(&mut self, new: &clock::Clocks) {
+        let old = &self.ev.clocks;
+        let active = self.active_key();
+        // (absolute, group) → position, before; every clock that has a playhead says where it is.
+        let mut moves: Vec<(bool, String, f64, bool)> = Vec::new();
+        let mut clocks: BTreeSet<String> = self.ph.floating.keys().cloned().collect();
+        clocks.extend(self.nodes.iter().enumerate().filter_map(|(i, _)| self.clock_of(i)));
+        for c in &clocks {
+            let (o, n) = (old.get(c), new.get(c));
+            let (oa, na) = (o.kind == clock::Kind::Absolute, n.kind == clock::Kind::Absolute);
+            if oa == na && o.group == n.group {
+                continue;
+            }
+            let Some(p) = self.ph.get(oa, &o.group) else { continue };
+            // The moment on clock c, then on the new group's numbering.
+            let pos = p - o.offset + n.offset;
+            let was_active = active.as_ref().is_some_and(|(a, g)| *a == oa && (oa || *g == o.group));
+            moves.push((na, n.group.clone(), pos, was_active));
+        }
+        // Active first, so it wins.
+        moves.sort_by_key(|m| !m.3);
+        let mut set: BTreeSet<(bool, String)> = BTreeSet::new();
+        for (abs, g, pos, was_active) in moves {
+            let key = (abs, if abs { String::new() } else { g.clone() });
+            if set.contains(&key) || (!was_active && self.ph.get(abs, &g).is_some()) {
+                continue;
+            }
+            self.ph.set(abs, &g, pos);
+            set.insert(key);
+        }
+        // Playheads and shifts of groups that no longer exist.
+        let live: BTreeSet<String> = clocks.iter().map(|c| new.get(c)).filter(|i| i.kind != clock::Kind::Absolute).map(|i| i.group).collect();
+        self.ph.floating.retain(|g, _| live.contains(g));
+        self.tls.shift.retain(|g, _| live.contains(g));
     }
 
     /// Switches a piece of evidence on or off (by its key); kept in the project and logged in the
