@@ -56,7 +56,7 @@ Canvas keys and mouse:
 | Wire | drag from an output dot to an input dot, or the other way; right-click an input to unwire |
 | Add a node already wired | drag from a dot onto empty canvas: pick from the modules that fit its type (from an input, a Value of its type comes first) |
 | Play, pause | Space (or Play in the top bar or the timeline): the selected node's playhead runs and its sound plays |
-| Playhead | click or drag in SOURCER's waveform, or click the timeline's ruler |
+| Playhead | click or drag in SOURCER's waveform, or click a lane's ruler on the timeline |
 | Same clock | select sources, right-click: Same clock (Separate clocks undoes it) |
 | Link two clocks | drag a floating timeline row onto an event on another row, then give the error |
 
@@ -144,7 +144,7 @@ To change one node, edit only its folder:
 
 | Module (folder) | id | What it gives |
 |---|---|---|
-| [SOURCER](<src/modules/SOURCER/README.md>) | `sourcer` | audio, time, metadata and video from a file, a YouTube video or live stream, a stream URL, or an audio device |
+| [SOURCER](<src/modules/SOURCER/README.md>) | `sourcer` | audio, time, metadata, video and location (GPS in the metadata) from a file, a YouTube video or live stream, a stream URL, or an audio device |
 | [Value](<src/modules/Value/README.md>) | `value` | one value of any type typed in: a place, a time, a note, events, … |
 | [Planes (Doppler)](<src/modules/Planes (Doppler)/README.md>) | `planes` | aircraft passes: speed, closest approach, distance |
 | [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | `enf` | mains hum runs, the area where that grid frequency is used, the hum track, and a quality verdict (good enough to date / weak / no hum, and why); all 16 use cases on its outputs |
@@ -226,6 +226,30 @@ Every location signal either **adds** its cells (the place is here: green) or **
 - **Map**: draws a location over the Earth in the Robinson projection, in the node and in its
   window. Image: NASA Blue Marble (public domain, 2048 × 1024, stored as `earth.idx`, a 256-colour
   palette and one byte per pixel); coastlines: Natural Earth 1:110m (public domain).
+
+### The location panel (right)
+
+As the timeline shows every time, the location panel shows every location in the project, with
+nothing wired: each node's location output is on it. A SOURCER gives one as soon as its file's
+metadata holds coordinates (ISO 6709, as phones and cameras write it: `location`, `location-eng`,
+`com.apple.quicktime.location.ISO6709`); its `location` output appears then. Points are pins in
+their clock group's colour, areas are tinted (green adds, red subtracts), and the list under the
+map selects a node and centres the map on it. New points are framed by themselves.
+
+### Maps (offline)
+
+The panel never fetches anything while you work. Without map files it draws the built-in world
+image (NASA Blue Marble). For street-level detail put `.pmtiles` files (vector tiles, Protomaps
+basemap) in `maps\` next to the program; every file there is drawn, in the Protomaps dark style
+(walkers). Get one region once with the [pmtiles CLI](https://docs.protomaps.com/pmtiles/cli):
+
+```
+pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles maps\london.pmtiles --bbox=-0.6,51.2,0.4,51.8 --maxzoom=15
+```
+
+Each zoom level roughly doubles the size: a city to zoom 15 is tens to a few hundred MB, the
+whole world to zoom 6 a few tens of MB. The download itself names the area to the server, so do
+it before the investigation, or for a wider box than the place of interest.
 
 ## Other code
 

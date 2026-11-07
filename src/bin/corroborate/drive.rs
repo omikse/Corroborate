@@ -36,9 +36,12 @@ impl Drive {
         Self::with(App::empty())
     }
 
-    pub fn with(app: App) -> Self {
+    /// The location panel starts closed here: its title and list would share labels with the
+    /// canvas (Location, node names) that tests click. `places_from_metadata` opens it.
+    pub fn with(mut app: App) -> Self {
+        app.places.open = false;
         let gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-        let h = Harness::builder().with_size(Vec2::new(1400.0, 900.0)).wgpu().build_ui_state(
+        let h = Harness::builder().with_size(Vec2::new(1800.0, 900.0)).wgpu().build_ui_state(
             |ui, app: &mut App| {
                 ui.ctx().set_visuals(egui::Visuals::dark());
                 app.frame(ui);
@@ -404,4 +407,43 @@ fn add_node_menu() {
         assert!(text.contains(want), "{want} not in the menu:\n{text}");
     }
     d.shot("add_node_menu");
+}
+
+/// A 3 s clip (grey picture, 440 Hz tone) with GPS in its metadata as a phone writes it: London,
+/// 10 m up (ISO 6709 in `location`).
+pub fn gps_clip() -> PathBuf {
+    let p = out_dir().join("gps.mp4");
+    if !p.exists() {
+        let ok = corroborate::no_window(&mut std::process::Command::new("ffmpeg"))
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=3", "-f", "lavfi", "-i", "color=c=gray:s=64x48:d=3", "-shortest"])
+            .args(["-metadata", "location=+51.5074-000.1278+010.000/", "-c:v", "libx264", "-c:a", "aac"])
+            .arg(&p)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "ffmpeg made the GPS clip");
+    }
+    p
+}
+
+/// The location panel: a file with GPS in its metadata puts a pin at its place with nothing
+/// wired, framed by itself; an area (a typed place with a radius, through Combine) is tinted.
+#[test]
+fn places_from_metadata() {
+    let mut d = Drive::new();
+    d.app().places.open = true;
+    let s = d.app().add(Kind::Sourcer { input: gps_clip().to_string_lossy().into_owned() }, Pos2::new(40.0, 40.0));
+    let v = d.app().add(Kind::Value { ty: "location".into(), rows: vec![("lat".into(), "48.85".into()), ("lon".into(), "2.35".into()), ("radius_km".into(), "300".into())] }, Pos2::new(40.0, 520.0));
+    let comb = d.app().add(Kind::CombineLocations { any: true }, Pos2::new(420.0, 520.0));
+    d.app().wire(v, "value", comb, "location 1");
+    d.frames(3);
+    assert!(d.wait_until(30.0, |app| app.places().iter().any(|p| p.node == s && p.site.is_some())), "the clip's GPS reached the panel");
+    let app = d.app();
+    let pl = app.places();
+    let p = pl.iter().find(|p| p.node == s).unwrap();
+    let site = p.site.unwrap();
+    assert!((site.lat - 51.5074).abs() < 1e-6 && (site.lon + 0.1278).abs() < 1e-6 && site.elevation == Some(10.0), "{site:?}");
+    assert!(pl.iter().any(|p| p.node == comb && p.site.is_none()), "the combined area is on the panel");
+    assert!(app.gives(s, "location"), "the location output shows");
+    d.frames(4);
+    d.shot("places");
 }

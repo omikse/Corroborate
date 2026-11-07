@@ -10,7 +10,9 @@ autobins = false
 hound = "3.5.1"
 realfft = "3.5.1"
 # GUI only; `cargo build --no-default-features` gives the lean headless CLI and plugins.
-eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36.0", optional = true, default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+# Offline maps in the location panel: local .pmtiles files (vector tiles, drawn with wgpu).
+walkers = { version = "=0.62.0", optional = true, default-features = false, features = ["pmtiles", "mvt"] }
 cpal = { version = "0.18.2", optional = true }
 rfd = { version = "0.17.2", optional = true }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
@@ -22,7 +24,7 @@ egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot"] }
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:cpal", "dep:rfd"]
+gui = ["dep:eframe", "dep:cpal", "dep:rfd", "dep:walkers"]
 
 # The workbench.
 [[bin]]

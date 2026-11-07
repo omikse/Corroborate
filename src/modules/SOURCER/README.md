@@ -26,9 +26,12 @@ yourself, put yt-dlp options one per line in `settings\yt-dlp.txt` next to the p
 Ports:
 - input `text` (optional): text from another node replaces what is typed in the field. No node gives
   text yet; when it is wired the node says so and uses the field.
-- outputs `audio`, `time`, `metadata` and `video`, all declared in `module.toml`. `look.rhai` hides
-  them until a source is chosen, and `video` unless it has pictures (video files, web pages, video
-  streams). A wired output is always shown, so emptying the source box keeps wires as they are.
+- outputs `audio`, `time`, `metadata`, `video` and `location`, all declared in `module.toml`.
+  `look.rhai` hides them until a source is chosen, `video` unless it has pictures (video files, web
+  pages, video streams), and `location` until the file's metadata gives coordinates (ISO 6709 in
+  `location`, `location-eng` or `com.apple.quicktime.location.ISO6709`: the exact point, shown on
+  the location panel). A wired output is always shown, so emptying the source box keeps wires as
+  they are.
 - setting `source`: the path, URL or `mic:<device>` in the first box.
 
 On the canvas: the two boxes, then (once there is a source) status and UTC clock, the waveform (the whole recording, or the last 30 s when live;

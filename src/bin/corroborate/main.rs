@@ -34,6 +34,7 @@ mod drop_menu;
 mod clock_view;
 mod evidence;
 mod timeline;
+mod places;
 mod playhead;
 mod sound;
 mod project;
@@ -260,6 +261,8 @@ struct App {
     ev: evidence::Evidence,
     /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
     tls: timeline::TlState,
+    /// The location panel (right).
+    places: places::PlacesState,
     ph: playhead::Playheads,
     sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
@@ -313,6 +316,7 @@ impl App {
             next_uid: 1,
             ev: Default::default(),
             tls: Default::default(),
+            places: Default::default(),
             ph: Default::default(),
             sound: Default::default(),
         }
@@ -1327,6 +1331,16 @@ impl App {
             .show(ui, |ui| {
             self.timeline_view(ui);
         });
+        // Location on the right, as time is below.
+        let open = self.places.open;
+        egui::Panel::right(if open { "places" } else { "places-closed" })
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(0, 4)))
+            .resizable(open)
+            .default_size(380.0)
+            .size_range(if open { 220.0..=900.0 } else { 0.0..=f32::INFINITY })
+            .show(ui, |ui| {
+                self.places_view(ui);
+            });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             self.graph_view(ui);
         });
@@ -1356,7 +1370,7 @@ fn main() -> eframe::Result {
     let autorun = args.iter().any(|a| a == "--run");
     let start = args.into_iter().find(|a| !a.starts_with("--"));
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 780.0]).with_title("Corroborate"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 900.0]).with_title("Corroborate"),
         ..Default::default()
     };
     eframe::run_native(
@@ -1364,6 +1378,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // The location panel's offline map files are vector tiles, drawn by walkers on wgpu.
+            walkers::install_renderer(cc.wgpu_render_state.as_ref());
             Ok(Box::new(App::new(start, autorun)))
         }),
     )
