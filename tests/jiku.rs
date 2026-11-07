@@ -5,7 +5,7 @@
 //! Fetch the data first (audio only, never committed):
 //!     python tools/jiku.py GT_090912
 //! then:
-//!     cargo test --release --test jiku -- --ignored --nocapture
+//!     cargo test --profile fast --test jiku -- --ignored --nocapture
 //!
 //! What it does, as the planned audio match module would: for every pair of recordings that
 //! overlap, cross-correlate short windows of their audio along the overlap (GCC-PHAT, generalized

@@ -57,6 +57,10 @@ fn echo_module(test: &str) -> mm::Manifest {
     m
 }
 
+/// Tests that register the "spot" type take turns: the type registry is global, and
+/// `module_brings_its_type` briefly defines spot twice (a conflict that refuses its wires).
+static SPOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run frames of the bus (feeding the programs) until `done` or 10 s.
 fn pump(app: &mut App, mut done: impl FnMut(&App) -> bool) -> bool {
     let t = Instant::now();
@@ -198,6 +202,7 @@ type = "text"
 /// conflict that refuses wires.
 #[test]
 fn module_brings_its_type() {
+    let _turn = SPOT.lock().unwrap_or_else(|e| e.into_inner());
     let root = out_dir().join("bus_modules").join("module_brings_its_type");
     let dir = root.join("Spot echo");
     std::fs::create_dir_all(dir.join("types")).unwrap();
@@ -240,6 +245,7 @@ fn module_brings_its_type() {
 /// echo program → its output, checked against the type's fields on the way.
 #[test]
 fn custom_type_on_the_bus() {
+    let _turn = SPOT.lock().unwrap_or_else(|e| e.into_inner());
     let mut m = echo_module("custom_type_on_the_bus");
     let dir = m.folder.clone().unwrap();
     std::fs::create_dir_all(dir.join("types")).unwrap();
