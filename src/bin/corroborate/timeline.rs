@@ -14,7 +14,8 @@
 //!   when the combined error is over the maximum.
 //! - **Sync list** (right of the rows): every anchor and link with who gave it, its error, its share
 //!   of the clock's error and an on/off switch; contradictions in red; a click picks the node.
-//!   Links are drawn between rows (offset ± error), anchors are pinned to the axis.
+//!   Links are drawn between rows, anchors are pinned to the axis, both as plain diamonds: their
+//!   error shows only as the see-through margins of the media (and in the hover text).
 //! - A click on a wire box on the canvas (`Evidence.focus`) opens and highlights that group's row.
 
 use super::*;
@@ -847,8 +848,8 @@ impl App {
             let red = Color32::from_rgb(235, 80, 80);
             let mut ev_hover: Option<String> = None;
             let hp = resp.hover_pos();
-            let pin = |p: &egui::Painter, x: f32, y: f32, c: Color32, err_px: f32| {
-                p.line_segment([Pos2::new(x - err_px, y), Pos2::new(x + err_px, y)], Stroke::new(1.0, c));
+            // A diamond only: the error shows once, as the see-through margins of the media.
+            let pin = |p: &egui::Painter, x: f32, y: f32, c: Color32| {
                 p.add(egui::Shape::convex_polygon(vec![Pos2::new(x, y - 5.0), Pos2::new(x + 5.0, y), Pos2::new(x, y + 5.0), Pos2::new(x - 5.0, y)], c, Stroke::NONE));
             };
             for (i, a) in self.ev.anchors.iter().enumerate() {
@@ -858,7 +859,7 @@ impl App {
                 if x < track.left() || x > track.right() {
                     continue;
                 }
-                pin(&p, x, y, c, (tx(a.utc + a.error_s * sig) - x).max(2.0));
+                pin(&p, x, y, c);
                 if hp.is_some_and(|h| (h - Pos2::new(x, y)).length() < 8.0) {
                     ev_hover = Some(format!("anchor: {} at {} UTC ± {} ({})", self.clock_name(&a.clock), fmt_clock(a.utc), clock_view::err_text(a.error_s * sig), self.ev.conf.label()));
                 }
@@ -878,14 +879,13 @@ impl App {
                 };
                 // A link to UTC is an anchor on the other clock: pin it.
                 if let (Some((x, y)), None) | (None, Some((x, y))) = (ea, eb) {
-                    pin(&p, x, y, c, 3.0);
+                    pin(&p, x, y, c);
                     continue;
                 }
                 let (Some(a), Some(b)) = (ea, eb) else { continue };
-                let err_px = (tx(v0 + l.error_s * sig) - tx(v0)).max(2.0);
                 p.line_segment([Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)], Stroke::new(1.5, alpha(c, 0.8)));
                 for (x, y) in [a, b] {
-                    pin(&p, x, y, c, err_px);
+                    pin(&p, x, y, c);
                 }
                 if hp.is_some_and(|h| seg_dist(h, Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)) < 5.0) {
                     ev_hover = Some(format!(
