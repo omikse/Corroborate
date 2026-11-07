@@ -173,13 +173,14 @@ pub struct WireText {
 /// gives a clock's source name.
 pub fn wire_text(clocks: &Clocks, data: &Data, conf: Confidence, max: Option<f64>, name: &dyn Fn(&str) -> String) -> Option<WireText> {
     let rss = |a: f64, b: f64| (a * a + b * b).sqrt();
-    // Clock error added to a measurement error when the clock is absolute.
-    let total = |clock: &str, e: f64| if clocks.get(clock).kind == Ck::Absolute { rss(clocks.get(clock).error_s, e) } else { e };
+    // Clock error at moment t (it grows away from the clock's evidence) added to a measurement
+    // error when the clock is absolute.
+    let total = |clock: &str, t: f64, e: f64| if clocks.get(clock).kind == Ck::Absolute { rss(clocks.get(clock).error_at(t), e) } else { e };
     let hhmm = |u: f64| timebase::fmt_utc_clock(u)[..5].to_string();
     let (top, err, clock) = match data {
         Data::Time { clock, t, utc, error_s, .. } => match (utc, clocks.to_utc(clock, *t)) {
             (Some(u), _) => (format!("{} UTC", timebase::fmt_utc_clock(*u)), Some(*error_s), clock.clone()),
-            (None, Some((u, _))) => (format!("{} UTC", timebase::fmt_utc_clock(u)), Some(total(clock, *error_s)), clock.clone()),
+            (None, Some((u, _))) => (format!("{} UTC", timebase::fmt_utc_clock(u)), Some(total(clock, *t, *error_s)), clock.clone()),
             (None, None) => (format!("{} on {}", rel_text(*t), name(clock)), Some(*error_s), clock.clone()),
         },
         Data::Events(v) => {
@@ -189,7 +190,7 @@ pub fn wire_text(clocks: &Clocks, data: &Data, conf: Confidence, max: Option<f64
             let n = v.len();
             let plural = if n == 1 { "event" } else { "events" };
             let span = span_text(clocks, v.iter().map(|e| (e.clock.as_str(), e.t_start, e.t_end)), name, &hhmm);
-            let err = v.iter().map(|e| total(&e.clock, e.error_s)).fold(0.0, f64::max);
+            let err = v.iter().map(|e| total(&e.clock, e.t_start, e.error_s).max(total(&e.clock, e.t_end, e.error_s))).fold(0.0, f64::max);
             (format!("{n} {plural}{span}"), Some(err), v[0].clock.clone())
         }
         Data::Tracks(v) => {
@@ -197,7 +198,7 @@ pub fn wire_text(clocks: &Clocks, data: &Data, conf: Confidence, max: Option<f64
                 return Some(WireText { top: "no points".into(), bottom: String::new(), over: false, clock: String::new() });
             }
             let span = span_text(clocks, v.iter().map(|p| (p.clock.as_str(), p.t, p.t)), name, &hhmm);
-            let err = v.iter().map(|p| total(&p.clock, 0.0)).fold(0.0, f64::max);
+            let err = v.iter().map(|p| total(&p.clock, p.t, 0.0)).fold(0.0, f64::max);
             (format!("{} points{span}", v.len()), Some(err), v[0].clock.clone())
         }
         Data::Custom { kind: "anchor", json } => {
@@ -303,13 +304,18 @@ impl App {
     /// What `clock`'s error is made of, largest first: one line each.
     pub(crate) fn breakdown_lines(&self, clock: &str) -> Vec<String> {
         let info = self.ev.clocks.get(clock);
-        let total: f64 = info.breakdown.iter().map(|b| b.1).sum();
+        let total: f64 = info.breakdown.iter().map(|b| b.1).sum::<f64>() + info.speed_share;
+        let sig = self.ev.conf.sigmas();
         let kind = match info.kind {
             Ck::Absolute => "absolute",
             Ck::Relative => "relative",
             Ck::None => "unanchored",
         };
-        let mut lines = vec![format!("{} · {kind} · ± {}", self.clock_name(clock), err_text(info.error_s * self.ev.conf.sigmas()))];
+        let mut lines = vec![format!("{} · {kind} · ± {}", self.clock_name(clock), err_text(info.error_s * sig))];
+        // The clock's speed when evidence along an overlap pinned it (well under the prior).
+        if info.rate_error > 0.0 && info.rate_error < 0.5 * corroborate::clock::RATE_PRIOR {
+            lines.push(format!("runs {:+.0} ± {:.0} ppm against the group", info.rate * 1e6, info.rate_error * sig * 1e6));
+        }
         for (e, var) in &info.breakdown {
             let from = match e {
                 Ev::Anchor(i) => self.ev.anchors.get(*i).map(|a| (a.from.clone(), "anchor")),
@@ -320,7 +326,10 @@ impl App {
                 Some(i) => self.node_name(i),
                 None => from,
             };
-            lines.push(format!("{who} ({what}): ± {} · {:.0}%", err_text(var.sqrt() * self.ev.conf.sigmas()), if total > 0.0 { 100.0 * var / total } else { 0.0 }));
+            lines.push(format!("{who} ({what}): ± {} · {:.0}%", err_text(var.sqrt() * sig), if total > 0.0 { 100.0 * var / total } else { 0.0 }));
+        }
+        if info.speed_share > 0.0 && total > 0.0 && info.speed_share / total >= 0.005 {
+            lines.push(format!("unknown clock speed: ± {} · {:.0}%", err_text(info.speed_share.sqrt() * sig), 100.0 * info.speed_share / total));
         }
         lines
     }

@@ -183,6 +183,12 @@ everything on that clock, what the solve gives) and an event's **own error** (e.
 closest-approach time), which never adds up. Shown at 95 % by default; the timeline switches 68, 95
 or 99.7 %, and an optional maximum ± turns anything over it red.
 
+Clocks **drift**: phones run a few to a few hundred ppm (parts per million) off, so each clock has a
+speed as well as an offset. Evidence at different times on the same clocks (links along an overlap)
+pins the speed; otherwise it is 0 ± 100 ppm, and a clock's error is smallest where its evidence is
+and grows away from it (about 0.36 s an hour). Every time shown is drift-corrected; a clock's error
+breakdown names a learnt speed and the share from an unknown one.
+
 On the canvas each clock group has a soft **glow** behind its nodes and wires in the group's colour:
 solid absolute, dashed relative, faint unanchored, striped for a node on several. Wires carrying
 times (time, event, track, anchor, link) show a **box** at their middle: the time (UTC, or +mm:ss on
@@ -191,7 +197,8 @@ click it to open its row in the timeline.
 
 The **timeline** (panel under the canvas, resizable, collapsible) has one row per clock group,
 absolute first on the shared UTC axis, then relative, then unanchored, each opening into one row per
-source. Events are marks or bars, the clock error a margin fading out, the own error whiskers. Its
+source. Events are marks or bars, the clock error a see-through margin each side (its error at
+that end, so wider away from the evidence), the own error whiskers. Its
 **Sync list** shows every anchor and link: who gave it, its error, its share of the clock's error,
 its switch, contradictions in red; a click selects the node. Links are drawn between rows, anchors
 pinned to the axis. Drag a floating row so one of its events meets an event on another row: it asks

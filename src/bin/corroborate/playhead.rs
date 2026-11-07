@@ -52,13 +52,13 @@ impl App {
     /// The playhead in `clock`'s own time.
     pub(crate) fn playhead_on(&self, clock: &str) -> Option<f64> {
         let c = self.ev.clocks.get(clock);
-        self.ph.get(c.kind == Ck::Absolute, &c.group).map(|p| p - c.offset)
+        self.ph.get(c.kind == Ck::Absolute, &c.group).map(|p| c.back(p))
     }
 
     /// Moves the playhead of `clock`'s group to `t` on that clock.
     pub(crate) fn set_playhead(&mut self, clock: &str, t: f64) {
         let c = self.ev.clocks.get(clock);
-        self.ph.set(c.kind == Ck::Absolute, &c.group, t + c.offset);
+        self.ph.set(c.kind == Ck::Absolute, &c.group, c.at(t));
     }
 
     /// The clock of the selected node: its group's playhead is the active one.
@@ -97,7 +97,7 @@ impl App {
                 let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).ok()?;
                 let c = self.ev.clocks.get(&self.clock_of(i)?);
                 let same = if absolute { c.kind == Ck::Absolute } else { c.kind != Ck::Absolute && c.group == group };
-                ((live || !live_only) && same && a > 0.0).then_some(a + c.offset)
+                ((live || !live_only) && same && a > 0.0).then_some(c.at(a))
             })
             .reduce(f64::max)
     }

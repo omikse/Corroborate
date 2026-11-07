@@ -215,8 +215,10 @@ fn timeline_rows_order_and_placement() {
     let kinds: Vec<Ck> = rows.iter().map(|r| r.group.kind).collect();
     assert_eq!(kinds, vec![Ck::Absolute, Ck::Relative, Ck::None]);
     let a = &rows[0].subs[0].events[0];
-    assert_eq!((a.t0, a.clock_err, a.own_err), (1030.0, 2.0, 0.5));
-    assert!((a.err() - 2.0f64.hypot(0.5)).abs() < 1e-9);
+    assert_eq!((a.t0, a.own_err), (1030.0, 0.5));
+    // The clock's error grows away from the anchor (unknown drift): a hair over 2 s at 30-31 s.
+    assert!((a.err0 - 2.0).abs() < 1e-4 && a.err1 > a.err0, "{} {}", a.err0, a.err1);
+    assert!((a.err() - a.err1.hypot(0.5)).abs() < 1e-9);
     // b and c share a group; both placed on the reference clock (the smaller id, b).
     assert_eq!(rows[1].subs.len(), 2);
     let on_ref: Vec<f64> = rows[1].subs.iter().map(|s| s.events[0].t0).collect();
@@ -264,7 +266,7 @@ fn drop_match_finds_the_closest_pair() {
     let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }], &[]);
     let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, ..Default::default() });
     let rows = build_rows(&clocks, &[ev("a", 10.0), ev("a", 20.0), ev("z", 3.0)], &|c| c.to_string());
-    let off = |c: &str| clocks.get(c).offset;
+    let off = |c: &str, s: f64| clocks.get(c).back(s);
     // z's event at 3 is drawn at 3 + shift: 1018 is 2 s short of a's event at 20 s (UTC 1020).
     let m = drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0).unwrap();
     assert!(m.absolute && m.a == "z" && m.t_a == 3.0 && m.t_b == 1020.0 && (m.gap - 2.0).abs() < 1e-9, "{m:?}");
@@ -513,4 +515,66 @@ fn playheads_carry_over_a_merge() {
     assert!((at - 3.0).abs() < 1e-6, "the watched source is still at 3 s: {at}");
     assert_eq!(app.ph.floating.len(), 1, "one playhead for the one group");
     assert!(app.tls.shift.keys().all(|k| *k == g), "shifts of groups gone are dropped");
+}
+
+/// Two clocks linked at both ends of an hour, one running 300 ppm fast: the timeline places the
+/// drifting clock's events drift-corrected, and a playhead set on it reads back the same moment.
+#[test]
+fn drifting_clocks_on_the_timeline_and_playheads() {
+    use crate::timeline::build_rows;
+    use corroborate::clock::Link;
+    use corroborate::data::Event;
+    let k = 1.0 + 300e-6;
+    let link = |ta: f64| Link { a: "a".into(), t_a: ta, b: "b".into(), t_b: 20.0 + ta * k, error_s: 0.01, from: "m".into(), enabled: true };
+    let clocks = corroborate::clock::solve(&[], &[link(0.0), link(3600.0)]);
+    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, ..Default::default() });
+    let rows = build_rows(&clocks, &[ev("a", 3600.0), ev("b", 20.0 + 3600.0 * k)], &|c| c.to_string());
+    let t: Vec<f64> = rows[0].subs.iter().map(|s| s.events[0].t0).collect();
+    assert!((t[0] - t[1]).abs() < 0.05, "the same moment lines up despite 1.08 s of drift: {t:?}");
+    let b = clocks.get("b");
+    assert!((b.back(b.at(1234.5)) - 1234.5).abs() < 1e-9);
+
+    let mut app = App::empty();
+    app.ev.clocks = clocks;
+    app.set_playhead("b", 2000.0);
+    let back = app.playhead_on("b").unwrap();
+    assert!((back - 2000.0).abs() < 1e-6, "{back}");
+    let on_a = app.playhead_on("a").unwrap();
+    assert!((on_a - (2000.0 - 20.0) / k).abs() < 0.05, "{on_a}");
+}
+
+/// One anchor at the start of an hour-long recording: the right margin (the clock's error at the
+/// end) is wider than the left, by about 0.36 s at 100 ppm.
+#[test]
+fn margins_grow_away_from_the_evidence() {
+    use crate::timeline::build_rows;
+    use corroborate::clock::Anchor as An;
+    use corroborate::data::Event;
+    let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 0.01, from: "n".into(), enabled: true }], &[]);
+    let rows = build_rows(&clocks, &[(0usize, Event { clock: "a".into(), t_start: 0.0, t_end: 3600.0, ..Default::default() })], &|c| c.to_string());
+    let e = &rows[0].subs[0].events[0];
+    assert!((e.err0 - 0.01).abs() < 1e-6 && (e.err1 - 0.36).abs() < 0.01, "{} {}", e.err0, e.err1);
+}
+
+/// Headless: an hour-long span anchored at its start draws a thin margin at the start and a
+/// wide one at the end (`target/drive/timeline_drift_start.png`, `timeline_drift_end.png`).
+#[test]
+fn drift_margins_drawn() {
+    use corroborate::clock::Anchor as An;
+    use corroborate::data::Event;
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    app.tls.extra = vec![(0usize, Event { clock: "c".into(), t_start: 0.0, t_end: 3600.0, label: "an hour".into(), ..Default::default() })];
+    app.ev.manual_anchors.push(An { clock: "c".into(), t: 0.0, utc: 1_700_000_000.0, error_s: 0.05, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    app.follow = false;
+    // The start, then the end, at the same zoom (6 s across).
+    app.tl = (1_700_000_000.0 - 3.0, 1_700_000_000.0 + 3.0);
+    d.frames(3);
+    d.shot("timeline_drift_start");
+    let e = d.app().ev.clocks.get("c");
+    assert!(e.error_at(3600.0) > 5.0 * e.error_at(0.0));
+    d.app().tl = (1_700_003_600.0 - 3.0, 1_700_003_600.0 + 3.0);
+    d.frames(3);
+    d.shot("timeline_drift_end");
 }

@@ -155,7 +155,7 @@ impl App {
             }
             let Some(p) = self.ph.get(oa, &o.group) else { continue };
             // The moment on clock c, then on the new group's numbering.
-            let pos = p - o.offset + n.offset;
+            let pos = n.at(o.back(p));
             let was_active = active.as_ref().is_some_and(|(a, g)| *a == oa && (oa || *g == o.group));
             moves.push((na, n.group.clone(), pos, was_active));
         }
@@ -315,7 +315,7 @@ impl App {
             .map(|(id, i)| {
                 let bd: Vec<String> = i.breakdown.iter().map(|(e, v)| format!("{{\"evidence\":\"{}\",\"variance\":{v}}}", json_escape(&ev_key(e).unwrap_or_default()))).collect();
                 format!(
-                    "{{\"id\":\"{}\",\"kind\":\"{}\",\"group\":\"{}\",\"offset\":{},\"error_s\":{},\"breakdown\":[{}]}}",
+                    "{{\"id\":\"{}\",\"kind\":\"{}\",\"group\":\"{}\",\"offset\":{},\"error_s\":{},\"rate\":{},\"rate_error\":{},\"center\":{},\"speed_share\":{},\"breakdown\":[{}]}}",
                     json_escape(id),
                     match i.kind {
                         clock::Kind::Absolute => "absolute",
@@ -325,6 +325,10 @@ impl App {
                     json_escape(&i.group),
                     i.offset,
                     i.error_s,
+                    i.rate,
+                    i.rate_error,
+                    i.center,
+                    i.speed_share,
                     bd.join(",")
                 )
             })

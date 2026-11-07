@@ -6,7 +6,9 @@
 //!   on a lane's ruler moves that group's playhead. A row opens into one sub-row per source. Colours
 //!   and numbers (1°, 2°…) are the canvas outline's.
 //! - **Media** are square boxes the lane's height; the clock error is a see-through extension of
-//!   the box to each side, as high as it, with its ± written inside when it fits.
+//!   the box to each side, as high as it, with its ± written inside when it fits. Clocks drift,
+//!   so the error is smallest where the clock's evidence is and grows away from it: each side has
+//!   its own (the clock's error at the start, and at the end), and times are drift-corrected.
 //! - **Floating rows** (relative and unanchored) sit on their own offset: `TlState.shift` is added
 //!   to their times; they are drawn fainter, with a dashed top line.
 //! - **Events**: a moment is a mark, a span is a bar, with the clock's error as margins like the
@@ -33,8 +35,10 @@ pub struct TlEvent {
     pub node: NodeId,
     pub t0: f64,
     pub t1: f64,
-    /// The clock's error at this time (1 sigma).
-    pub clock_err: f64,
+    /// The clock's error at the start and at the end (1 sigma): it grows away from the clock's
+    /// evidence, as the clock's speed is only known so well.
+    pub err0: f64,
+    pub err1: f64,
     /// The event's own measurement error (1 sigma).
     pub own_err: f64,
     pub label: String,
@@ -42,9 +46,14 @@ pub struct TlEvent {
 }
 
 impl TlEvent {
-    /// Clock and own error combined (1 sigma).
+    /// The clock's larger error, start or end (1 sigma).
+    pub fn clock_err(&self) -> f64 {
+        self.err0.max(self.err1)
+    }
+
+    /// Clock and own error combined (1 sigma), at the worse end.
     pub fn err(&self) -> f64 {
-        self.clock_err.hypot(self.own_err)
+        self.clock_err().hypot(self.own_err)
     }
 }
 
@@ -92,9 +101,10 @@ pub fn build_rows(clocks: &Clocks, events: &[(NodeId, Event)], name: &dyn Fn(&st
         };
         row.subs[si].events.push(TlEvent {
             node: *node,
-            t0: info.offset + e.t_start,
-            t1: info.offset + e.t_end,
-            clock_err: info.error_s,
+            t0: info.at(e.t_start),
+            t1: info.at(e.t_end),
+            err0: info.error_at(e.t_start),
+            err1: info.error_at(e.t_end),
             own_err: e.error_s,
             label: e.label.clone(),
             detail: e.detail.clone(),
@@ -173,7 +183,7 @@ pub struct Pending {
 
 /// The closest pair of events, one on the dragged row `moving` and one on another row, less than
 /// `tol` seconds apart as drawn. `shift` gives each row's shift, `offset` each clock's offset.
-pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, offset: &dyn Fn(&str) -> f64, tol: f64) -> Option<Pending> {
+pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, back: &dyn Fn(&str, f64) -> f64, tol: f64) -> Option<Pending> {
     let m = rows.iter().find(|r| r.group.id == moving)?;
     let sm = shift(m);
     let mut best: Option<Pending> = None;
@@ -189,9 +199,9 @@ pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, offse
                             best = Some(Pending {
                                 group: moving.to_string(),
                                 a: sa.clock.clone(),
-                                t_a: ea.t0 - offset(&sa.clock),
+                                t_a: back(&sa.clock, ea.t0),
                                 b: if absolute { corroborate::clock::UTC.to_string() } else { sb.clock.clone() },
-                                t_b: if absolute { eb.t0 } else { eb.t0 - offset(&sb.clock) },
+                                t_b: if absolute { eb.t0 } else { back(&sb.clock, eb.t0) },
                                 absolute,
                                 error_s: 0.0,
                                 gap,
@@ -286,7 +296,7 @@ impl App {
                 let a = n.state.lock().unwrap().audio_s;
                 if a > 0.0 {
                     let info = self.ev.clocks.get(&clock);
-                    end = end.max(if info.kind == Ck::Absolute { info.offset + a } else { a });
+                    end = end.max(if info.kind == Ck::Absolute { info.at(a) } else { a });
                 }
             }
             for p in &self.graph.nodes()[i].spec.outputs {
@@ -607,7 +617,7 @@ impl App {
                     let per_px = span / track.width() as f64;
                     let v0 = self.tl.0;
                     let clocks = &self.ev.clocks;
-                    let found = drop_match(&rows, &g, &|r| shift_of(&self.tls, r, v0), &|c| clocks.get(c).offset, 8.0 * per_px);
+                    let found = drop_match(&rows, &g, &|r| shift_of(&self.tls, r, v0), &|c, s| clocks.get(c).back(s), 8.0 * per_px);
                     if let Some(mut m) = found {
                         // Snap the row so the two events meet; the error starts at what a few
                         // pixels are worth at this zoom.
@@ -758,9 +768,9 @@ impl App {
                 for s in subs {
                     for e in &s.events {
                         let (t0, t1) = (e.t0 + shift, e.t1 + shift);
-                        let reach = e.clock_err * sig;
+                        let (reach0, reach1) = (e.err0 * sig, e.err1 * sig);
                         let whisker = e.own_err * sig;
-                        let (xa, xb) = (tx(t0 - reach - whisker), tx(t1 + reach + whisker));
+                        let (xa, xb) = (tx(t0 - reach0 - whisker), tx(t1 + reach1 + whisker));
                         if xb < track.left() || xa > track.right() {
                             continue;
                         }
@@ -774,8 +784,8 @@ impl App {
                         // Clock margins: see-through extensions of the box to the left and right,
                         // as high as it, with their ± inside when it fits (not on unanchored rows:
                         // no time scale, so no margin).
-                        if reach > 0.0 && r.group.kind != Ck::None {
-                            for (a, b) in [(t0 - reach, t0), (t1, t1 + reach)] {
+                        if reach0.max(reach1) > 0.0 && r.group.kind != Ck::None {
+                            for (a, b, reach) in [(t0 - reach0, t0, reach0), (t1, t1 + reach1, reach1)] {
                                 let m = Rect::from_min_max(Pos2::new(tx(a).max(track.left()), y0), Pos2::new(tx(b).min(track.right()), y1));
                                 if m.width() < 0.5 {
                                     continue;
@@ -813,11 +823,16 @@ impl App {
                         let hit = Rect::from_min_max(Pos2::new(xa.max(track.left()), cy - half), Pos2::new(xb.min(track.right()).max(xa + 3.0), cy + half)).expand2(Vec2::new(2.0, 0.0));
                         if resp.hover_pos().is_some_and(|h| hit.contains(h)) {
                             let when = if r.group.kind == Ck::Absolute { format!("{} UTC", fmt_clock(t0)) } else { format!("{} on {}", clock_view::rel_text(e.t0), s.name) };
+                            // The clock's error at each end when they differ (drift).
+                            let clock = if clock_view::err_text(e.err0 * sig) == clock_view::err_text(e.err1 * sig) {
+                                clock_view::err_text(e.err0 * sig)
+                            } else {
+                                format!("{} → {}", clock_view::err_text(e.err0 * sig), clock_view::err_text(e.err1 * sig))
+                            };
                             hover = Some(format!(
-                                "{}\n{}\n{when}\nclock ± {} · own ± {} · together ± {} ({})",
+                                "{}\n{}\n{when}\nclock ± {clock} · own ± {} · together ± {} ({})",
                                 e.label,
                                 e.detail,
-                                clock_view::err_text(e.clock_err * sig),
                                 clock_view::err_text(e.own_err * sig),
                                 clock_view::err_text(e.err() * sig),
                                 self.ev.conf.label(),
@@ -869,7 +884,7 @@ impl App {
                     continue;
                 }
                 let c = if self.ev.clocks.is_contradiction(Ev::Link(i)) { red } else { Color32::from_rgb(150, 210, 255) };
-                let end = |clock: &str, t: f64| ypos.get(clock).map(|&(y, sh)| (tx(self.ev.clocks.get(clock).offset + t + sh), y));
+                let end = |clock: &str, t: f64| ypos.get(clock).map(|&(y, sh)| (tx(self.ev.clocks.get(clock).at(t) + sh), y));
                 let (ea, eb) = if l.a == corroborate::clock::UTC {
                     (None, end(&l.b, l.t_b))
                 } else if l.b == corroborate::clock::UTC {
