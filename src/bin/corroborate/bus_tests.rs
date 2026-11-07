@@ -61,6 +61,18 @@ fn echo_module(test: &str) -> mm::Manifest {
 /// `module_brings_its_type` briefly defines spot twice (a conflict that refuses its wires).
 static SPOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Forgets the types of these modules folders when the test ends (passed or not), so the next
+/// test that defines spot finds no leftover definition from another folder.
+struct Unregister(Vec<std::path::PathBuf>);
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        for d in &self.0 {
+            corroborate::types::set_module_types(d, Vec::new());
+        }
+    }
+}
+
 /// Run frames of the bus (feeding the programs) until `done` or 10 s.
 fn pump(app: &mut App, mut done: impl FnMut(&App) -> bool) -> bool {
     let t = Instant::now();
@@ -204,6 +216,8 @@ type = "text"
 fn module_brings_its_type() {
     let _turn = SPOT.lock().unwrap_or_else(|e| e.into_inner());
     let root = out_dir().join("bus_modules").join("module_brings_its_type");
+    let other = out_dir().join("bus_modules").join("module_brings_its_type_2");
+    let _clear = Unregister(vec![root.clone(), other.clone()]);
     let dir = root.join("Spot echo");
     std::fs::create_dir_all(dir.join("types")).unwrap();
     std::fs::write(dir.join("types").join("spot.toml"), SPOT_TYPE).unwrap();
@@ -228,7 +242,6 @@ fn module_brings_its_type() {
     assert!(Data::parse(spot, "3").unwrap_err().contains("object"));
 
     // Another modules folder defines spot differently: both are named, and wiring is refused.
-    let other = out_dir().join("bus_modules").join("module_brings_its_type_2");
     std::fs::create_dir_all(other.join("Other").join("types")).unwrap();
     std::fs::write(other.join("Other").join("types").join("spot.toml"), SPOT_TYPE.replace("#33aa77", "#ffffff")).unwrap();
     std::fs::write(other.join("Other").join("module.toml"), "id = \"other\"\nlabel = \"Other\"\n").unwrap();
@@ -252,6 +265,7 @@ fn custom_type_on_the_bus() {
     std::fs::write(dir.join("types").join("spot.toml"), SPOT_TYPE).unwrap();
     let text = MANIFEST.replace("kind = \"location\"", "kind = \"spot\"");
     std::fs::write(dir.join("module.toml"), &text).unwrap();
+    let _clear = Unregister(vec![dir.parent().unwrap().to_path_buf()]);
     mm::discover(dir.parent().unwrap());
     let folder = m.folder.take();
     m = mm::parse(&text).unwrap();
