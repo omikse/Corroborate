@@ -71,6 +71,40 @@ fn box_select_delete_undo_redo() {
     assert!(!d.app().nodes[map].hidden && !d.app().nodes[inv].hidden);
 }
 
+/// A left-drag on empty canvas draws the box too, and nodes are selected while dragging, as soon
+/// as the box touches them (and dropped again when it shrinks away).
+#[test]
+fn left_drag_box_selects_while_dragging() {
+    let (mut d, inv, comb, _map) = three();
+    settle(&mut d);
+    let o = d.app().canvas_origin;
+    let from = o + Vec2::new(10.0, 20.0);
+    d.h.hover_at(from);
+    d.h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    d.frames(1);
+    // Grow towards the first node only.
+    for k in 1..=5 {
+        d.h.hover_at(from + Vec2::new(10.0 * k as f32, 15.0 * k as f32));
+        d.frames(1);
+    }
+    assert!(d.app().sel.boxing.is_some(), "the box is being drawn");
+    assert_eq!(d.app().picked(), vec![inv], "touched while dragging: selected before release");
+    d.shot("canvas_box_live");
+    // Down over the second node.
+    d.h.hover_at(o + Vec2::new(300.0, 500.0));
+    d.frames(2);
+    assert_eq!(d.app().picked(), vec![inv, comb]);
+    // Back up: the second drops out again.
+    d.h.hover_at(from + Vec2::new(50.0, 75.0));
+    d.frames(2);
+    assert_eq!(d.app().picked(), vec![inv]);
+    d.h.event(Event::PointerButton { pos: from + Vec2::new(50.0, 75.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    d.frames(2);
+    assert!(d.app().sel.boxing.is_none());
+    assert_eq!(d.app().picked(), vec![inv], "kept after release");
+    assert_eq!(d.app().pan, Vec2::ZERO, "a left-drag does not pan");
+}
+
 #[test]
 fn shift_click_and_move_together() {
     let (mut d, inv, comb, map) = three();
@@ -140,14 +174,14 @@ fn box_with_shift_toggles() {
 }
 
 #[test]
-fn left_drag_on_empty_canvas_does_nothing() {
+fn left_drag_box_over_nothing_clears() {
     let (mut d, inv, ..) = three();
     let a = d.node_title(inv);
     d.click_at(a.x, a.y);
     let o = d.app().canvas_origin;
     drag(&mut d, o + Vec2::new(400.0, 600.0), o + Vec2::new(500.0, 680.0), PointerButton::Primary, Modifiers::NONE);
     assert_eq!(d.app().pan, Vec2::ZERO, "no pan");
-    assert_eq!(d.app().picked(), vec![inv], "no box, selection kept");
+    assert!(d.app().picked().is_empty(), "a box over nothing clears the selection");
 }
 
 #[test]

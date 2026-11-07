@@ -834,7 +834,7 @@ impl App {
             y += step;
         }
         painter.add(egui::Shape::mesh(dots));
-        // Pan: middle-drag only. A right-drag on empty canvas draws a selection box.
+        // Pan: middle-drag only. A left- or right-drag on empty canvas draws a selection box.
         if self.wiring.is_none() && bg.dragged_by(egui::PointerButton::Middle) {
             self.pan += bg.drag_delta();
         }
@@ -1152,7 +1152,7 @@ impl App {
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag node: move · right-drag: select · middle-drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
+            "scroll: zoom · drag node: move · drag empty canvas: box select · middle-drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
             FontId::proportional(11.0),
             DIM,
         );

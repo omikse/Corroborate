@@ -58,6 +58,11 @@ pub struct Selection {
     pub picked: BTreeSet<NodeId>,
     /// Box being dragged, from this screen point.
     pub boxing: Option<Pos2>,
+    /// The selection when the box started (the box adds to or toggles it with Shift or Ctrl),
+    /// and which button drags it.
+    pub box_base: BTreeSet<NodeId>,
+    pub box_button: Option<egui::PointerButton>,
+    pub box_toggle: bool,
     /// Last copy, for when the system clipboard cannot be read.
     pub clip: String,
 }
@@ -390,37 +395,53 @@ impl App {
         self.pan = area.center() - area.min - bounds.center().to_vec2() * self.zoom;
     }
 
-    /// The selection box: started by right-dragging empty canvas, drawn while dragging, applied
-    /// on release to every node it touches. With Shift or Ctrl those nodes are toggled; with
-    /// neither, they replace the selection.
+    /// The selection box: started by dragging empty canvas (left or right button), drawn above
+    /// the nodes while dragging. Every node it touches is selected at once, as the box grows or
+    /// shrinks. With Shift or Ctrl held, those nodes are toggled against the selection from
+    /// before; with neither, they replace it (a box over nothing clears it).
     pub(crate) fn box_select(&mut self, ui: &egui::Ui, bg: &egui::Response, painter: &egui::Painter, origin: Pos2) {
-        if bg.drag_started_by(egui::PointerButton::Secondary) && self.wiring.is_none() && self.wiring_in.is_none() {
-            self.sel.boxing = ui.input(|i| i.pointer.press_origin());
+        for b in [egui::PointerButton::Primary, egui::PointerButton::Secondary] {
+            if bg.drag_started_by(b) && self.wiring.is_none() && self.wiring_in.is_none() {
+                self.sel.boxing = ui.input(|i| i.pointer.press_origin());
+                self.sel.box_button = Some(b);
+                self.sel.box_base = self.sel.picked.clone();
+                self.sel.box_toggle = false;
+            }
         }
         let Some(start) = self.sel.boxing else { return };
         let Some(now) = ui.ctx().pointer_latest_pos() else { return };
         let r = Rect::from_two_pos(start, now);
-        painter.rect(r, 2.0, alpha(SEL, 0.08), Stroke::new(1.0, alpha(SEL, 0.7)), StrokeKind::Inside);
-        if bg.drag_stopped() || !ui.input(|i| i.pointer.secondary_down()) {
-            self.sel.boxing = None;
-            let m = ui.input(|i| i.modifiers);
-            let toggle = m.shift || m.command;
-            if !toggle {
-                self.pick_none();
-            }
-            for i in 0..self.nodes.len() {
-                if !self.nodes[i].hidden && self.node_rect(origin, i).intersects(r) {
-                    if toggle && self.sel.picked.contains(&i) {
-                        self.sel.picked.remove(&i);
-                        if self.selected == Some(i) {
-                            self.selected = self.sel.picked.iter().next().copied();
-                        }
-                    } else {
-                        self.sel.picked.insert(i);
-                        self.selected = Some(i);
-                    }
+        // Above the nodes, clipped to the canvas.
+        let top = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("box-select"))).with_clip_rect(painter.clip_rect());
+        top.rect(r, 2.0, alpha(SEL, 0.08), Stroke::new(1.0, alpha(SEL, 0.8)), StrokeKind::Inside);
+        // Live: the selection is the base with every touched node added (or toggled).
+        // Shift or Ctrl at any time during the drag makes it a toggling box.
+        self.sel.box_toggle |= ui.input(|i| i.modifiers.shift || i.modifiers.command);
+        let toggle = self.sel.box_toggle;
+        let mut picked = if toggle { self.sel.box_base.clone() } else { BTreeSet::new() };
+        let mut last = None;
+        for i in 0..self.nodes.len() {
+            if !self.nodes[i].hidden && self.node_rect(origin, i).intersects(r) {
+                if toggle && self.sel.box_base.contains(&i) {
+                    picked.remove(&i);
+                } else {
+                    picked.insert(i);
+                    last = Some(i);
                 }
             }
+        }
+        if picked != self.sel.picked {
+            self.sel.picked = picked;
+            self.selected = last.or_else(|| self.selected.filter(|s| self.sel.picked.contains(s))).or_else(|| self.sel.picked.iter().next().copied());
+        }
+        let down = match self.sel.box_button {
+            Some(egui::PointerButton::Primary) => ui.input(|i| i.pointer.primary_down()),
+            _ => ui.input(|i| i.pointer.secondary_down()),
+        };
+        if bg.drag_stopped() || !down {
+            self.sel.boxing = None;
+            self.sel.box_button = None;
+            self.sel.box_base.clear();
         }
     }
 }
