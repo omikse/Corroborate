@@ -4,7 +4,9 @@
 //! - **Group**: clocks that can be compared. All absolute clocks are one group (UTC); relative
 //!   clocks are grouped by their links; an unanchored clock is a group of its own.
 //! - **Glow**: the group's colour (one palette, shared with the timeline). Solid for absolute,
-//!   dashed for relative, faint for unanchored. A node on several groups is striped.
+//!   dashed for relative, faint for unanchored. A node on several groups is striped. An outline
+//!   runs round each group's nodes and wires as one shape, and the group's number (1°, 2°…, the
+//!   same on the timeline) sits above its top-left node.
 //! - **Wire box**: top line the time (UTC when known, else "+00:41.2 on <source>"), or the count and
 //!   span of a list; bottom line ± the error (clock error and the event's own error combined by
 //!   root-sum-square) at the chosen confidence, red when over the maximum. Zoomed out it keeps only
@@ -98,6 +100,20 @@ pub fn glow_style(kind: Ck) -> (f32, bool) {
         Ck::Relative => (0.12, true),
         Ck::None => (0.05, false),
     }
+}
+
+/// Strength of a group's outline: full for absolute, less for relative, faint for unanchored.
+pub fn outline_alpha(kind: Ck) -> f32 {
+    match kind {
+        Ck::Absolute => 0.9,
+        Ck::Relative => 0.7,
+        Ck::None => 0.35,
+    }
+}
+
+/// `1°`, `2°`…: the name of the group at index `g` of `canvas_groups`, on the canvas and the timeline.
+pub fn group_label(g: usize) -> String {
+    format!("{}°", g + 1)
 }
 
 fn timey(k: PortKind) -> bool {
@@ -288,6 +304,36 @@ impl App {
             return;
         }
         let z = self.zoom;
+        // The outline round each group (as sketched): its shapes a little larger in the group's
+        // colour, then the same shapes in the canvas colour, so only the rim shows where they
+        // join. Wires and nodes of one group merge into one shape.
+        for (pad, outline) in [(1.5, true), (0.0, false)] {
+            for w in self.graph.wires() {
+                let Some(&g) = cg.of_node[w.from].iter().find(|g| cg.of_node[w.to].contains(g)) else { continue };
+                let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
+                let (b, sb) = self.port_place(origin, w.to, w.to_port, false);
+                let col = if outline { alpha(cg.groups[g].color, outline_alpha(cg.groups[g].kind)) } else { BG };
+                painter.add(CubicBezierShape::from_points_stroke(layout::wire_points(a, sa, b, sb), false, Color32::TRANSPARENT, Stroke::new(12.0 * z + pad * 2.0, col)));
+            }
+            for i in 0..self.nodes.len() {
+                let gs = &cg.of_node[i];
+                if self.nodes[i].hidden || gs.is_empty() {
+                    continue;
+                }
+                let col = if outline { alpha(cg.groups[gs[0]].color, outline_alpha(cg.groups[gs[0]].kind)) } else { BG };
+                painter.rect_filled(self.node_rect(origin, i).expand(10.0 * z + pad), 10.0 * z + pad, col);
+            }
+        }
+        // The group's number (1°, 2°…) above its top-left node, as on the timeline.
+        for (g, grp) in cg.groups.iter().enumerate() {
+            let first = (0..self.nodes.len())
+                .filter(|&i| !self.nodes[i].hidden && cg.of_node[i].contains(&g))
+                .map(|i| self.node_rect(origin, i))
+                .min_by(|a, b| (a.top() + a.left()).total_cmp(&(b.top() + b.left())));
+            if let Some(r) = first {
+                painter.text(r.left_top() + Vec2::new(2.0, -12.0) * z, Align2::LEFT_BOTTOM, group_label(g), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
+            }
+        }
         for w in self.graph.wires() {
             let Some(&g) = cg.of_node[w.from].iter().find(|g| cg.of_node[w.to].contains(g)) else { continue };
             let grp = &cg.groups[g];

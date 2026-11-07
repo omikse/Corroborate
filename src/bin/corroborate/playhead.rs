@@ -77,6 +77,7 @@ impl App {
     }
 
     /// Whether any source is live: the project is live, otherwise a simulation.
+    #[cfg(test)]
     pub(crate) fn is_live(&self) -> bool {
         self.nodes.iter().any(|n| !n.hidden && n.state.lock().map(|s| s.live).unwrap_or(false))
     }

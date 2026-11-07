@@ -431,3 +431,24 @@ fn record_inputs_grow_with_the_new_wiring() {
     assert!(json.contains("\"label\":\"clap\""), "{json}");
     d.shot("record_inputs_grow");
 }
+
+/// PC streams: a click on a device adds a live SOURCER on it and selects it; clicked again, the
+/// device (now in use) selects that node instead of adding another.
+#[test]
+fn pc_streams_add_a_source() {
+    let mut d = Drive::new();
+    d.app().mics = vec!["Test Mic (none)".into()];
+    d.frames(2);
+    d.click("Test Mic (none)");
+    let app = d.app();
+    let srcs: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| matches!(&app.nodes[i].kind, Kind::Sourcer { input } if input == "mic:Test Mic (none)")).collect();
+    assert_eq!(srcs.len(), 1, "one source on the device");
+    assert_eq!(app.selected, Some(srcs[0]));
+    d.shot("pc_streams");
+    d.app().pick_none();
+    d.frames(1);
+    d.click("Test Mic (none)");
+    let app = d.app();
+    assert_eq!(app.nodes.iter().filter(|n| matches!(&n.kind, Kind::Sourcer { .. })).count(), 1, "no second source");
+    assert_eq!(app.selected, Some(srcs[0]));
+}

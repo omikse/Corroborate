@@ -1,13 +1,17 @@
 //! The timeline panel: one row per clock group, events with their margins.
 //!
-//! - **Rows**: absolute groups first (all on the shared UTC axis), then relative, then unanchored.
-//!   A faint line separates rows of one kind, a strong one separates kinds. A row opens into one
-//!   sub-row per source. Row colours are the canvas glow's (`clock_view::PALETTE`).
+//! - **Rows**: one lane per group that is not synced to another: absolute first (all on the shared
+//!   UTC axis), then relative, then unanchored. Each lane has its own ruler in its own time: UTC,
+//!   time on the group's reference clock, or none for an unanchored group (no time scale); a click
+//!   on a lane's ruler moves that group's playhead. A row opens into one sub-row per source. Colours
+//!   and numbers (1°, 2°…) are the canvas outline's.
+//! - **Media** are square boxes the lane's height; the clock error is a see-through extension of
+//!   the box to each side, as high as it, with its ± written inside when it fits.
 //! - **Floating rows** (relative and unanchored) sit on their own offset: `TlState.shift` is added
 //!   to their times; they are drawn fainter, with a dashed top line.
-//! - **Events**: a moment is a mark, a span is a bar. The clock's error is the margin around it,
-//!   fading out from the centre; the event's own measurement error is the whisker. Both at the
-//!   chosen confidence; red when the combined error is over the maximum.
+//! - **Events**: a moment is a mark, a span is a bar, with the clock's error as margins like the
+//!   media's; the event's own measurement error is the whisker. Both at the chosen confidence; red
+//!   when the combined error is over the maximum.
 //! - **Sync list** (right of the rows): every anchor and link with who gave it, its error, its share
 //!   of the clock's error and an on/off switch; contradictions in red; a click picks the node.
 //!   Links are drawn between rows (offset ± error), anchors are pinned to the axis.
@@ -483,8 +487,28 @@ impl App {
         }
 
         let label_w = 190.0;
-        let ruler_h = 20.0;
         let lane_h = 30.0;
+        // Each group row has its own ruler in its own time: UTC on absolute rows, time on the
+        // group's reference clock on relative ones, none on unanchored rows (no time scale).
+        let lane_ruler = 14.0;
+        let mut tops: Vec<(f32, f32)> = Vec::new();
+        let mut y = 2.0;
+        for l in &lines {
+            let rh = match l {
+                Line::Group(r) if r.group.kind != Ck::None => lane_ruler,
+                _ => 0.0,
+            };
+            tops.push((y, rh));
+            y += rh + lane_h;
+        }
+        // Colours and numbers as on the canvas, so 2° here is 2° there.
+        let cg = self.canvas_groups();
+        let look = |r: &Row| -> (Color32, String) {
+            match cg.groups.iter().position(|g| g.id == r.group.id && g.kind == r.group.kind) {
+                Some(g) => (cg.groups[g].color, clock_view::group_label(g)),
+                None => (r.group.color, String::new()),
+            }
+        };
         let shift_of = |tls: &TlState, r: &Row, v0: f64| -> f64 {
             if r.group.kind == Ck::Absolute {
                 0.0
@@ -493,7 +517,7 @@ impl App {
             }
         };
 
-        let h = ruler_h + lane_h * lines.len().max(1) as f32 + 4.0;
+        let h = y.max(lane_h) + 4.0;
         let sync_w = (ui.available_width() * 0.4).min(320.0);
         let rows_w = ui.available_width() - sync_w - 8.0;
         // Both halves fill the panel's height (the user sizes the panel); the rows scroll inside.
@@ -552,9 +576,11 @@ impl App {
                 }
             }
             // A drag on a floating row moves that row; elsewhere it pans.
+            // (top of the line, top of its lane under the ruler) on screen.
+            let line_y = |li: usize| (area.top() + tops[li].0, area.top() + tops[li].0 + tops[li].1);
             let line_at = |y: f32| -> Option<&Row> {
-                let li = ((y - area.top() - ruler_h) / lane_h).floor();
-                (li >= 0.0).then(|| lines.get(li as usize)).flatten().map(|l| match l {
+                let li = tops.iter().position(|&(t, rh)| y >= area.top() + t && y < area.top() + t + rh + lane_h)?;
+                lines.get(li).map(|l| match l {
                     Line::Group(r) | Line::Sub(r, _) => *r,
                 })
             };
@@ -603,32 +629,24 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter_map(|(li, l)| match l {
-                    Line::Group(r) => Some((r.group.id.clone(), area.top() + ruler_h + li as f32 * lane_h + lane_h * 0.5)),
+                    Line::Group(r) => Some((r.group.id.clone(), line_y(li).1 + lane_h * 0.5)),
                     Line::Sub(..) => None,
                 })
                 .collect();
 
-            // Ruler.
+            // Tick spacing, shared by every lane's ruler.
             let raw = span / 8.0;
             let mag = 10f64.powf(raw.log10().floor());
             let step = [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * mag).find(|s| *s >= raw).unwrap_or(10.0 * mag);
-            let mut t = (v0 / step).ceil() * step;
-            while t <= self.tl.1 {
-                let x = tx(t);
-                p.line_segment([Pos2::new(x, track.top()), Pos2::new(x, area.bottom())], Stroke::new(1.0, Color32::from_rgb(40, 44, 49)));
-                let txt = if any_abs { fmt_clock(t) } else { format!("{t:.0} s") };
-                p.text(Pos2::new(x + 3.0, track.top() + 3.0), Align2::LEFT_TOP, txt, FontId::proportional(10.5), DIM);
-                t += step;
-            }
-            p.line_segment([Pos2::new(area.left(), area.top() + ruler_h), Pos2::new(area.right(), area.top() + ruler_h)], Stroke::new(1.0, LINE));
 
             let mut hover: Option<String> = None;
             let mut pick_node: Option<NodeId> = None;
             let mut toggle: Option<String> = None;
             let mut prev_kind: Option<Ck> = None;
+            let mut ruler_click: Option<(bool, String, f64)> = None;
             let floating_hover = resp.hover_pos().and_then(|h| line_at(h.y)).is_some_and(|r| r.group.kind != Ck::Absolute);
             for (li, line) in lines.iter().enumerate() {
-                let top = area.top() + ruler_h + li as f32 * lane_h;
+                let (line_top, top) = line_y(li);
                 let row_rect = Rect::from_min_max(Pos2::new(area.left(), top), Pos2::new(area.right(), top + lane_h));
                 let (r, sub) = match line {
                     Line::Group(r) => (*r, None),
@@ -636,14 +654,36 @@ impl App {
                 };
                 let floating = r.group.kind != Ck::Absolute;
                 let faint = if r.group.kind == Ck::None { 0.45 } else { 1.0 };
-                let col = r.group.color;
+                let (col, number) = look(r);
+                // The lane's own ruler: UTC, or time on the group's reference clock (moved with
+                // the row's shift, so it reads true while the row is dragged).
+                if top > line_top {
+                    let sh = shift_of(&self.tls, r, v0);
+                    let ruler = Rect::from_min_max(Pos2::new(track.left(), line_top), Pos2::new(area.right(), top));
+                    p.line_segment([Pos2::new(area.left(), line_top), Pos2::new(area.right(), line_top)], Stroke::new(1.0, LINE));
+                    let mut t = ((v0 - sh) / step).ceil() * step;
+                    while t + sh <= self.tl.1 {
+                        let x = tx(t + sh);
+                        p.line_segment([Pos2::new(x, ruler.bottom() - 4.0), Pos2::new(x, top + lane_h)], Stroke::new(1.0, Color32::from_rgb(40, 44, 49)));
+                        let txt = if r.group.kind == Ck::Absolute { fmt_clock(t) } else { clock_view::rel_text(t) };
+                        p.text(Pos2::new(x + 3.0, ruler.top() + 1.0), Align2::LEFT_TOP, txt, FontId::monospace(9.5), DIM);
+                        t += step;
+                    }
+                    // A click on a lane's ruler moves that group's playhead there.
+                    if resp.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(hp) = resp.interact_pointer_pos().filter(|h| ruler.contains(*h)) {
+                            let at = v0 + ((hp.x - track.left()) / track.width()) as f64 * span;
+                            ruler_click = Some((r.group.kind == Ck::Absolute, r.group.id.clone(), at - sh));
+                        }
+                    }
+                }
                 // Lines between rows: strong between kinds, faint inside one kind.
                 let strong = sub.is_none() && prev_kind.is_some_and(|k| k != r.group.kind);
                 if sub.is_none() {
                     prev_kind = Some(r.group.kind);
                 }
                 p.line_segment(
-                    [row_rect.left_top(), row_rect.right_top()],
+                    [Pos2::new(area.left(), line_top), Pos2::new(area.right(), line_top)],
                     Stroke::new(1.0, if strong { Color32::from_rgb(90, 96, 104) } else { Color32::from_rgb(42, 46, 51) }),
                 );
                 if self.tls.picked.as_deref() == Some(r.group.id.as_str()) {
@@ -657,16 +697,19 @@ impl App {
                         x += 9.0;
                     }
                 }
-                p.rect_filled(Rect::from_min_max(Pos2::new(area.left(), top + 2.0), Pos2::new(area.left() + 4.0, top + lane_h - 2.0)), 1.0, alpha(col, 0.9 * faint));
+                p.rect_filled(Rect::from_min_max(Pos2::new(area.left(), line_top + 2.0), Pos2::new(area.left() + 4.0, top + lane_h - 2.0)), 0.0, alpha(col, 0.9 * faint));
                 // Row label (click: open or close, pick).
-                let label_rect = Rect::from_min_max(Pos2::new(area.left(), top), Pos2::new(track.left(), top + lane_h));
+                let label_rect = Rect::from_min_max(Pos2::new(area.left(), line_top), Pos2::new(track.left(), top + lane_h));
+                if sub.is_none() && !number.is_empty() {
+                    p.text(Pos2::new(track.left() - 6.0, top + 10.0), Align2::RIGHT_CENTER, &number, FontId::proportional(13.0), alpha(col, faint.max(0.7)));
+                }
                 let (title, note) = match sub {
                     None => {
                         let info = self.ev.clocks.get(&r.group.id);
                         let kind = match r.group.kind {
                             Ck::Absolute => format!("UTC · ± {}", clock_view::err_text(r.subs.iter().map(|s| self.ev.clocks.get(&s.clock).error_s).fold(0.0, f64::max) * sig)),
                             Ck::Relative => format!("relative · ± {}", clock_view::err_text(info.error_s * sig)),
-                            Ck::None => "no anchor, no link".to_string(),
+                            Ck::None => "no anchor: no time scale".to_string(),
                         };
                         let who = if r.subs.len() == 1 { r.subs[0].name.clone() } else { format!("{} sources", r.subs.len()) };
                         (format!("{} {who}", if self.tls.expanded.contains(&r.group.id) { "v" } else { ">" }), kind)
@@ -701,24 +744,41 @@ impl App {
                         }
                         let over = max.is_some_and(|m| e.err() * sig > m);
                         let ec = if over { Color32::from_rgb(235, 80, 80) } else { col };
-                        let (cy, half) = (top + lane_h * 0.5, lane_h * 0.5 - 5.0);
-                        // Clock margin: fades out from the centre.
-                        let (m0, m1) = (tx(t0 - reach), tx(t1 + reach));
-                        const LAYERS: usize = 6;
-                        for k in 0..LAYERS {
-                            let f = 1.0 - k as f32 / LAYERS as f32;
-                            let (a, b) = (tx(t0) + (m0 - tx(t0)) * f, tx(t1) + (m1 - tx(t1)) * f);
-                            let r = Rect::from_min_max(Pos2::new(a.max(track.left()), cy - half), Pos2::new(b.min(track.right()).max(a.max(track.left()) + 1.0), cy + half));
-                            p.rect_filled(r, 2.0, alpha(ec, 0.035 * faint));
-                        }
-                        // The event: a mark for a moment, a bar for a span.
-                        let (x0, x1) = (tx(t0).max(track.left()), tx(t1).min(track.right()));
-                        let core = Rect::from_min_max(Pos2::new(x0, cy - half + 3.0), Pos2::new(x1.max(x0 + 2.0), cy + half - 3.0));
+                        let (cy, half) = (top + lane_h * 0.5, lane_h * 0.5 - 4.0);
+                        // The source's media is a square box the lane's height; findings sit on it,
+                        // a little lower.
                         let bar = e.detail == AUDIO_BAR;
-                        let core = if bar { core.shrink2(Vec2::new(0.0, 4.0)) } else { core };
-                        p.rect_filled(core, 2.0, alpha(ec, if bar { 0.22 } else { 0.85 } * faint));
-                        if core.width() > 44.0 {
-                            p.text(core.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &e.label, FontId::proportional(10.0), Color32::BLACK);
+                        let (y0, y1) = if bar { (cy - half, cy + half) } else { (cy - half + 4.0, cy + half - 4.0) };
+                        // Clock margins: see-through extensions of the box to the left and right,
+                        // as high as it, with their ± inside when it fits (not on unanchored rows:
+                        // no time scale, so no margin).
+                        if reach > 0.0 && r.group.kind != Ck::None {
+                            for (a, b) in [(t0 - reach, t0), (t1, t1 + reach)] {
+                                let m = Rect::from_min_max(Pos2::new(tx(a).max(track.left()), y0), Pos2::new(tx(b).min(track.right()), y1));
+                                if m.width() < 0.5 {
+                                    continue;
+                                }
+                                p.rect_filled(m, 0.0, alpha(ec, 0.22 * faint));
+                                let txt = format!("±{}", clock_view::err_text(reach));
+                                if m.width() > txt.chars().count() as f32 * 5.6 + 6.0 {
+                                    p.text(m.center(), Align2::CENTER_CENTER, txt, FontId::monospace(9.5), alpha(ec, 0.95));
+                                }
+                            }
+                        }
+                        // The event: a mark for a moment, a box for a span.
+                        let (x0, x1) = (tx(t0).max(track.left()), tx(t1).min(track.right()));
+                        let core = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1.max(x0 + 2.0), y1));
+                        if bar {
+                            p.rect_filled(core, 0.0, alpha(ec, 0.16 * faint));
+                            p.rect_stroke(core, 0.0, Stroke::new(1.0, alpha(ec, 0.8 * faint)), egui::StrokeKind::Inside);
+                            if core.width() > 44.0 {
+                                p.text(core.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, &s.name, FontId::proportional(10.5), alpha(TEXT, 0.8 * faint));
+                            }
+                        } else {
+                            p.rect_filled(core, 0.0, alpha(ec, 0.85 * faint));
+                            if core.width() > 44.0 {
+                                p.text(core.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &e.label, FontId::proportional(10.0), Color32::BLACK);
+                            }
                         }
                         // Measurement error: whiskers from the event's ends.
                         if whisker > 0.0 {
@@ -750,7 +810,7 @@ impl App {
             // Evidence on the rows: links between them, anchors pinned to the axis.
             let mut ypos: BTreeMap<&str, (f32, f64)> = BTreeMap::new();
             for (li, line) in lines.iter().enumerate() {
-                let cy = area.top() + ruler_h + li as f32 * lane_h + lane_h * 0.5;
+                let cy = line_y(li).1 + lane_h * 0.5;
                 match line {
                     Line::Group(r) => {
                         let sh = shift_of(&self.tls, r, v0);
@@ -822,9 +882,9 @@ impl App {
             if ev_hover.is_some() && hover.is_none() {
                 hover = ev_hover;
             }
-            // Playheads: one line per row, stronger in the active group; a click on the ruler
-            // moves the active group's (or, with nothing selected, the UTC one).
-            let ph_col = Color32::from_rgb(255, 210, 90);
+            // Playheads: one line per row (over its ruler too), stronger in the active group; a
+            // click on a lane's ruler moves that lane's.
+            let ph_col = PLAYHEAD;
             let active = self.active_clock().map(|c| self.ev.clocks.get(&c));
             for (li, line) in lines.iter().enumerate() {
                 let r = match line {
@@ -837,23 +897,18 @@ impl App {
                     continue;
                 }
                 let on = active.as_ref().is_some_and(|a| (a.kind == Ck::Absolute && abs) || a.group == r.group.id);
-                let top = area.top() + ruler_h + li as f32 * lane_h;
-                p.line_segment([Pos2::new(x, top), Pos2::new(x, top + lane_h)], Stroke::new(if on { 2.0 } else { 1.0 }, if on { ph_col } else { ph_col.gamma_multiply(0.5) }));
-            }
-            if resp.clicked_by(egui::PointerButton::Primary) {
-                if let Some(h) = resp.interact_pointer_pos().filter(|h| h.y < area.top() + ruler_h && h.x > track.left()) {
-                    let t = v0 + ((h.x - track.left()) / track.width()) as f64 * span;
-                    match active.as_ref().filter(|a| a.kind != Ck::Absolute) {
-                        Some(a) => {
-                            let sh = rows.iter().find(|r| r.group.id == a.group).map_or(0.0, |r| shift_of(&self.tls, r, v0));
-                            self.ph.set(false, &a.group, t - sh);
-                        }
-                        None => self.ph.set(true, "", t),
-                    }
+                let (line_top, top) = line_y(li);
+                let stroke = Stroke::new(if on { 2.0 } else { 1.0 }, if on { ph_col } else { ph_col.gamma_multiply(0.5) });
+                p.line_segment([Pos2::new(x, line_top), Pos2::new(x, top + lane_h)], stroke);
+                if top > line_top {
+                    p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 4.0, line_top), Pos2::new(x + 4.0, line_top), Pos2::new(x, line_top + 6.0)], stroke.color, Stroke::NONE));
                 }
             }
+            if let Some((abs, g, t)) = ruler_click {
+                self.ph.set(abs, &g, t);
+            }
             if rows.is_empty() {
-                p.text(Pos2::new(track.left() + 8.0, area.top() + ruler_h + 14.0), Align2::LEFT_CENTER, "findings from detectors and plugins appear here", FontId::proportional(11.0), DIM);
+                p.text(Pos2::new(track.left() + 8.0, area.top() + 14.0), Align2::LEFT_CENTER, "findings from detectors and plugins appear here", FontId::proportional(11.0), DIM);
             }
             if let Some(g) = toggle {
                 if !self.tls.expanded.remove(&g) {

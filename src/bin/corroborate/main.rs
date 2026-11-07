@@ -94,6 +94,8 @@ const WARN: Color32 = Color32::from_rgb(224, 164, 88);
 const SEL: Color32 = Color32::from_rgb(95, 179, 161);
 const GOOD: Color32 = Color32::from_rgb(140, 220, 110);
 const LIVE: Color32 = Color32::from_rgb(255, 80, 80);
+/// Playheads, wherever they are drawn (timeline, source waveform, hum trace).
+const PLAYHEAD: Color32 = Color32::from_rgb(255, 210, 90);
 /// An output (or use case) with nothing on it: not built yet, or the signal is too weak for it.
 const GHOST: Color32 = Color32::from_rgb(88, 94, 104);
 
@@ -1160,6 +1162,49 @@ impl App {
 
     // ---------------- frame
 
+    /// PC streams: the audio devices of this computer (microphones, virtual mics, capture cards,
+    /// as ffmpeg lists them). A click adds a SOURCER on that device; one already used shows green
+    /// and a click selects its node.
+    fn streams_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(DIM, "PC streams");
+            let mut add: Option<String> = None;
+            let mut pick: Option<NodeId> = None;
+            for m in &self.mics {
+                let input = format!("mic:{m}");
+                let used = (0..self.nodes.len()).find(|&i| !self.nodes[i].hidden && matches!(&self.nodes[i].kind, Kind::Sourcer { input: x } if *x == input));
+                let text = egui::RichText::new(m).size(11.5).color(if used.is_some() { GOOD } else { TEXT });
+                let r = ui.add(egui::Button::new(text).small()).on_hover_text(if used.is_some() { "in use: click to select its source" } else { "add a source listening to this device (live)" });
+                if r.clicked() {
+                    match used {
+                        Some(i) => pick = Some(i),
+                        None => add = Some(input),
+                    }
+                }
+            }
+            if self.mics.is_empty() {
+                ui.colored_label(DIM, "not looked yet");
+            }
+            if ui.small_button(if self.mics.is_empty() { "Find devices" } else { "↻" }).on_hover_text("ask ffmpeg for this computer's audio devices").clicked() {
+                match corroborate::ingest::list_microphones() {
+                    Ok(m) => self.mics = m,
+                    Err(e) => self.msg = e,
+                }
+            }
+            if let Some(input) = add {
+                let k = self.nodes.iter().filter(|n| !n.hidden).count() as f32;
+                // Near the canvas's top-left corner as seen, a step further for each node.
+                let at = ((Vec2::splat(60.0 + 30.0 * (k % 6.0)) - self.pan) / self.zoom).to_pos2();
+                let n = self.add(Kind::Sourcer { input }, at);
+                self.pick_only(n);
+                self.save_project();
+            }
+            if let Some(i) = pick {
+                self.pick_only(i);
+            }
+        });
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
@@ -1266,11 +1311,14 @@ impl App {
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
         });
+        egui::Panel::top("streams").frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(10, 4)).stroke(Stroke::new(1.0, LINE))).show(ui, |ui| {
+            self.streams_bar(ui);
+        });
         let open = self.tls.open;
         egui::Panel::bottom(if open { "timeline" } else { "timeline-closed" })
             .frame(egui::Frame::new().fill(PANEL).inner_margin(0.0))
             .resizable(open)
-            .default_size(125.0)
+            .default_size(190.0)
             .size_range(if open { 80.0..=700.0 } else { 0.0..=f32::INFINITY })
             .show(ui, |ui| {
             self.timeline_view(ui);

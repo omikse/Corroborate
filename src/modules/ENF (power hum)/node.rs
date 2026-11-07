@@ -301,8 +301,9 @@ fn grid_summary(path: &str) -> Result<String, String> {
         .clone()
 }
 
-/// The hum frequency over source time (folded to the fundamental); faded where unclear.
-fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)], ran: bool) {
+/// The hum frequency over source time (folded to the fundamental); faded where unclear. `head` is
+/// the playhead on the node's clock: a cursor, and the reading there instead of the newest.
+fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)], ran: bool, head: Option<f64>) {
     p.rect_filled(rect, 4.0 * z, BG);
     let font = FontId::proportional(10.0 * z);
     p.text(rect.left_top() + Vec2::new(6.0, 4.0) * z, Align2::LEFT_TOP, "hum frequency", font.clone(), DIM);
@@ -339,7 +340,13 @@ fn trace(p: &egui::Painter, rect: Rect, z: f32, pts: &[(f64, f64, bool)], ran: b
             p.circle_filled(Pos2::new(x(t), y(v)), 1.2 * z, alpha(HUM, 0.25));
         }
     }
-    let last = pts.iter().rev().find(|q| q.2).map_or(String::new(), |q| format!("{:.3} Hz", q.1));
+    let mut last = pts.iter().rev().find(|q| q.2).map_or(String::new(), |q| format!("{:.3} Hz", q.1));
+    if let Some(h) = head.filter(|h| (t0..=t1).contains(h)) {
+        let hx = x(h);
+        p.line_segment([Pos2::new(hx, plot.top()), Pos2::new(hx, plot.bottom())], Stroke::new(1.5 * z, PLAYHEAD));
+        // The clear reading nearest the playhead (within 5 s).
+        last = pts.iter().filter(|q| q.2 && (q.0 - h).abs() < 5.0).min_by(|a, b| (a.0 - h).abs().total_cmp(&(b.0 - h).abs())).map_or("no reading here".into(), |q| format!("{:.3} Hz", q.1));
+    }
     p.text(rect.right_top() + Vec2::new(-6.0, 4.0) * z, Align2::RIGHT_TOP, last, font, TEXT);
 }
 
@@ -418,7 +425,8 @@ impl crate::look::NodeLook for Look {
             // The section rule applied, so the line shows only readings that count.
             (sections(&s.enf.points[from..]).iter().map(|q| (q.t, q.hz, q.ok)).collect::<Vec<_>>(), s.running || s.done)
         };
-        trace(&p, band, z, &pts, ran);
+        let head = app.clock_of(i).and_then(|c| app.playhead_on(&c));
+        trace(&p, band, z, &pts, ran, head);
 
         // Grid data, changed here.
         if let Kind::Enf { grid } = &mut app.nodes[i].kind {

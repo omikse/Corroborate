@@ -438,3 +438,37 @@ fn not_comparable_and_the_result_file() {
     let j = app.result_json(&[a]);
     assert!(j.contains("\"clocks\":[{") && j.contains("\"kind\":\"absolute\"") && j.contains("\"type\":\"anchor\"") && j.contains("\"not_comparable\":[]"), "{j}");
 }
+
+/// The canvas outlines each group and numbers it; the timeline gives each group its own lane and
+/// ruler: UTC for a dated source, time on the reference clock for linked ones, none unanchored.
+/// Media are square boxes with see-through margins either side.
+#[test]
+fn timeline_lanes_per_group() {
+    use corroborate::clock::Link;
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let a = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 40.0));
+    let enf = app.add(Kind::Enf { grid: String::new() }, Pos2::new(330.0, 40.0));
+    app.wire(a, "audio", enf, "audio");
+    let b = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 330.0));
+    let c = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(700.0, 330.0));
+    let e = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(1050.0, 60.0));
+    let utc0 = 1_467_916_147.0;
+    anchor(app, a, utc0, 20.0);
+    for (i, s) in [(a, 300.0), (b, 200.0), (c, 150.0), (e, 120.0)] {
+        app.nodes[i].state.lock().unwrap().audio_s = s;
+    }
+    d.frames(3);
+    let app = d.app();
+    let (cb, cc) = (app.clock_of(b).unwrap(), app.clock_of(c).unwrap());
+    app.ev.manual_links.push(Link { a: cb, t_a: 30.0, b: cc, t_b: 0.0, error_s: 4.0, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    app.follow = false;
+    app.tl = (utc0 - 40.0, utc0 + 360.0);
+    d.frames(4);
+    let app = d.app();
+    assert_eq!(app.tls.row_y.len(), 3, "one lane per group: dated, linked, unanchored");
+    let ys: Vec<f32> = app.tls.row_y.iter().map(|r| r.1).collect();
+    assert!(ys[1] - ys[0] > 40.0, "the dated lane has its own ruler above the lane: {ys:?}");
+    d.shot("timeline_lanes");
+}

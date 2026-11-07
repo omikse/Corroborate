@@ -549,7 +549,7 @@ fn waveform(ui: &mut egui::Ui, st: &Shared, z: f32, i: NodeId, ph: Option<(f64, 
     if let Some((t, active)) = set.map(|t| (t, true)).or(ph) {
         let x = rect.left() + ((t - t0) / len) as f32 * rect.width();
         if (rect.left()..=rect.right()).contains(&x) {
-            let c = Color32::from_rgb(255, 210, 90);
+            let c = PLAYHEAD;
             p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(if active { 2.0 } else { 1.0 }, if active { c } else { c.gamma_multiply(0.5) }));
         }
     }

@@ -38,7 +38,7 @@ impl Drive {
 
     pub fn with(app: App) -> Self {
         let gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-        let h = Harness::builder().with_size(Vec2::new(1400.0, 780.0)).wgpu().build_ui_state(
+        let h = Harness::builder().with_size(Vec2::new(1400.0, 900.0)).wgpu().build_ui_state(
             |ui, app: &mut App| {
                 ui.ctx().set_visuals(egui::Visuals::dark());
                 app.frame(ui);
