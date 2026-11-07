@@ -42,15 +42,15 @@ fn sync_obs(events: &[(f64, Option<(f64, f64)>)], err: f64) -> Vec<Obs> {
 
 /// Sync, then locate the bang from its arrival on each stream's own clock.
 fn run(obs: &[Obs], sync_err_floor: f64) -> corroborate::locate::Fix {
-    let sol = solve(4, obs, &[]);
+    let sol = solve(4, obs, &[], corroborate::clock::RATE_PRIOR);
     let arrivals: Vec<Arrival> = RECS
         .iter()
         .enumerate()
         .map(|(i, &r)| {
             let t_local = T_BANG + dist(BANG, r) / C_SOUND - OFFSETS[i];
-            let Offset::Solved { offset, error_s } = sol.offsets[i] else { panic!("stream {i} unsolved") };
-            let t_err = (0.002f64.powi(2) + error_s.powi(2) + sync_err_floor.powi(2)).sqrt();
-            Arrival { at: place(r.0, r.1, 5.0), t: offset + t_local, error_s: t_err }
+            let Offset::Solved(f) = sol.offsets[i] else { panic!("stream {i} unsolved") };
+            let t_err = (0.002f64.powi(2) + f.error_at(t_local).powi(2) + sync_err_floor.powi(2)).sqrt();
+            Arrival { at: place(r.0, r.1, 5.0), t: f.at(t_local), error_s: t_err }
         })
         .collect();
     locate(&arrivals, C_SOUND).unwrap()

@@ -14,9 +14,15 @@
 //! evidence is unanchored (`Kind::None`). Errors are 1 sigma and add up along chains by
 //! root-sum-square. Each clock's error is split into the share of each piece of evidence
 //! (`breakdown`): the solve is linear, so a share is exactly (sensitivity × error)². Evidence more
-//! than 3 sigma off the solution is a contradiction. Drift is not modelled: only offsets.
+//! than 3 sigma off the solution is a contradiction.
+//!
+//! Clocks drift: each has a rate as well as an offset (`sync`), learnt from evidence at
+//! different times on the same clocks and otherwise 0 ± `RATE_PRIOR`. So a clock's error is
+//! smallest at its evidence (`center`) and grows away from it; `at`, `back` and `error_at` give
+//! time and error at any moment. `offset` is where the clock's 0 lands, `error_s` the error at
+//! `center`.
 
-use crate::sync::{self, AnchorObs, Obs, Offset};
+use crate::sync::{self, AnchorObs, Fit, Obs, Offset};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type ClockId = String;
@@ -29,6 +35,11 @@ const MIN_ERROR_S: f64 = 1e-3;
 
 /// Residuals over this many sigmas are contradictions.
 const CONTRADICTION_SIGMA: f64 = 3.0;
+
+/// How fast an unknown clock may run against UTC (1 sigma): 100 ppm, 0.36 s an hour. Good
+/// phones drift 2–14 ppm, 13 of 16 devices measured were within 100 ppm, the worst 417 ppm
+/// (Guggenberger, Lux, Böszörmenyi 2015).
+pub const RATE_PRIOR: f64 = 100e-6;
 
 /// Moment `t` on `clock` is at `utc` (Unix seconds), ± `error_s` (1 sigma).
 #[derive(Clone, Debug, PartialEq)]
@@ -76,17 +87,59 @@ pub struct ClockInfo {
     /// Absolute: the UTC of this clock's 0. Relative: what to add to a time on this clock to get
     /// the time on the group's reference clock. None: 0.
     pub offset: f64,
-    /// The offset's error, seconds (1 sigma).
+    /// The error at `center` (where the clock's evidence is), seconds (1 sigma).
     pub error_s: f64,
+    /// How much faster the group's time runs than this clock, minus 1 (1e-6 is 1 ppm), its
+    /// error, and where the clock's evidence is (the mean time on the clock, seconds).
+    pub rate: f64,
+    pub rate_error: f64,
+    pub center: f64,
+    /// The solved fit; `at`, `back` and `error_at` read it.
+    pub fit: Fit,
     /// `"utc"` for absolute clocks, the reference clock for relative ones, itself when unanchored.
     pub group: ClockId,
-    /// Each piece of evidence's share of the variance (error²), largest first. Sums to error².
+    /// Each piece of evidence's share of the variance (error²) at `center`, largest first.
+    /// With `speed_share`, sums to error².
     pub breakdown: Vec<(Ev, f64)>,
+    /// The share of the variance at `center` from clock speeds no evidence pins down.
+    pub speed_share: f64,
 }
+
+const ZERO: Fit = Fit { offset: 0.0, rate: 0.0, center: 0.0, var_offset: 0.0, var_rate: 0.0, cov: 0.0 };
 
 impl ClockInfo {
     fn alone(id: &str) -> ClockInfo {
-        ClockInfo { kind: Kind::None, offset: 0.0, error_s: 0.0, group: id.into(), breakdown: Vec::new() }
+        ClockInfo::from_fit(Kind::None, id.into(), ZERO, Vec::new(), 0.0)
+    }
+
+    fn from_fit(kind: Kind, group: ClockId, fit: Fit, breakdown: Vec<(Ev, f64)>, speed_share: f64) -> ClockInfo {
+        ClockInfo {
+            kind,
+            offset: fit.at(0.0),
+            error_s: fit.var_offset.sqrt(),
+            rate: fit.rate,
+            rate_error: fit.var_rate.sqrt(),
+            center: fit.center,
+            fit,
+            group,
+            breakdown,
+            speed_share,
+        }
+    }
+
+    /// Moment `t` on this clock in the group's time (UTC when absolute).
+    pub fn at(&self, t: f64) -> f64 {
+        self.fit.at(t)
+    }
+
+    /// The moment on this clock at group time `s`.
+    pub fn back(&self, s: f64) -> f64 {
+        self.fit.back(s)
+    }
+
+    /// The error (1 sigma) of `at(t)`: smallest at the evidence, growing with unknown drift.
+    pub fn error_at(&self, t: f64) -> f64 {
+        self.fit.error_at(t)
     }
 }
 
@@ -103,7 +156,7 @@ impl Clocks {
     /// A clock's info; a clock no evidence names is unanchored.
     pub fn get(&self, id: &str) -> ClockInfo {
         if id == UTC {
-            return ClockInfo { kind: Kind::Absolute, offset: 0.0, error_s: 0.0, group: UTC.into(), breakdown: Vec::new() };
+            return ClockInfo::from_fit(Kind::Absolute, UTC.into(), ZERO, Vec::new(), 0.0);
         }
         self.clocks.get(id).cloned().unwrap_or_else(|| ClockInfo::alone(id))
     }
@@ -111,7 +164,7 @@ impl Clocks {
     /// Time `t` on `clock` in UTC, with the clock's error, when the clock is absolute.
     pub fn to_utc(&self, clock: &str, t: f64) -> Option<(f64, f64)> {
         let c = self.get(clock);
-        (c.kind == Kind::Absolute).then(|| (c.offset + t, c.error_s))
+        (c.kind == Kind::Absolute).then(|| (c.at(t), c.error_at(t)))
     }
 
     pub fn is_contradiction(&self, e: Ev) -> bool {
@@ -119,13 +172,13 @@ impl Clocks {
     }
 }
 
-/// An anchor in a group's own numbering: clock, offset (UTC of its 0), error.
-type LocalAnchor = (Ev, usize, f64, f64);
+/// An anchor in a group's own numbering: clock, t, offset there (UTC − t), error.
+type LocalAnchor = (Ev, usize, f64, f64, f64);
 /// A link in a group's own numbering: a, t_a, b, t_b, error.
 type LocalLink = (Ev, usize, f64, usize, f64, f64);
 
-/// Offsets of `m` clocks from the switched-on evidence of one connected group.
-fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<(f64, f64)> {
+/// Fits of `m` clocks from the switched-on evidence of one connected group.
+fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<Fit> {
     // A link is an event seen on two clocks; its error is split so the pair adds up to it.
     let obs: Vec<Obs> = links
         .iter()
@@ -135,13 +188,13 @@ fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<(f64, 
             [Obs { stream: a, event: k, t: t_a, error_s: e }, Obs { stream: b, event: k, t: t_b, error_s: e }]
         })
         .collect();
-    let an: Vec<AnchorObs> = anchors.iter().map(|&(_, s, offset, e)| AnchorObs { stream: s, offset, error_s: e }).collect();
-    sync::solve(m, &obs, &an)
+    let an: Vec<AnchorObs> = anchors.iter().map(|&(_, s, t, offset, e)| AnchorObs { stream: s, t, offset, error_s: e }).collect();
+    sync::solve(m, &obs, &an, RATE_PRIOR)
         .offsets
         .into_iter()
         .map(|o| match o {
-            Offset::Solved { offset, error_s } => (offset, error_s),
-            Offset::Unsolved => (f64::NAN, f64::NAN),
+            Offset::Solved(f) => f,
+            Offset::Unsolved => Fit { offset: f64::NAN, var_offset: f64::NAN, ..ZERO },
         })
         .collect()
 }
@@ -161,15 +214,15 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
     let mut ln: Vec<LocalLink> = Vec::new();
     for (i, a) in anchors.iter().enumerate().filter(|(_, a)| a.enabled) {
         if let Some(c) = ix(&a.clock) {
-            an.push((Ev::Anchor(i), c, a.utc - a.t, err(a.error_s)));
+            an.push((Ev::Anchor(i), c, a.t, a.utc - a.t, err(a.error_s)));
         }
     }
     for (i, l) in links.iter().enumerate().filter(|(_, l)| l.enabled) {
         let e = err(l.error_s);
         match (ix(&l.a), ix(&l.b)) {
             (Some(a), Some(b)) if a != b => ln.push((Ev::Link(i), a, l.t_a, b, l.t_b, e)),
-            (Some(a), None) => an.push((Ev::Link(i), a, l.t_b - l.t_a, e)),
-            (None, Some(b)) => an.push((Ev::Link(i), b, l.t_a - l.t_b, e)),
+            (Some(a), None) => an.push((Ev::Link(i), a, l.t_a, l.t_b - l.t_a, e)),
+            (None, Some(b)) => an.push((Ev::Link(i), b, l.t_b, l.t_a - l.t_b, e)),
             _ => {}
         }
     }
@@ -196,7 +249,7 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
             continue;
         }
         let local = |c: usize| members.binary_search(&c).unwrap();
-        let ga: Vec<LocalAnchor> = an.iter().filter(|x| roots[x.1] == r).map(|&(e, c, o, s)| (e, local(c), o, s)).collect();
+        let ga: Vec<LocalAnchor> = an.iter().filter(|x| roots[x.1] == r).map(|&(e, c, t, o, s)| (e, local(c), t, o, s)).collect();
         let gl: Vec<LocalLink> =
             ln.iter().filter(|x| roots[x.1] == r).map(|&(e, a, ta, b, tb, s)| (e, local(a), ta, local(b), tb, s)).collect();
         if ga.is_empty() && gl.is_empty() {
@@ -214,34 +267,35 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
         for k in 0..ga.len() + gl.len() {
             let (mut pa, mut pl) = (ga.clone(), gl.clone());
             let ev = if k < ga.len() {
-                pa[k].2 += pa[k].3;
+                pa[k].3 += pa[k].4;
                 pa[k].0
             } else {
                 let j = k - ga.len();
                 pl[j].2 += pl[j].5;
                 pl[j].0
             };
-            for (c, (o, _)) in offsets(m, &pa, &pl).into_iter().enumerate() {
-                let d = o - base[c].0;
+            for (c, f) in offsets(m, &pa, &pl).into_iter().enumerate() {
+                let at = base[c].center;
+                let d = f.at(at) - base[c].at(at);
                 shares[c].push((ev, d * d));
             }
         }
         for (c, mut br) in shares.into_iter().enumerate() {
             br.retain(|(_, v)| *v > 1e-18);
             br.sort_by(|x, y| y.1.total_cmp(&x.1));
-            let (offset, error_s) = base[c];
-            out.clocks.insert(ids[members[c]].into(), ClockInfo { kind, offset, error_s, group: group.clone(), breakdown: br });
+            let speed_share = (base[c].var_offset - br.iter().map(|x| x.1).sum::<f64>()).max(0.0);
+            out.clocks.insert(ids[members[c]].into(), ClockInfo::from_fit(kind, group.clone(), base[c], br, speed_share));
         }
 
         // Residuals of each piece of evidence against the solution.
-        for &(ev, c, o, s) in &ga {
-            let z = (base[c].0 - o) / s;
+        for &(ev, c, t, o, s) in &ga {
+            let z = (base[c].at(t) - t - o) / s;
             if z.abs() > CONTRADICTION_SIGMA {
                 out.contradictions.push((ev, z));
             }
         }
         for &(ev, a, ta, b, tb, s) in &gl {
-            let z = (base[a].0 + ta - base[b].0 - tb) / s;
+            let z = (base[a].at(ta) - base[b].at(tb)) / s;
             if z.abs() > CONTRADICTION_SIGMA {
                 out.contradictions.push((ev, z));
             }
@@ -393,7 +447,7 @@ mod tests {
             &[link("a", 1.0, "b", 0.0, 0.5), link("b", 4.0, "c", 15.0, 1.5), link("a", 3.0, "c", 13.0, 1.0)],
         );
         for (id, info) in &c.clocks {
-            let sum: f64 = info.breakdown.iter().map(|x| x.1).sum();
+            let sum: f64 = info.breakdown.iter().map(|x| x.1).sum::<f64>() + info.speed_share;
             assert!((sum - info.error_s.powi(2)).abs() < 1e-6 * info.error_s.powi(2).max(1.0), "{id}: {sum} vs {}", info.error_s.powi(2));
             assert!(info.breakdown.windows(2).all(|w| w[0].1 >= w[1].1), "largest first");
         }
@@ -411,6 +465,37 @@ mod tests {
         assert_eq!(c.get("b").kind, Kind::None);
         assert!(c.clocks.contains_key("b"), "a switched-off link still names its clocks");
     }
+    #[test]
+    fn a_drifting_clock_is_fitted_not_contradicted() {
+        // b runs 300 ppm slow against a over an hour: links 5 ms each, every 10 minutes.
+        let l: Vec<Link> = (0..7).map(|k| {
+            let t_a = 600.0 * k as f64;
+            link("a", t_a, "b", (t_a - 20.0) / (1.0 + 300e-6), 0.005)
+        }).collect();
+        let c = solve(&[anchor("a", 0.0, 1000.0, 0.01)], &l);
+        assert!(c.contradictions.is_empty(), "{:?}", c.contradictions);
+        let (a, b) = (c.get("a"), c.get("b"));
+        // Only the speed of b against a is known; against UTC each keeps half the unknown.
+        assert!((b.rate - a.rate - 300e-6).abs() < 3e-6, "rates {} {}", a.rate, b.rate);
+        // 3000 s on b is 20 s + 3000.9 s on a.
+        let on_a = a.back(b.at(3000.0));
+        assert!((on_a - (20.0 + 3000.0 * (1.0 + 300e-6))).abs() < 0.01, "{on_a}");
+        assert!((b.back(b.at(1234.0)) - 1234.0).abs() < 1e-9);
+        // Without rates the hour's 1 s slide would contradict the links.
+        let fixed = |l: &Link| (l.t_a - 20.0 - l.t_b).abs();
+        assert!(fixed(&l[6]) > 1.0);
+    }
+
+    #[test]
+    fn one_anchor_errors_grow_with_unknown_drift() {
+        let c = solve(&[anchor("a", 100.0, 1100.0, 0.01)], &[]);
+        let a = c.get("a");
+        assert!((a.error_s - 0.01).abs() < 1e-6 && a.center == 100.0);
+        let (_, e) = c.to_utc("a", 100.0 + 3600.0).unwrap();
+        // An hour from its anchor, an unknown speed adds 0.36 s (100 ppm).
+        assert!((e - 0.36).abs() < 0.01, "{e}");
+    }
+
     #[test]
     fn evidence_from_json() {
         let a = anchors_from_json(r#"[{"t":12.5,"utc":1000,"error_s":2},{"clock":"n7","t":1,"utc":5},{"t":3}]"#, "n2", "n9");

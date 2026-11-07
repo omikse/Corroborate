@@ -1,17 +1,25 @@
-//! Sync solver: finds each stream's clock offset from events heard (or seen) in several
-//! streams at once, plus any anchors (streams whose UTC offset is already known).
+//! Sync solver: finds each stream's clock offset and speed from events heard (or seen) in
+//! several streams at once, plus any anchors (moments whose shared time is already known).
 //!
 //! Model, for stream i and shared event k:
-//!     offset_i + t_ik = T_k   (± error_ik)
-//! where t_ik is the event's time on stream i's own clock, offset_i turns that clock into
-//! the shared one, and T_k is when the event happened. An anchor adds offset_i = a_i (± error).
+//!     t_ik + offset_i + rate_i · (t_ik − center_i) = T_k   (± error_ik)
+//! where t_ik is the event's time on stream i's own clock, offset_i turns that clock into the
+//! shared one at `center_i` (the mean time of the stream's evidence), rate_i is how much faster
+//! the shared time runs than the stream's clock (clock drift: 1e-6 is 1 ppm, 3.6 ms an hour),
+//! and T_k is when the event happened. An anchor says moment t on stream i is at shared time u.
 //! The error of an observation should include the travel-time spread of the sound (up to
 //! distance / 343 m/s), which is what the location step later uses.
 //!
-//! Weighted least squares over all offsets and event times. Without any anchor, the first
-//! connected stream is the reference (offset 0) and the result is relative to it. Streams
+//! Recording devices drift by a few to a few hundred ppm (Guggenberger, Lux, Böszörmenyi 2015,
+//! "An Analysis of Time Drift in Hand-Held Recording Devices": 2–14 ppm for good phones, up to
+//! 417 ppm audio and −554 ppm video), so each rate has a prior of 0 ± `rate_prior` (1 sigma).
+//! A rate is only learnt from evidence at different times on the same pair of clocks; without
+//! such evidence it stays 0 and its prior makes errors grow away from the evidence.
+//!
+//! Weighted least squares over all offsets, rates and event times. Without any anchor, the first
+//! connected stream is the reference (offset 0, rate 0) and the result is relative to it. Streams
 //! with no path of shared events to an anchor or the reference are reported as unsolved,
-//! never guessed. Every offset comes with its error, and every observation with its
+//! never guessed. Every offset and rate comes with its error, and every observation with its
 //! residual, so outliers (wrong matches) are visible.
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,16 +35,50 @@ pub struct Obs {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnchorObs {
     pub stream: usize,
-    /// UTC of the stream's clock zero, Unix seconds.
+    /// The moment on the stream's clock, seconds.
+    pub t: f64,
+    /// Shared time (UTC, Unix seconds) of that moment, minus `t`: the offset it implies there.
     pub offset: f64,
     pub error_s: f64,
 }
 
+/// A solved clock: shared time of moment t is `t + offset + rate · (t − center)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fit {
+    /// Offset at `center`, seconds.
+    pub offset: f64,
+    /// Rate of the shared time against this clock, minus 1 (1e-6 is 1 ppm).
+    pub rate: f64,
+    /// The mean time of this clock's evidence, seconds on the clock.
+    pub center: f64,
+    /// Variance of `offset`, of `rate`, and their covariance.
+    pub var_offset: f64,
+    pub var_rate: f64,
+    pub cov: f64,
+}
+
+impl Fit {
+    /// Shared time of moment `t` on this clock.
+    pub fn at(&self, t: f64) -> f64 {
+        t + self.offset + self.rate * (t - self.center)
+    }
+
+    /// The moment on this clock at shared time `s` (inverse of `at`).
+    pub fn back(&self, s: f64) -> f64 {
+        (s - self.offset + self.rate * self.center) / (1.0 + self.rate)
+    }
+
+    /// Error (1 sigma) of `at(t)`.
+    pub fn error_at(&self, t: f64) -> f64 {
+        let d = t - self.center;
+        (self.var_offset + d * d * self.var_rate + 2.0 * d * self.cov).max(0.0).sqrt()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Offset {
-    /// Offset and one-sigma error, seconds. Absolute (UTC) when anchors were given,
-    /// otherwise relative to the reference stream.
-    Solved { offset: f64, error_s: f64 },
+    /// Absolute (UTC) when anchors were given, otherwise relative to the reference stream.
+    Solved(Fit),
     /// No chain of shared events to an anchor or the reference.
     Unsolved,
 }
@@ -49,6 +91,8 @@ pub struct Solution {
     pub reference: Option<usize>,
     /// Per observation (same order as the input): residual in seconds and in sigmas.
     pub residuals: Vec<(f64, f64)>,
+    /// Per anchor (same order as the input): residual in seconds and in sigmas.
+    pub anchor_residuals: Vec<(f64, f64)>,
 }
 
 impl Solution {
@@ -63,8 +107,9 @@ impl Solution {
     }
 }
 
-/// Solve offsets for `n_streams` streams.
-pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs]) -> Solution {
+/// Solve offsets and rates for `n_streams` streams; `rate_prior` is the 1-sigma spread of an
+/// unknown rate (0 pins every rate at 0: offsets only).
+pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f64) -> Solution {
     // Which streams can be solved: connected through shared events to an anchor (or reference).
     let n_events = obs.iter().map(|o| o.event + 1).max().unwrap_or(0);
     let mut comp: Vec<usize> = (0..n_streams + n_events).collect();
@@ -98,12 +143,22 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs]) -> Solution {
     };
     let solvable: Vec<bool> = (0..n_streams).map(|i| roots.contains(&find(&mut comp, i))).collect();
 
-    // Unknowns: offsets of solvable streams, then times of events touching them.
+    // Each stream's center: the mean time of its evidence (keeps offset and rate apart).
+    let mut sums = vec![(0.0, 0usize); n_streams];
+    for (s, t) in obs.iter().map(|o| (o.stream, o.t)).chain(anchors.iter().map(|a| (a.stream, a.t))) {
+        sums[s].0 += t;
+        sums[s].1 += 1;
+    }
+    let center: Vec<f64> = sums.iter().map(|&(s, n)| if n > 0 { s / n as f64 } else { 0.0 }).collect();
+
+    // Unknowns: offset and rate of each solvable stream, then times of events touching them.
+    // The reference stream has none: its offset and rate are zero by definition (the gauge).
+    let is_ref = |i: usize| reference == Some(i);
     let s_idx: Vec<Option<usize>> = {
         let mut k = 0;
-        solvable.iter().map(|&s| s.then(|| { k += 1; k - 1 })).collect()
+        (0..n_streams).map(|i| (solvable[i] && !is_ref(i)).then(|| { k += 2; k - 2 })).collect()
     };
-    let n_s = s_idx.iter().flatten().count();
+    let n_s = 2 * s_idx.iter().flatten().count();
     let mut e_idx: Vec<Option<usize>> = vec![None; n_events];
     let mut k = n_s;
     for o in obs.iter().filter(|o| solvable[o.stream]) {
@@ -125,20 +180,25 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs]) -> Solution {
         }
     };
     for o in obs.iter().filter(|o| solvable[o.stream]) {
-        let (si, ei) = (s_idx[o.stream].unwrap(), e_idx[o.event].unwrap());
-        // offset_i - T_k = -t_ik
-        add(&[(si, 1.0), (ei, -1.0)], -o.t, 1.0 / (o.error_s * o.error_s));
+        let ei = e_idx[o.event].unwrap();
+        let w = 1.0 / (o.error_s * o.error_s);
+        // offset_i + rate_i (t - c_i) - T_k = -t_ik
+        match s_idx[o.stream] {
+            Some(si) => add(&[(si, 1.0), (si + 1, o.t - center[o.stream]), (ei, -1.0)], -o.t, w),
+            None => add(&[(ei, -1.0)], -o.t, w),
+        }
     }
     if absolute {
         for an in anchors {
             if let Some(si) = s_idx[an.stream] {
-                add(&[(si, 1.0)], an.offset, 1.0 / (an.error_s * an.error_s));
+                add(&[(si, 1.0), (si + 1, an.t - center[an.stream])], an.offset, 1.0 / (an.error_s * an.error_s));
             }
         }
-    } else if let Some(si) = reference.and_then(|r| s_idx[r]) {
-        // Gauge: the reference stream's offset is zero by definition. A stiff constraint,
-        // so its own error comes out near zero and the others are relative to it.
-        add(&[(si, 1.0)], 0.0, 1e12);
+    }
+    // Each rate's prior: 0 ± rate_prior.
+    let w_rate = 1.0 / rate_prior.max(1e-12).powi(2);
+    for &si in s_idx.iter().flatten() {
+        add(&[(si + 1, 1.0)], 0.0, w_rate);
     }
 
     let inv = invert(a);
@@ -148,21 +208,49 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs]) -> Solution {
     };
     let offsets = (0..n_streams)
         .map(|i| match (s_idx[i], &inv) {
-            (Some(si), Some(m)) => Offset::Solved { offset: x[si], error_s: m[si][si].max(0.0).sqrt() },
+            (None, Some(_)) if is_ref(i) => {
+                Offset::Solved(Fit { offset: 0.0, rate: 0.0, center: center[i], var_offset: 0.0, var_rate: 0.0, cov: 0.0 })
+            }
+            (Some(si), Some(m)) => Offset::Solved(Fit {
+                offset: x[si],
+                rate: x[si + 1],
+                center: center[i],
+                var_offset: m[si][si].max(0.0),
+                var_rate: m[si + 1][si + 1].max(0.0),
+                cov: m[si][si + 1],
+            }),
             _ => Offset::Unsolved,
         })
         .collect();
+    let at = |s: usize, t: f64| -> Option<f64> {
+        inv.as_ref()?;
+        if is_ref(s) {
+            return Some(t);
+        }
+        let si = s_idx[s]?;
+        Some(t + x[si] + x[si + 1] * (t - center[s]))
+    };
     let residuals = obs
         .iter()
-        .map(|o| match (s_idx[o.stream], e_idx[o.event]) {
-            (Some(si), Some(ei)) if inv.is_some() => {
-                let r = x[si] + o.t - x[ei];
+        .map(|o| match (at(o.stream, o.t), e_idx[o.event]) {
+            (Some(s), Some(ei)) => {
+                let r = s - x[ei];
                 (r, r / o.error_s)
             }
             _ => (f64::NAN, f64::NAN),
         })
         .collect();
-    Solution { offsets, absolute, reference, residuals }
+    let anchor_residuals = anchors
+        .iter()
+        .map(|an| match at(an.stream, an.t) {
+            Some(s) if absolute => {
+                let r = s - (an.t + an.offset);
+                (r, r / an.error_s)
+            }
+            _ => (f64::NAN, f64::NAN),
+        })
+        .collect();
+    Solution { offsets, absolute, reference, residuals, anchor_residuals }
 }
 
 /// Gauss-Jordan inverse with partial pivoting. None when singular.
@@ -198,6 +286,8 @@ pub(crate) fn invert(mut a: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
 mod tests {
     use super::*;
 
+    const P: f64 = 1e-4;
+
     /// Three streams with true offsets, four shared events at true times.
     fn scene(err: f64) -> (Vec<f64>, Vec<Obs>) {
         let offsets = vec![1000.0, 1012.5, 987.25];
@@ -213,7 +303,7 @@ mod tests {
 
     fn solved(o: &Offset) -> (f64, f64) {
         match o {
-            Offset::Solved { offset, error_s } => (*offset, *error_s),
+            Offset::Solved(f) => (f.at(0.0), f.error_at(f.center)),
             Offset::Unsolved => panic!("unsolved"),
         }
     }
@@ -221,7 +311,7 @@ mod tests {
     #[test]
     fn relative_offsets_without_anchor() {
         let (truth, obs) = scene(0.1);
-        let s = solve(3, &obs, &[]);
+        let s = solve(3, &obs, &[], P);
         assert!(!s.absolute);
         assert_eq!(s.reference, Some(0));
         for i in 0..3 {
@@ -234,7 +324,7 @@ mod tests {
     #[test]
     fn anchor_makes_offsets_absolute_and_carries_its_error() {
         let (truth, obs) = scene(0.1);
-        let s = solve(3, &obs, &[AnchorObs { stream: 1, offset: truth[1], error_s: 2.0 }]);
+        let s = solve(3, &obs, &[AnchorObs { stream: 1, t: 0.0, offset: truth[1], error_s: 2.0 }], P);
         assert!(s.absolute);
         for i in 0..3 {
             let (o, e) = solved(&s.offsets[i]);
@@ -247,11 +337,11 @@ mod tests {
     #[test]
     fn two_anchors_shrink_the_error() {
         let (truth, obs) = scene(0.1);
-        let one = solve(3, &obs, &[AnchorObs { stream: 0, offset: truth[0], error_s: 2.0 }]);
+        let one = solve(3, &obs, &[AnchorObs { stream: 0, t: 0.0, offset: truth[0], error_s: 2.0 }], P);
         let two = solve(3, &obs, &[
-            AnchorObs { stream: 0, offset: truth[0], error_s: 2.0 },
-            AnchorObs { stream: 2, offset: truth[2], error_s: 2.0 },
-        ]);
+            AnchorObs { stream: 0, t: 0.0, offset: truth[0], error_s: 2.0 },
+            AnchorObs { stream: 2, t: 0.0, offset: truth[2], error_s: 2.0 },
+        ], P);
         assert!(solved(&two.offsets[1]).1 < solved(&one.offsets[1]).1);
     }
 
@@ -260,9 +350,9 @@ mod tests {
         let (_, mut obs) = scene(0.1);
         // Stream 3 only hears event 9, which nobody else heard.
         obs.push(Obs { stream: 3, event: 9, t: 5.0, error_s: 0.1 });
-        let s = solve(4, &obs, &[]);
+        let s = solve(4, &obs, &[], P);
         assert_eq!(s.offsets[3], Offset::Unsolved);
-        assert!(matches!(s.offsets[2], Offset::Solved { .. }));
+        assert!(matches!(s.offsets[2], Offset::Solved(_)));
     }
 
     #[test]
@@ -271,7 +361,7 @@ mod tests {
         // Stream 2's copy of event 1 was matched to the wrong bang, 5 s off.
         let bad = obs.iter().position(|o| o.stream == 2 && o.event == 1).unwrap();
         obs[bad].t += 5.0;
-        let s = solve(3, &obs, &[]);
+        let s = solve(3, &obs, &[], P);
         let out = s.outliers(3.0);
         assert!(out.contains(&bad), "outliers {out:?}");
     }
@@ -280,8 +370,48 @@ mod tests {
     fn noisier_observations_give_larger_errors() {
         let (_, tight) = scene(0.05);
         let (_, loose) = scene(1.0);
-        let a = solve(3, &tight, &[]);
-        let b = solve(3, &loose, &[]);
+        let a = solve(3, &tight, &[], P);
+        let b = solve(3, &loose, &[], P);
         assert!(solved(&b.offsets[2]).1 > solved(&a.offsets[2]).1);
+    }
+
+    /// Stream 1 runs 300 ppm slow against stream 0 (an iPod-like device) over an hour: shared
+    /// events every 5 minutes, 5 ms each.
+    fn drifting(rate: f64) -> Vec<Obs> {
+        let mut obs = Vec::new();
+        for k in 0..13 {
+            let shared = 300.0 * k as f64;
+            obs.push(Obs { stream: 0, event: k, t: shared, error_s: 0.005 });
+            // shared = t1 + 20 + rate * t1
+            obs.push(Obs { stream: 1, event: k, t: (shared - 20.0) / (1.0 + rate), error_s: 0.005 });
+        }
+        obs
+    }
+
+    #[test]
+    fn drift_is_learnt_from_evidence_along_the_overlap() {
+        let s = solve(2, &drifting(300e-6), &[], P);
+        let Offset::Solved(f) = s.offsets[1] else { panic!() };
+        assert!((f.rate - 300e-6).abs() < 2e-6, "rate {}", f.rate);
+        assert!(f.var_rate.sqrt() < 5e-6, "rate error {}", f.var_rate.sqrt());
+        assert!((f.at(0.0) - 20.0).abs() < 0.01, "offset at 0: {}", f.at(0.0));
+        assert!((f.back(f.at(1234.5)) - 1234.5).abs() < 1e-9);
+        // Fitted, nothing is left over: a 1 s end-to-end slide is not a contradiction.
+        assert!(s.outliers(3.0).is_empty(), "{:?}", s.residuals);
+        // With rates pinned at 0 (offsets only), the slide shows as wrong matches.
+        assert!(!solve(2, &drifting(300e-6), &[], 0.0).outliers(3.0).is_empty());
+    }
+
+    #[test]
+    fn one_link_leaves_the_rate_at_its_prior_and_errors_grow_away_from_it() {
+        let obs = vec![Obs { stream: 0, event: 0, t: 100.0, error_s: 0.01 }, Obs { stream: 1, event: 0, t: 50.0, error_s: 0.01 }];
+        let s = solve(2, &obs, &[], P);
+        let Offset::Solved(f) = s.offsets[1] else { panic!() };
+        assert!(f.rate.abs() < 1e-12 && (f.var_rate.sqrt() - P).abs() < 1e-9);
+        assert!((f.at(50.0) - 100.0).abs() < 1e-9);
+        let (near, hour) = (f.error_at(50.0), f.error_at(50.0 + 3600.0));
+        assert!(near < 0.02, "{near}");
+        // An hour away the unknown speed adds 0.36 s (100 ppm).
+        assert!((hour - (near * near + 0.36f64.powi(2)).sqrt()).abs() < 1e-3, "{hour}");
     }
 }
