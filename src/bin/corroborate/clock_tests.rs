@@ -578,3 +578,48 @@ fn drift_margins_drawn() {
     d.frames(3);
     d.shot("timeline_drift_end");
 }
+
+/// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start) wired
+/// into an Audio match node give links naming both clocks, and the clock solve puts b's 10 s at
+/// a's 30.5 s, in one group.
+#[test]
+fn audio_match_links_two_recordings() {
+    let ev = corroborate::synth::notes(90.0, 8000, 11);
+    let write = |name: &str, x: &[f32]| {
+        let p = crate::drive::out_dir().join(name);
+        let spec = hound::WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(&p, spec).unwrap();
+        for &v in x {
+            w.write_sample((v.clamp(-1.0, 1.0) * 32767.0) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let (pa, pb) = (write("match_a.wav", &ev[..60 * 8000]), write("match_b.wav", &ev[(20.5 * 8000.0) as usize..]));
+    // Headless, drawn to target/drive/audio_match.png (no window).
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let a = app.add(Kind::Sourcer { input: pa }, Pos2::new(30.0, 40.0));
+    let b = app.add(Kind::Sourcer { input: pb }, Pos2::new(30.0, 300.0));
+    let m = app.add(Kind::AudioMatch, Pos2::new(460.0, 120.0));
+    app.wire_many(a, "audio", m);
+    app.wire_many(b, "audio", m);
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 3, "two wired and one free");
+    app.run();
+    assert!(d.wait_until(30.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    d.frames(5);
+    d.shot("audio_match");
+    let app = d.app();
+    let st = app.nodes[m].state.lock().unwrap().status.clone();
+    let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") else { panic!("no quality: {st}") };
+    assert!(json.contains("\"level\":\"good\""), "{json}");
+    app.update_clocks();
+    let (ua, ub) = (uid(app, a), uid(app, b));
+    assert!(app.ev.links.len() >= 2, "links: {} ({st})", app.ev.links.len());
+    assert!(app.ev.links.iter().all(|l| (l.a == ua && l.b == ub) || (l.a == ub && l.b == ua)), "both clocks named");
+    let (ca, cb) = (app.ev.clocks.get(&ua), app.ev.clocks.get(&ub));
+    assert_eq!((ca.kind, ca.group.clone()), (Ck::Relative, cb.group.clone()), "one group");
+    let on_a = ca.back(cb.at(10.0));
+    assert!((on_a - 30.5).abs() < 0.002, "b's 10 s is a's {on_a}");
+    app.stop_all();
+}

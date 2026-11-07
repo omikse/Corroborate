@@ -1,4 +1,5 @@
-//! Synthetic test audio: Doppler passes with harmonics, optional steady hum, white noise.
+//! Synthetic test audio: Doppler passes with harmonics, optional steady hum, white noise; an
+//! "event" of short notes for matching recordings.
 
 use crate::modules::planes::fit::{model, C_SOUND};
 
@@ -57,4 +58,28 @@ pub fn render(sr: f64, dur_s: f64, passes: &[Pass], hum: Option<(f64, f32)>, noi
         }
     }
     x
+}
+
+/// A deterministic "event" heard by several recordings: a new decaying note every 0.1 s at a
+/// random pitch (200–3200 Hz), a few ringing at once, over a little noise; `sr` samples a second.
+/// Distinct peaks in time and frequency, what audio fingerprints are made of.
+pub fn notes(secs: f64, sr: u32, seed: u64) -> Vec<f32> {
+    let n = (secs * sr as f64) as usize;
+    let mut rng = Rng::new(seed);
+    let step = (sr / 10) as usize;
+    let mut on: Vec<(usize, f64)> = Vec::new();
+    (0..n)
+        .map(|i| {
+            if i % step == 0 {
+                on.push((i, 200.0 + 3000.0 * rng.uniform()));
+                on.retain(|&(s, _)| i - s < 5 * step);
+            }
+            let mut v = 0.05 * (rng.uniform() * 2.0 - 1.0);
+            for &(s, f) in &on {
+                let t = (i - s) as f64 / sr as f64;
+                v += 0.3 * (-t * 6.0).exp() * (2.0 * std::f64::consts::PI * f * t).sin();
+            }
+            v as f32
+        })
+        .collect()
 }

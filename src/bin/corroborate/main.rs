@@ -46,6 +46,8 @@ mod script;
 mod types_menu;
 
 // Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
+#[path = "../../modules/Audio match/node.rs"]
+mod audio_match_node;
 #[path = "../../modules/Combine locations/node.rs"]
 mod combine_locations_node;
 #[path = "../../modules/ENF (power hum)/node.rs"]
@@ -621,6 +623,13 @@ impl App {
             runtime::start(job);
             started += 1;
         }
+        // Audio match nodes read their files themselves, all at once.
+        for i in 0..self.nodes.len() {
+            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch) {
+                let (files, other) = self.audio_match_inputs(i);
+                audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
+            }
+        }
         self.run_sig = Some(self.run_signature());
         if started == 0 {
             return;
@@ -715,6 +724,7 @@ impl App {
             );
             let own = match &n.kind {
                 Kind::Planes => planes_node::json(&s),
+                Kind::AudioMatch => audio_match_node::json(&s),
                 Kind::Enf { .. } => enf_node::json(&s),
                 Kind::GridFrequencies { path } => grid_frequencies_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),

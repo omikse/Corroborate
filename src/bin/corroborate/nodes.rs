@@ -6,7 +6,7 @@
 
 use corroborate::core::{NodeSpec, Port, PortKind, Role};
 use corroborate::module_manifest::{self as mm, Manifest};
-use corroborate::modules::{combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, value};
+use corroborate::modules::{audio_match, combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ pub enum Kind {
     /// items as `1.field`, `2.field`, …).
     Value { ty: String, rows: Vec<(String, String)> },
     Planes,
+    /// Links between the clocks of the wired recordings, from the sounds they share.
+    AudioMatch,
     /// The grid-frequency file it reads (empty: the bundled file).
     Enf { grid: String },
     /// Grid frequency map (50/60 Hz zones by region) for ENF: a JSON file, swappable.
@@ -56,6 +58,7 @@ impl Kind {
             "sourcer" => Kind::Sourcer { input: String::new() },
             "value" => Kind::Value { ty: "location".into(), rows: value::defaults("location") },
             "planes" => Kind::Planes,
+            "audio-match" => Kind::AudioMatch,
             "enf" => Kind::Enf { grid: String::new() },
             "grid-frequencies" => Kind::GridFrequencies { path: String::new() },
             "result-record" => Kind::ResultRecord { folder: String::new() },
@@ -72,6 +75,7 @@ impl Kind {
             Kind::Sourcer { .. } => label(sourcer::manifest()),
             Kind::Value { .. } => label(value::manifest()),
             Kind::Planes => label(planes::manifest()),
+            Kind::AudioMatch => label(audio_match::manifest()),
             Kind::Enf { .. } => label(enf::manifest()),
             Kind::GridFrequencies { .. } => label(grid_frequencies::manifest()),
             Kind::Plugin { path } => plugin::label(path),
@@ -89,6 +93,7 @@ impl Kind {
         match self {
             Kind::ResultRecord { .. } => result_record::manifest().many_names(),
             Kind::CombineLocations { .. } => combine_locations::manifest().many_names(),
+            Kind::AudioMatch => audio_match::manifest().many_names(),
             Kind::Module { m, .. } => m.many_names(),
             _ => Vec::new(),
         }
@@ -99,6 +104,7 @@ impl Kind {
             Kind::Sourcer { .. } => sourcer::spec(),
             Kind::Value { ty, .. } => value::spec(ty),
             Kind::Planes => planes::spec(),
+            Kind::AudioMatch => audio_match::spec(),
             Kind::Enf { .. } => enf::spec(),
             Kind::GridFrequencies { .. } => grid_frequencies::spec(),
             Kind::Plugin { .. } => plugin::spec(),
@@ -120,7 +126,7 @@ impl Kind {
             Kind::CombineLocations { any } => combine_locations::mode(*any).into(),
             Kind::Missing { param, .. } => param.clone(),
             Kind::Value { ty, .. } => ty.clone(),
-            Kind::Planes | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
+            Kind::Planes | Kind::AudioMatch | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
         }
     }
 

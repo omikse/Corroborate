@@ -36,6 +36,7 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Sourcer { .. } => &sourcer_node::Look,
         Kind::Value { .. } => &value_node::Look,
         Kind::Planes => &planes_node::Look,
+        Kind::AudioMatch => &audio_match_node::Look,
         Kind::Enf { .. } => &enf_node::Look,
         Kind::GridFrequencies { .. } => &grid_frequencies_node::Look,
         Kind::Plugin { .. } => &plugin_node::Look,

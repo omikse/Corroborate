@@ -259,32 +259,8 @@ pub fn gcc_phat(planner: &mut RealFftPlanner<f32>, a: &[f32], b: &[f32]) -> Opti
 mod tests {
     use super::*;
 
-    /// Deterministic "event" sound: a new decaying note every 0.1 s at a random pitch, a few
-    /// ringing at once (what landmarks are made of), over a little noise.
     fn event(secs: f64) -> Vec<f32> {
-        let n = (secs * SR as f64) as usize;
-        let mut x = 0x2545_f491_u64;
-        let mut rnd = move || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut notes: Vec<(usize, f64)> = Vec::new();
-        (0..n)
-            .map(|i| {
-                if i % 800 == 0 {
-                    notes.push((i, 200.0 + 3000.0 * rnd()));
-                    notes.retain(|&(s, _)| i - s < 4000);
-                }
-                let mut v = 0.05 * (rnd() * 2.0 - 1.0);
-                for &(s, f) in &notes {
-                    let t = (i - s) as f64 / SR as f64;
-                    v += 0.3 * (-t * 6.0).exp() * (2.0 * std::f64::consts::PI * f * t).sin();
-                }
-                v as f32
-            })
-            .collect()
+        crate::synth::notes(secs, SR, 7)
     }
 
     #[test]
@@ -310,7 +286,7 @@ mod tests {
             assert!((h.t_a - want).abs() < 0.001, "{} vs {want}", h.t_a);
         }
         // An unrelated clip matches nothing.
-        let other = Clip::new(event(200.0).iter().rev().copied().collect());
+        let other = Clip::new(crate::synth::notes(200.0, SR, 8));
         assert!(match_pair(&other, &b, &mut RealFftPlanner::new()).hits.is_empty());
     }
 }

@@ -1,0 +1,96 @@
+id = "audio-match"
+label = "Audio match"
+category = "Detectors"
+order = 3
+role = "detector"
+
+# Grows as it is wired: "audio 1", "audio 2", … Every pair of the wired recordings is matched.
+# Files only for now: each is decoded again here at 8 kHz once the graph runs, then all are
+# matched at once.
+[[input]]
+name = "audio"
+kind = "audio"
+many = true
+
+[[output]]
+name = "links"
+kind = "link"
+title = "links"
+about = "Where two recordings hear the same sound: moment t_a on one clock is moment t_b on the other, each with an error from how clearly the audio matched. They go into the clock solve (wired or not), which learns offsets and drift."
+needs = ["audio", "audio 2"]
+when = "recordings overlap in time and hear the same sounds"
+source = "Wang 2003 (landmarks); Guggenberger, Lux, Böszörmenyi (AudioAlign); Knapp, Carter 1976 (GCC-PHAT)"
+min_quality = "weak"
+
+[[output]]
+name = "quality"
+kind = "quality"
+title = "quality"
+about = "How well the recordings matched: pairs linked, links, chunks tried, fingerprint candidates and those the cross-correlation did not confirm, per pair."
+needs = ["audio", "audio 2"]
+when = "always"
+min_quality = "none"
+
+[[output]]
+name = "clock drift"
+kind = "link"
+status = "planned"
+about = "Each recording's clock speed against the others, in ppm (the clock solve learns it from the links already)."
+needs = ["audio", "audio 2"]
+when = "long overlaps"
+source = "Guggenberger, Lux, Böszörmenyi 2015"
+min_quality = "good"
+
+[[output]]
+name = "same recording"
+kind = "event"
+status = "planned"
+about = "Two files that are one recording (a re-upload, a copy): not independent witnesses."
+needs = ["audio", "audio 2"]
+when = "identical audio, no second microphone"
+min_quality = "good"
+
+[[output]]
+name = "edits"
+kind = "event"
+status = "possible"
+about = "Where a recording's match with the others jumps: cuts, inserts, reordered parts (for the cut detector)."
+needs = ["audio", "audio 2"]
+when = "an edited recording overlaps an unedited one"
+min_quality = "good"
+
+[[output]]
+name = "shared sounds"
+kind = "event"
+status = "possible"
+about = "Sounds heard in several recordings (bangs, words), with the time each heard them."
+needs = ["audio", "audio 2"]
+when = "loud distinct sounds"
+min_quality = "weak"
+
+[[output]]
+name = "sound source"
+kind = "location"
+status = "possible"
+about = "Where a shared sound came from, by the differences in when the recordings heard it (TDOA, time difference of arrival)."
+needs = ["audio", "audio 2", "audio 3", "locations of the recordings"]
+when = "three or more recordings at known places"
+min_quality = "good"
+
+[[output]]
+name = "speed change"
+kind = "event"
+status = "possible"
+about = "A recording played faster or slower than it was recorded: a steady slope in its match far beyond any clock drift."
+needs = ["audio", "audio 2"]
+when = "long overlap"
+min_quality = "good"
+
+[[output]]
+name = "gaps"
+kind = "event"
+status = "possible"
+about = "Parts missing from one recording that the others have."
+needs = ["audio", "audio 2"]
+when = "overlapping recordings"
+min_quality = "weak"
