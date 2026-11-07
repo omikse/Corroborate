@@ -15,6 +15,9 @@
 //! 417 ppm audio and −554 ppm video), so each rate has a prior of 0 ± `rate_prior` (1 sigma).
 //! A rate is only learnt from evidence at different times on the same pair of clocks; without
 //! such evidence it stays 0 and its prior makes errors grow away from the evidence.
+//! Streams recorded by one device (several files of one phone, the cut parts of one file) run at
+//! one speed: `solve_shared` gives them one rate, each keeping its own offset, so evidence on
+//! any of them teaches the speed of all.
 //!
 //! Weighted least squares over all offsets, rates and event times. Without any anchor, the first
 //! connected stream is the reference (offset 0, rate 0) and the result is relative to it. Streams
@@ -110,6 +113,13 @@ impl Solution {
 /// Solve offsets and rates for `n_streams` streams; `rate_prior` is the 1-sigma spread of an
 /// unknown rate (0 pins every rate at 0: offsets only).
 pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f64) -> Solution {
+    let own: Vec<usize> = (0..n_streams).collect();
+    solve_shared(n_streams, obs, anchors, rate_prior, &own)
+}
+
+/// As `solve`, but streams with the same `rate_of` key share one rate (one device's clock).
+/// Streams sharing the reference's key share its rate of 0.
+pub fn solve_shared(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f64, rate_of: &[usize]) -> Solution {
     // Which streams can be solved: connected through shared events to an anchor (or reference).
     let n_events = obs.iter().map(|o| o.event + 1).max().unwrap_or(0);
     let mut comp: Vec<usize> = (0..n_streams + n_events).collect();
@@ -151,16 +161,35 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
     }
     let center: Vec<f64> = sums.iter().map(|&(s, n)| if n > 0 { s / n as f64 } else { 0.0 }).collect();
 
-    // Unknowns: offset and rate of each solvable stream. The reference stream has none: its
-    // offset and rate are zero by definition (the gauge). Event times are unknowns too, but each
-    // appears only in its own observations, so it is eliminated exactly (Schur complement) and
-    // worked out afterwards: the system stays as small as the streams however many events.
+    // Unknowns: the offset of each solvable stream and the rate of each solvable device (rate
+    // key). The reference stream has neither: its offset and rate are zero by definition (the
+    // gauge), and so is the rate of its device. Event times are unknowns too, but each appears
+    // only in its own observations, so it is eliminated exactly (Schur complement) and worked out
+    // afterwards: the system stays as small as the streams however many events.
     let is_ref = |i: usize| reference == Some(i);
-    let s_idx: Vec<Option<usize>> = {
-        let mut k = 0;
-        (0..n_streams).map(|i| (solvable[i] && !is_ref(i)).then(|| { k += 2; k - 2 })).collect()
+    let ref_key = reference.map(|r| rate_of[r]);
+    let mut n = 0;
+    let o_idx: Vec<Option<usize>> = (0..n_streams).map(|i| (solvable[i] && !is_ref(i)).then(|| { n += 1; n - 1 })).collect();
+    let mut keys: Vec<(usize, usize)> = Vec::new();
+    let r_idx: Vec<Option<usize>> = (0..n_streams)
+        .map(|i| {
+            if !solvable[i] || is_ref(i) || ref_key == Some(rate_of[i]) {
+                return None;
+            }
+            Some(match keys.iter().find(|k| k.0 == rate_of[i]) {
+                Some(k) => k.1,
+                None => {
+                    keys.push((rate_of[i], n));
+                    n += 1;
+                    n - 1
+                }
+            })
+        })
+        .collect();
+    // A stream's terms at moment t on its clock: offset_i + rate_i (t - c_i).
+    let terms = |s: usize, t: f64| -> Vec<(usize, f64)> {
+        o_idx[s].map(|oi| (oi, 1.0)).into_iter().chain(r_idx[s].map(|ri| (ri, t - center[s]))).collect()
     };
-    let n = 2 * s_idx.iter().flatten().count();
     let mut a = vec![vec![0.0; n]; n];
     let mut b = vec![0.0; n];
     // Each row: coefficients (index, value), target, weight.
@@ -176,7 +205,6 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
     // (offset_i + rate_i (t - c_i) - T_k = -t_ik). Per event, with u = Σ w c, v = Σ w y and
     // W = Σ w over its observations, eliminating T_k adds Σ w c cᵀ - u uᵀ / W and Σ w c y - u v / W,
     // and T_k = (u·x - v) / W.
-    let terms = |o: &Obs| -> Vec<(usize, f64)> { s_idx[o.stream].map_or(Vec::new(), |si| vec![(si, 1.0), (si + 1, o.t - center[o.stream])]) };
     let mut by_event: Vec<Vec<&Obs>> = vec![Vec::new(); n_events];
     for o in obs.iter().filter(|o| solvable[o.stream]) {
         by_event[o.event].push(o);
@@ -187,7 +215,7 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
         let (mut u, mut v, mut ww): (Vec<(usize, f64)>, f64, f64) = (Vec::new(), 0.0, 0.0);
         for o in ev {
             let w = 1.0 / (o.error_s * o.error_s);
-            let c = terms(o);
+            let c = terms(o.stream, o.t);
             add(&c, -o.t, w);
             for (i, ci) in c {
                 match u.iter_mut().find(|x| x.0 == i) {
@@ -205,15 +233,15 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
     }
     if absolute {
         for an in anchors {
-            if let Some(si) = s_idx[an.stream] {
-                add(&[(si, 1.0), (si + 1, an.t - center[an.stream])], an.offset, 1.0 / (an.error_s * an.error_s));
+            if solvable[an.stream] {
+                add(&terms(an.stream, an.t), an.offset, 1.0 / (an.error_s * an.error_s));
             }
         }
     }
     // Each rate's prior: 0 ± rate_prior.
     let w_rate = 1.0 / rate_prior.max(1e-12).powi(2);
-    for &si in s_idx.iter().flatten() {
-        add(&[(si + 1, 1.0)], 0.0, w_rate);
+    for &(_, ri) in &keys {
+        add(&[(ri, 1.0)], 0.0, w_rate);
     }
 
     let inv = invert(a);
@@ -222,28 +250,23 @@ pub fn solve(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_prior: f
         None => vec![f64::NAN; n],
     };
     let offsets = (0..n_streams)
-        .map(|i| match (s_idx[i], &inv) {
-            (None, Some(_)) if is_ref(i) => {
-                Offset::Solved(Fit { offset: 0.0, rate: 0.0, center: center[i], var_offset: 0.0, var_rate: 0.0, cov: 0.0 })
+        .map(|i| match &inv {
+            Some(m) if solvable[i] => {
+                let get = |k: Option<usize>, l: Option<usize>| k.zip(l).map_or(0.0, |(k, l)| m[k][l]);
+                Offset::Solved(Fit {
+                    offset: o_idx[i].map_or(0.0, |k| x[k]),
+                    rate: r_idx[i].map_or(0.0, |k| x[k]),
+                    center: center[i],
+                    var_offset: get(o_idx[i], o_idx[i]).max(0.0),
+                    var_rate: get(r_idx[i], r_idx[i]).max(0.0),
+                    cov: get(o_idx[i], r_idx[i]),
+                })
             }
-            (Some(si), Some(m)) => Offset::Solved(Fit {
-                offset: x[si],
-                rate: x[si + 1],
-                center: center[i],
-                var_offset: m[si][si].max(0.0),
-                var_rate: m[si + 1][si + 1].max(0.0),
-                cov: m[si][si + 1],
-            }),
             _ => Offset::Unsolved,
         })
         .collect();
     let at = |s: usize, t: f64| -> Option<f64> {
-        inv.as_ref()?;
-        if is_ref(s) {
-            return Some(t);
-        }
-        let si = s_idx[s]?;
-        Some(t + x[si] + x[si + 1] * (t - center[s]))
+        (inv.is_some() && solvable[s]).then(|| t + terms(s, t).iter().map(|&(k, c)| c * x[k]).sum::<f64>())
     };
     // Event times, back from the eliminated rows.
     let event_t: Vec<Option<f64>> = elim
@@ -420,6 +443,31 @@ mod tests {
         assert!(s.outliers(3.0).is_empty(), "{:?}", s.residuals);
         // With rates pinned at 0 (offsets only), the slide shows as wrong matches.
         assert!(!solve(2, &drifting(300e-6), &[], 0.0).outliers(3.0).is_empty());
+    }
+
+    #[test]
+    fn recordings_of_one_device_share_its_speed() {
+        // Streams 1 and 2 are two files of one phone running 300 ppm slow. Stream 1 overlaps
+        // stream 0 for an hour; stream 2 shares a single event with it, an hour later.
+        let mut obs = drifting(300e-6);
+        let shared = 7200.0;
+        obs.push(Obs { stream: 0, event: 13, t: shared, error_s: 0.005 });
+        obs.push(Obs { stream: 2, event: 13, t: (shared - 500.0) / (1.0 + 300e-6), error_s: 0.005 });
+        let fit = |s: &Solution| match s.offsets[2] {
+            Offset::Solved(f) => f,
+            Offset::Unsolved => panic!(),
+        };
+        let alone = fit(&solve(3, &obs, &[], P));
+        let one = fit(&solve_shared(3, &obs, &[], P, &[0, 1, 1]));
+        assert!(alone.rate.abs() < 1e-9, "alone it cannot learn: {}", alone.rate);
+        assert!((one.rate - 300e-6).abs() < 2e-6, "shared rate {}", one.rate);
+        // Half an hour from its only event, the shared speed keeps stream 2 sure.
+        let t = one.center + 1800.0;
+        assert!(one.error_at(t) < 0.02 && alone.error_at(t) > 0.15, "{} {}", one.error_at(t), alone.error_at(t));
+        // Sharing the reference's device pins the rate at 0, offsets still solved.
+        let pinned = solve_shared(3, &obs, &[], P, &[0, 0, 1]);
+        let Offset::Solved(f1) = pinned.offsets[1] else { panic!() };
+        assert!(f1.rate == 0.0 && f1.var_rate == 0.0);
     }
 
     #[test]

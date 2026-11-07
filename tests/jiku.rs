@@ -11,8 +11,10 @@
 //! overlap, cross-correlate short windows of their audio along the overlap (GCC-PHAT, generalized
 //! cross-correlation with phase transform). The ground truth is used only to know which pairs
 //! overlap and roughly where (± 2 s, ignoring its speeds); every link's time comes from the audio.
-//! The links go into the clock solve (offsets and drift), and the solved mapping between each
-//! overlapping pair is scored against the ground truth's.
+//! The links go into the clock solve (offsets and drift; recordings of one phone, named in the
+//! file name, share one speed), and the solved mapping between each overlapping pair is scored
+//! against the ground truth's. One speed per phone took the 95th percentile of the mapped moments
+//! from 30 to 22 ms (median 5.8 to 5.0 ms).
 //!
 //! The ground truth gives `offset` (where a recording starts on the event's timeline) and
 //! `speed`, its sync points in the speed-corrected time. The paper (Table 2) gives the speeds as
@@ -306,7 +308,10 @@ fn jiku_gt_090912_sync_from_audio() {
     let found = tree_edges(recs.len(), ls.iter().zip(&le).filter(|(_, e)| **e <= 0.1).map(|(l, _)| (idx(&l.a), idx(&l.b))));
     println!("synchronization rate: {found} of {gt_edges} spanning-tree edges ({:.0} %; Haitsma–Kalker in the paper: 23 of 44, 52 %)", 100.0 * found as f64 / gt_edges as f64);
 
-    let clocks = clock::solve(&[], &ls);
+    // Recordings of one phone run at one speed (the device is in the file name).
+    let device: std::collections::BTreeMap<String, String> = recs.iter().map(|r| (r.name.clone(), r.device.clone())).collect();
+    let alone = clock::solve(&[], &ls);
+    let clocks = clock::solve_devices(&[], &ls, &device);
     println!("{} contradictions (over 3 sigma)", clocks.contradictions.len());
     // How far each link sits from the solve (the solve's own fit, against the measurement).
     let mut fit: Vec<f64> = ls
@@ -351,27 +356,61 @@ fn jiku_gt_090912_sync_from_audio() {
     }
     println!("{scored} moments scored, {unsolved} of {} pairs not linked into one group", pairs.len());
 
-    // Drift: each linked pair's relative speed, solved and in the ground truth (dt_b / dt_a).
+    // Drift: each linked pair's relative speed, solved and in the ground truth (dt_b / dt_a),
+    // with each recording's own speed and with one speed per phone.
     let (conv, p95) = best.unwrap();
-    let mut rel: Vec<(String, f64, f64)> = Vec::new();
-    for &(a, b, _, _) in &pairs {
-        let (ca, cb) = (clocks.get(&recs[a].name), clocks.get(&recs[b].name));
-        if ca.kind == clock::Kind::None || ca.group != cb.group || !ls.iter().any(|l| l.a == recs[a].name && l.b == recs[b].name) {
+    let rel = |clocks: &clock::Clocks| -> Vec<(String, f64, f64)> {
+        let mut rel = Vec::new();
+        for &(a, b, _, _) in &pairs {
+            let (ca, cb) = (clocks.get(&recs[a].name), clocks.get(&recs[b].name));
+            if ca.kind == clock::Kind::None || ca.group != cb.group || !ls.iter().any(|l| l.a == recs[a].name && l.b == recs[b].name) {
+                continue;
+            }
+            let solved = (1.0 + ca.rate) / (1.0 + cb.rate) - 1.0;
+            let truth = match conv {
+                Conv::Mul => recs[a].speed / recs[b].speed - 1.0,
+                Conv::Div => recs[b].speed / recs[a].speed - 1.0,
+            };
+            rel.push((format!("{}-{}", recs[a].device, recs[b].device), solved, truth));
+        }
+        rel
+    };
+    // Each phone's speed against its group's reference, solved (± error) and in the truth. On
+    // GT_090912 phones 2, 3 and 4 agree with each other in every group, while phone 0 (the
+    // references) is 84 to 391 ppm off the others depending on the group: solved per recording,
+    // phone 0's own files differ by 50-130 ppm, more than their errors. A clock does not do that,
+    // a moving phone does: walking 10 m in 200 s changes the sound's delay by 29 ms, 145 ppm.
+    let mut seen = std::collections::BTreeSet::new();
+    for r in &recs {
+        let c = clocks.get(&r.name);
+        if c.kind == clock::Kind::None || !seen.insert((c.group.clone(), r.device.clone())) {
             continue;
         }
-        let solved = (1.0 + ca.rate) / (1.0 + cb.rate) - 1.0;
+        let gref = &recs[idx(&c.group)];
         let truth = match conv {
-            Conv::Mul => recs[a].speed / recs[b].speed - 1.0,
-            Conv::Div => recs[b].speed / recs[a].speed - 1.0,
+            Conv::Mul => r.speed / gref.speed - 1.0,
+            Conv::Div => gref.speed / r.speed - 1.0,
         };
-        rel.push((format!("{}-{}", recs[a].device, recs[b].device), solved, truth));
+        println!(
+            "group {} phone {}: solved {:+.0} ± {:.0} ppm, truth {:+.0} ppm ({:+.1} sigma)",
+            &c.group[c.group.len() - 4..],
+            r.device,
+            c.rate * 1e6,
+            c.rate_error * 1e6,
+            truth * 1e6,
+            (c.rate - truth) / c.rate_error.max(1e-9)
+        );
     }
-    let mut d: Vec<f64> = rel.iter().map(|x| (x.1 - x.2).abs()).collect();
-    if !d.is_empty() {
-        println!("relative speed of {} linked pairs, solved − truth: median {:.0} ppm, 95% {:.0} ppm", d.len(), pct(&mut d, 0.5) * 1e6, pct(&mut d, 0.95) * 1e6);
-    }
-    for (devs, sv, tr) in rel.iter().filter(|x| (x.1 - x.2).abs() > 20e-6) {
-        println!("  devices {devs}: solved {:+.0} ppm, truth {:+.0} ppm", sv * 1e6, tr * 1e6);
+    for (what, c) in [("own speed per recording", &alone), ("one speed per phone", &clocks)] {
+        let r = rel(c);
+        let mut d: Vec<f64> = r.iter().map(|x| (x.1 - x.2).abs()).collect();
+        if d.is_empty() {
+            continue;
+        }
+        println!("relative speed of {} linked pairs, solved − truth, {what}: median {:.0} ppm, 95% {:.0} ppm", d.len(), pct(&mut d, 0.5) * 1e6, pct(&mut d, 0.95) * 1e6);
+        for (devs, sv, tr) in r.iter().filter(|x| (x.1 - x.2).abs() > 20e-6) {
+            println!("  devices {devs}: solved {:+.0} ppm, truth {:+.0} ppm", sv * 1e6, tr * 1e6);
+        }
     }
     // What this test holds the audio path to. The ground truth is itself only "almost all within
     // 10 ms" with lab drift values per phone model (± 17 ppm), and phones move in the crowd (1 m is

@@ -20,7 +20,8 @@
 //! different times on the same clocks and otherwise 0 ± `RATE_PRIOR`. So a clock's error is
 //! smallest at its evidence (`center`) and grows away from it; `at`, `back` and `error_at` give
 //! time and error at any moment. `offset` is where the clock's 0 lands, `error_s` the error at
-//! `center`.
+//! `center`. Clocks of one device (several files of one phone, the cut parts of one file) run at
+//! one speed: `solve_devices` gives the clocks of a group that share a device one rate.
 
 use crate::sync::{self, AnchorObs, Fit, Obs, Offset};
 use std::collections::{BTreeMap, BTreeSet};
@@ -178,7 +179,7 @@ type LocalAnchor = (Ev, usize, f64, f64, f64);
 type LocalLink = (Ev, usize, f64, usize, f64, f64);
 
 /// Fits of `m` clocks from the switched-on evidence of one connected group.
-fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<Fit> {
+fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink], rate_of: &[usize]) -> Vec<Fit> {
     // A link is an event seen on two clocks; its error is split so the pair adds up to it.
     let obs: Vec<Obs> = links
         .iter()
@@ -189,7 +190,7 @@ fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<Fit> {
         })
         .collect();
     let an: Vec<AnchorObs> = anchors.iter().map(|&(_, s, t, offset, e)| AnchorObs { stream: s, t, offset, error_s: e }).collect();
-    sync::solve(m, &obs, &an, RATE_PRIOR)
+    sync::solve_shared(m, &obs, &an, RATE_PRIOR, rate_of)
         .offsets
         .into_iter()
         .map(|o| match o {
@@ -201,6 +202,12 @@ fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink]) -> Vec<Fit> {
 
 /// Solve every clock from the anchors and links (switched-off ones are ignored).
 pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
+    solve_devices(anchors, links, &BTreeMap::new())
+}
+
+/// As `solve`, but clocks with the same `device` run at one speed (each keeps its own offset).
+/// The speed is shared within a group of linked clocks.
+pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>) -> Clocks {
     let err = |e: f64| if e.is_finite() { e.max(MIN_ERROR_S) } else { MIN_ERROR_S };
     let mut names: BTreeSet<&str> = BTreeSet::new();
     names.extend(anchors.iter().map(|a| a.clock.as_str()));
@@ -259,7 +266,14 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
             continue;
         }
         let m = members.len();
-        let base = offsets(m, &ga, &gl);
+        // Rate keys: clocks of one device share theirs, every other clock has its own.
+        let rate_of: Vec<usize> = (0..m)
+            .map(|c| match device.get(ids[members[c]]) {
+                Some(d) => (0..m).find(|&o| device.get(ids[members[o]]) == Some(d)).unwrap(),
+                None => c,
+            })
+            .collect();
+        let base = offsets(m, &ga, &gl, &rate_of);
         let (kind, group) = if ga.is_empty() { (Kind::Relative, ids[members[0]].to_string()) } else { (Kind::Absolute, UTC.to_string()) };
 
         // Each piece of evidence's share: move it by its error and see how far each clock moves.
@@ -274,7 +288,7 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
                 pl[j].2 += pl[j].5;
                 pl[j].0
             };
-            for (c, f) in offsets(m, &pa, &pl).into_iter().enumerate() {
+            for (c, f) in offsets(m, &pa, &pl, &rate_of).into_iter().enumerate() {
                 let at = base[c].center;
                 let d = f.at(at) - base[c].at(at);
                 shares[c].push((ev, d * d));
@@ -484,6 +498,22 @@ mod tests {
         // Without rates the hour's 1 s slide would contradict the links.
         let fixed = |l: &Link| (l.t_a - 20.0 - l.t_b).abs();
         assert!(fixed(&l[6]) > 1.0);
+    }
+
+    #[test]
+    fn files_of_one_phone_share_its_speed() {
+        // b1 and b2 are two files of one phone, 300 ppm slow against a. b1 overlaps a for an
+        // hour; b2 is linked once.
+        let mut l: Vec<Link> = (0..7).map(|k| {
+            let t_a = 600.0 * k as f64;
+            link("a", t_a, "b1", (t_a - 20.0) / (1.0 + 300e-6), 0.005)
+        }).collect();
+        l.push(link("a", 5000.0, "b2", (5000.0 - 4000.0) / (1.0 + 300e-6), 0.005));
+        let phone: BTreeMap<ClockId, String> = [("b1".into(), "phone".into()), ("b2".into(), "phone".into())].into();
+        let (alone, shared) = (solve(&[], &l).get("b2"), solve_devices(&[], &l, &phone).get("b2"));
+        assert!(alone.rate.abs() < 1e-9 && (shared.rate - 300e-6).abs() < 3e-6, "{} {}", alone.rate, shared.rate);
+        let t = shared.center + 1800.0;
+        assert!(shared.error_at(t) < 0.02 && alone.error_at(t) > 0.15, "{} {}", shared.error_at(t), alone.error_at(t));
     }
 
     #[test]
