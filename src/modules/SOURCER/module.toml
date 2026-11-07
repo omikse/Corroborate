@@ -34,6 +34,13 @@ name = "video"
 kind = "video"
 required = true
 
+# Where it was recorded, from the coordinates phones and cameras write into the file (ISO 6709
+# in the metadata). Shown only when the metadata has them.
+[[output]]
+name = "location"
+kind = "location"
+required = true
+
 # A file, web page or stream URL, or `mic:<device>`.
 [[setting]]
 name = "source"

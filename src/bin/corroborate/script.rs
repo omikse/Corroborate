@@ -287,13 +287,15 @@ impl App {
                 port(p, w).into()
             })
             .collect();
+        // Before the state is locked: `gives` reads it (SOURCER's location).
+        let ons: Vec<bool> = spec.outputs.iter().map(|p| self.gives(i, p.name)).collect();
         let s = n.state.lock().unwrap();
         let outs: Array = spec
             .outputs
             .iter()
-            .map(|p| {
+            .zip(ons)
+            .map(|(p, on)| {
                 let w = !self.graph.targets(i, p.name).is_empty();
-                let on = self.gives(i, p.name);
                 (p.name, w, on).hash(&mut h);
                 let mut m = port(p, w);
                 m.insert("on".into(), on.into());
@@ -439,9 +441,11 @@ impl App {
     }
 
     /// Whether node `i` gives output `port` now (its `on` in look.rhai): a SOURCER gives nothing
-    /// until a source is chosen and video only for sources with pictures; others give every one.
+    /// until a source is chosen, video only for sources with pictures and location only when its
+    /// metadata has coordinates; others give every one.
     pub(crate) fn gives(&self, i: NodeId, port: &str) -> bool {
         match &self.nodes[i].kind {
+            Kind::Sourcer { .. } if port == "location" => self.nodes[i].state.lock().is_ok_and(|s| sourcer_node::site(&s.source).is_some()),
             Kind::Sourcer { input } => corroborate::modules::sourcer::gives(input, port),
             _ => true,
         }

@@ -171,6 +171,7 @@ impl App {
         let s = self.nodes[from].state.lock().unwrap();
         match (kind, &self.nodes[from].kind) {
             (_, Kind::Value { ty, rows }) => corroborate::modules::value::data(ty, rows),
+            (PortKind::Location, Kind::Sourcer { .. }) => crate::sourcer_node::location(&s.source),
             (PortKind::Location, _) => {
                 drop(s);
                 self.area_from(from).map(|(area, note)| Data::Location { area, note, site: None })

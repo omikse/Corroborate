@@ -1,7 +1,8 @@
 //! SOURCER node: any source in one node. A file on disk (mp3, wav, video, anything ffmpeg reads),
 //! a web page (YouTube video or live stream, and the other sites yt-dlp knows), a direct stream
 //! URL (http, rtmp, rtsp, hls…) or a microphone. Its outputs (module.toml) are audio, time,
-//! metadata and video; it gives video only when the source has pictures.
+//! metadata, video and location; it gives video only when the source has pictures, and location
+//! only when its metadata holds coordinates (decided at run time, in the workbench).
 
 use crate::core::NodeSpec;
 
@@ -56,7 +57,7 @@ mod tests {
         assert!(gives("x.wav", "audio") && gives("x.wav", "metadata") && !gives("x.wav", "video"));
         assert!(gives("x.mkv", "video"));
         let names: Vec<&str> = spec().outputs.iter().map(|p| p.name).collect();
-        assert_eq!(names, ["audio", "time", "metadata", "video"], "video last, as older projects have it");
+        assert_eq!(names, ["audio", "time", "metadata", "video", "location"], "new outputs last, so older projects keep their wires");
         assert_eq!(spec().inputs[0].name, "text");
     }
 }

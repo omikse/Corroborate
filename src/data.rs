@@ -52,6 +52,37 @@ pub struct Site {
     pub elevation: Option<f64>,
 }
 
+impl Site {
+    /// A point written as ISO 6709, as phones and cameras put it in video metadata:
+    /// `+51.5074-000.1278/`, `+51.5074-000.1278+010.000/` (elevation in metres), signed decimal
+    /// degrees, the ending `/` optional. None when it is not that or not on Earth.
+    pub fn from_iso6709(s: &str) -> Option<Site> {
+        let s = s.trim().trim_end_matches('/');
+        // Split at each sign: [lat, lon, elevation?].
+        let mut parts: Vec<String> = Vec::new();
+        for ch in s.chars() {
+            match ch {
+                '+' | '-' => parts.push(ch.to_string()),
+                '0'..='9' | '.' => parts.last_mut()?.push(ch),
+                _ => return None,
+            }
+        }
+        if !(2..=3).contains(&parts.len()) {
+            return None;
+        }
+        let num = |p: &str| p.parse::<f64>().ok().filter(|v| v.is_finite());
+        let (lat, lon) = (num(&parts[0])?, num(&parts[1])?);
+        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+            return None;
+        }
+        let elevation = match parts.get(2) {
+            Some(e) => Some(num(e)?),
+            None => None,
+        };
+        Some(Site { lat, lon, elevation })
+    }
+}
+
 /// A value on a port.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Data {
@@ -337,6 +368,18 @@ pub fn unbase64(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso6709_points() {
+        // Apple (com.apple.quicktime.location.ISO6709), with elevation.
+        assert_eq!(Site::from_iso6709("+51.5074-000.1278+010.000/"), Some(Site { lat: 51.5074, lon: -0.1278, elevation: Some(10.0) }));
+        // Android (location, location-eng): no elevation.
+        assert_eq!(Site::from_iso6709("+40.7128-074.0060/"), Some(Site { lat: 40.7128, lon: -74.006, elevation: None }));
+        assert_eq!(Site::from_iso6709("-33.8688+151.2093"), Some(Site { lat: -33.8688, lon: 151.2093, elevation: None }));
+        for bad in ["", "51.5,-0.12", "+91.0+000.0/", "+10.0+190.0/", "+1.0", "+1.0+2.0+3.0+4.0/", "+1.0x+2.0/", "+-1.0+2.0/"] {
+            assert_eq!(Site::from_iso6709(bad), None, "{bad}");
+        }
+    }
 
     /// Every kind's value comes back from its JSON form unchanged.
     #[test]

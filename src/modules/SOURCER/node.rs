@@ -343,6 +343,20 @@ fn frames(input: &str, st: &Shared, stop: &AtomicBool) -> Result<(), String> {
     Ok(())
 }
 
+/// Where the source was recorded: the first metadata entry naming a location that reads as
+/// ISO 6709 (`location`, `location-eng`, `com.apple.quicktime.location.ISO6709`, on the file or a
+/// stream), with its key.
+pub fn site(s: &SourceState) -> Option<(corroborate::data::Site, String)> {
+    s.meta.iter().filter(|(k, _)| k.to_lowercase().contains("location")).find_map(|(k, v)| corroborate::data::Site::from_iso6709(v).map(|p| (p, k.clone())))
+}
+
+/// The location output: the recording's point (the 1° cell it is in as the area).
+pub fn location(s: &SourceState) -> Result<corroborate::data::Data, String> {
+    let (p, key) = site(s).ok_or("no coordinates in the metadata")?;
+    let area = Area { cells: corroborate::area::WorldMask::circle(p.lat, p.lon, 0.0), add: true };
+    Ok(corroborate::data::Data::Location { area: Arc::new(area), note: format!("from the file's metadata ({key})"), site: Some(p) })
+}
+
 /// The metadata output in the result JSON.
 pub fn json(s: &NodeState) -> String {
     let m: Vec<String> = s.source.meta.iter().map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v))).collect();
