@@ -361,10 +361,37 @@ fn play_and_live_playheads() {
     assert!(app.is_live());
     app.play_step(1.0);
     assert_eq!(app.playhead_on(&c), Some(3.0), "stops at now");
-    assert!(!app.ph.playing);
+    assert!(app.ph.playing, "playing on: following live");
+    app.ph.playing = false;
     app.set_playhead(&c, 0.5);
     app.go_live();
     assert_eq!(app.playhead_on(&c), Some(3.0));
+}
+
+/// A recording plays to its end and pauses; Play on the SOURCER at the end starts it again from
+/// the beginning, and a source with audio always has a playhead.
+#[test]
+fn recording_plays_to_its_end() {
+    let mut app = App::empty();
+    let a = source(&mut app, 40.0);
+    app.nodes[a].state.lock().unwrap().audio_s = 10.0;
+    app.update_clocks();
+    let c = app.clock_of(a).unwrap();
+    app.ensure_playheads();
+    assert_eq!(app.playhead_on(&c), Some(0.0), "a playhead at the start");
+    app.play_source(a);
+    assert!(app.ph.playing && app.selected == Some(a));
+    app.play_step(4.0);
+    assert_eq!(app.playhead_on(&c), Some(4.0));
+    app.play_source(a);
+    assert!(!app.ph.playing, "paused");
+    app.play_source(a);
+    app.play_step(20.0);
+    assert_eq!(app.playhead_on(&c), Some(10.0), "stops at the end");
+    assert!(!app.ph.playing);
+    app.play_source(a);
+    assert_eq!(app.playhead_on(&c), Some(0.0), "from the start again");
+    assert!(app.ph.playing);
 }
 
 /// While playing, the sound is the selected node's source audio at its playhead; Planes, fed by

@@ -3,9 +3,10 @@
 //! and the solved clocks convert it, so moving it in one view moves it in every linked one.
 //! Unanchored groups follow nobody. The selected node's group has the active playhead.
 //!
-//! Space plays and pauses: the active playhead moves in real time and linked views follow. A
-//! project with a live source is live (a live group's playhead stops at "now", the newest audio
-//! received; Live jumps back to it); one without is a simulation, where every playhead is free.
+//! Play on a SOURCER (or Space) plays and pauses: the active playhead moves in real time and
+//! linked views follow. A live source's playhead stops at "now", the newest audio received, and
+//! stays there while playing; paused, it falls behind while the audio keeps coming in, and Live
+//! jumps back to now. A recording (a simulation) plays to its end and pauses there.
 
 use super::*;
 use corroborate::clock::Kind as Ck;
@@ -65,7 +66,7 @@ impl App {
 
     /// The active group as `Playheads` keys it: (absolute, group); with nothing selected, the
     /// absolute one when it has a playhead.
-    fn active_key(&self) -> Option<(bool, String)> {
+    pub(crate) fn active_key(&self) -> Option<(bool, String)> {
         match self.active_clock() {
             Some(c) => {
                 let i = self.ev.clocks.get(&c);
@@ -82,35 +83,88 @@ impl App {
 
     /// "Now" for a group, as `Playheads` keys it: the newest audio of its live sources.
     pub(crate) fn live_now(&self, absolute: bool, group: &str) -> Option<f64> {
+        self.audio_end(absolute, group, true)
+    }
+
+    /// The end of the audio received so far in a group (only live sources' with `live_only`).
+    fn audio_end(&self, absolute: bool, group: &str, live_only: bool) -> Option<f64> {
         (0..self.nodes.len())
             .filter(|&i| !self.nodes[i].hidden && self.nodes[i].kind.is_source())
             .filter_map(|i| {
                 let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).ok()?;
                 let c = self.ev.clocks.get(&self.clock_of(i)?);
                 let same = if absolute { c.kind == Ck::Absolute } else { c.kind != Ck::Absolute && c.group == group };
-                (live && same).then_some(a + c.offset)
+                ((live || !live_only) && same && a > 0.0).then_some(a + c.offset)
             })
             .reduce(f64::max)
     }
 
-    /// Moves the active playhead on by `dt` seconds when playing; live groups' playheads stop at now.
+    /// Moves the active playhead on by `dt` seconds when playing. Live groups' playheads stop at
+    /// now and stay there while playing (following live); a recording's stops at its end and
+    /// pauses.
     pub(crate) fn play_step(&mut self, dt: f64) {
         if self.ph.playing {
             if let Some((abs, g)) = self.active_key() {
                 let start = self.ph.get(abs, &g).unwrap_or_else(|| if abs { self.live_now(true, "").unwrap_or(0.0) } else { 0.0 });
-                self.ph.set(abs, &g, start + dt);
+                let to = start + dt;
+                if self.live_now(abs, &g).is_none() {
+                    if let Some(end) = self.audio_end(abs, &g, false).filter(|e| to >= *e) {
+                        self.ph.set(abs, &g, end);
+                        self.ph.playing = false;
+                        return;
+                    }
+                }
+                self.ph.set(abs, &g, to);
             }
         }
         if let Some(u) = self.ph.utc {
             if let Some(now) = self.live_now(true, "").filter(|n| u > *n) {
                 self.ph.utc = Some(now);
-                self.ph.playing &= self.active_key().is_none_or(|k| !k.0);
             }
         }
         let over: Vec<(String, f64)> = self.ph.floating.iter().filter_map(|(g, &p)| self.live_now(false, g).filter(|n| p > *n).map(|n| (g.clone(), n))).collect();
         for (g, n) in over {
             self.ph.floating.insert(g, n);
         }
+    }
+
+    /// Every source's group gets a playhead as soon as it has audio: at the start of a recording,
+    /// at now for a live source. So the timeline and the views always show one.
+    pub(crate) fn ensure_playheads(&mut self) {
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].hidden || !self.nodes[i].kind.is_source() {
+                continue;
+            }
+            let Some(clock) = self.clock_of(i) else { continue };
+            let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).unwrap_or((false, 0.0));
+            if a > 0.0 && self.playhead_on(&clock).is_none() {
+                self.set_playhead(&clock, if live { a } else { 0.0 });
+            }
+        }
+    }
+
+    /// Play or pause from a source node: its group becomes the active one (the node is selected).
+    /// Playing a recording that is at its end starts it again from the beginning.
+    pub(crate) fn play_source(&mut self, i: NodeId) {
+        if self.selected != Some(i) {
+            self.pick_only(i);
+            if self.ph.playing {
+                // Another group was playing: this click moves the play here.
+                self.follow = true;
+                return;
+            }
+        }
+        if !self.ph.playing {
+            if let Some(clock) = self.clock_of(i) {
+                let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).unwrap_or((false, 0.0));
+                let at = self.playhead_on(&clock);
+                if !live && at.is_none_or(|t| t >= a - 0.05) {
+                    self.set_playhead(&clock, 0.0);
+                }
+            }
+            self.follow = true;
+        }
+        self.ph.playing = !self.ph.playing;
     }
 
     /// Each frame: Space plays or pauses (when no text box has the keys), the playhead moves on.
@@ -121,6 +175,7 @@ impl App {
         let now = std::time::Instant::now();
         let dt = self.ph.last.map_or(0.0, |l| (now - l).as_secs_f64());
         self.ph.last = self.ph.playing.then_some(now);
+        self.ensure_playheads();
         self.play_step(dt);
         if self.ph.playing {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));

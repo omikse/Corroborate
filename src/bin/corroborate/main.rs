@@ -1174,7 +1174,6 @@ impl App {
                     self.run();
                 }
                 ui.separator();
-                self.play_controls(ui);
                 ui.menu_button("Add node", |ui| {
                     let at = Pos2::new(400.0, 300.0) - self.pan;
                     self.add_menu(ui, at);

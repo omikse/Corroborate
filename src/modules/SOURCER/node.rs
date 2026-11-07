@@ -386,6 +386,7 @@ impl crate::look::NodeLook for Look {
         let clock = app.clock_of(i).unwrap_or_default();
         let ph = app.playhead_on(&clock).map(|t| (t, app.is_active_clock(&clock)));
         let mut set_ph: Option<f64> = None;
+        let mut play: Option<PlayClick> = None;
         crate::look::area(ui, r, |ui| {
             ui.add_enabled_ui(fed_text.is_none(), |ui| {
                 // Row 1: file, YouTube link or stream URL. The text input overrides this box.
@@ -431,16 +432,28 @@ impl crate::look::NodeLook for Look {
             source_info(ui, &st);
             if !input.trim().is_empty() {
                 ui.add_space(4.0 * z);
+                play = play_row(ui, &st, ph, app.ph.playing && app.is_active_clock(&clock));
                 let (cursor, set) = waveform(ui, &st, z, i, ph);
                 set_ph = set;
                 if has_video(&input) {
                     ui.add_space(4.0 * z);
-                    video(app, ui, i, &st, cursor, z);
+                    // The frame under the pointer, else at the playhead.
+                    video(app, ui, i, &st, cursor.or(set).or(ph.map(|p| p.0)), z);
                 }
             }
         });
         if let Some(t) = set_ph {
             app.set_playhead(&clock, t);
+        }
+        match play {
+            Some(PlayClick::Play) => app.play_source(i),
+            Some(PlayClick::Live) => {
+                app.pick_only(i);
+                app.go_live();
+                app.ph.playing = true;
+                app.follow = true;
+            }
+            None => {}
         }
         if refresh {
             match corroborate::ingest::list_microphones() {
@@ -452,6 +465,43 @@ impl crate::look::NodeLook for Look {
             *d = input;
         }
     }
+}
+
+enum PlayClick {
+    Play,
+    Live,
+}
+
+/// Play / Pause for this source's playhead, where it is, and for a live source how far behind
+/// now it is, with Live to jump back. A recording is a simulation: played in real time from the
+/// playhead, paused anywhere. A live source keeps receiving audio while paused.
+fn play_row(ui: &mut egui::Ui, st: &Shared, ph: Option<(f64, bool)>, playing: bool) -> Option<PlayClick> {
+    let (live, a) = st.lock().map(|s| (s.live, s.audio_s)).unwrap_or((false, 0.0));
+    let mut click = None;
+    ui.horizontal(|ui| {
+        let tip = if live { "play or pause this live source (Space); the audio keeps coming in while paused" } else { "play or pause this recording in real time, a simulation (Space)" };
+        if ui.small_button(if playing { "Pause" } else { "Play" }).on_hover_text(tip).clicked() {
+            click = Some(PlayClick::Play);
+        }
+        let at = ph.map(|p| p.0);
+        if live {
+            let behind = at.map_or(0.0, |t| (a - t).max(0.0));
+            if behind < 0.5 {
+                ui.colored_label(Color32::from_rgb(235, 80, 80), "LIVE");
+            } else {
+                ui.colored_label(WARN, format!("{} behind live", fmt_secs(behind)));
+                if ui.small_button("Live").on_hover_text("jump back to now and follow it").clicked() {
+                    click = Some(PlayClick::Live);
+                }
+            }
+        } else {
+            ui.colored_label(DIM, "simulation");
+        }
+        if let Some(t) = at {
+            ui.colored_label(DIM, format!("{} / {}", fmt_secs(t), fmt_secs(a)));
+        }
+    });
+    click
 }
 
 /// The audio so far, min/max per column: the whole recording, or the last 30 s when live.

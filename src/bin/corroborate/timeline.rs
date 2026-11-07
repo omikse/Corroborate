@@ -412,21 +412,6 @@ impl App {
         }
     }
 
-    /// Play / pause, and whether this is a simulation or live (with Live: back to now).
-    pub(crate) fn play_controls(&mut self, ui: &mut egui::Ui) {
-        if ui.small_button(if self.ph.playing { "Pause" } else { "Play" }).on_hover_text("Space: play or pause the selected node's playhead").clicked() {
-            self.ph.playing = !self.ph.playing;
-        }
-        if self.is_live() {
-            ui.colored_label(Color32::from_rgb(235, 80, 80), "live");
-            if ui.small_button("Live").on_hover_text("jump the playhead back to now").clicked() {
-                self.go_live();
-            }
-        } else {
-            ui.colored_label(DIM, "simulation");
-        }
-    }
-
     /// The timeline panel's contents.
     pub(crate) fn timeline_view(&mut self, ui: &mut egui::Ui) {
         let (mut events, end) = self.timeline_events();
@@ -476,11 +461,9 @@ impl App {
             if let Some(m) = &mut self.ev.max_error {
                 ui.add(egui::DragValue::new(m).range(0.001..=86_400.0).speed(0.1).suffix(" s"));
             }
-            if !self.follow && ui.small_button("Follow").clicked() {
+            if !self.follow && ui.small_button("Follow").on_hover_text("keep the playhead in view").clicked() {
                 self.follow = true;
             }
-            ui.separator();
-            self.play_controls(ui);
         });
         if !self.tls.open {
             return;
@@ -513,13 +496,26 @@ impl App {
         let h = ruler_h + lane_h * lines.len().max(1) as f32 + 4.0;
         let sync_w = (ui.available_width() * 0.4).min(320.0);
         let rows_w = ui.available_width() - sync_w - 8.0;
-        let sync_h = h.max(70.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui(Vec2::new(sync_w, sync_h), |ui| self.sync_list(ui, sync_h));
-            ui.separator();
-            ui.allocate_ui(Vec2::new(rows_w, 0.0), |ui| {
-        egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
-            let (area, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click_and_drag());
+        // Both halves fill the panel's height (the user sizes the panel); the rows scroll inside.
+        let panel_h = ui.available_height().max(70.0);
+        let sync_h = panel_h;
+        // Fixed columns: the Sync list wraps inside its own, so it can never push the rows off
+        // the right edge.
+        let top = ui.cursor().min;
+        let full = Rect::from_min_size(top, Vec2::new(sync_w + 8.0 + rows_w, panel_h));
+        ui.allocate_rect(full, Sense::hover());
+        let sync_rect = Rect::from_min_size(top, Vec2::new(sync_w, sync_h));
+        let rows_rect = Rect::from_min_size(Pos2::new(top.x + sync_w + 8.0, top.y), Vec2::new(rows_w, panel_h));
+        ui.painter().vline(top.x + sync_w + 4.0, full.y_range(), Stroke::new(1.0, LINE));
+        let clip = ui.clip_rect();
+        let mut su = ui.new_child(egui::UiBuilder::new().max_rect(sync_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+        su.set_clip_rect(sync_rect.intersect(clip));
+        self.sync_list(&mut su, sync_h);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rows_rect).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
+            ui.set_clip_rect(rows_rect.intersect(clip));
+            ui.vertical(|ui| {
+        egui::ScrollArea::vertical().id_salt("timeline-rows").max_height(panel_h).auto_shrink([false, false]).show(ui, |ui| {
+            let (area, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h.max(ui.available_height())), Sense::click_and_drag());
             let p = ui.painter_at(area);
             p.rect_filled(area, 0.0, PANEL);
             let track = Rect::from_min_max(Pos2::new(area.left() + label_w, area.top()), area.max);
@@ -529,9 +525,22 @@ impl App {
                 self.tl = (0.0, 600.0);
                 self.follow = true;
             }
-            if self.follow && end > f64::MIN {
+            // Follow: the active playhead (or the first row's) stays in view, three quarters
+            // across while playing; with no playhead yet, the newest finding.
+            let head = self.active_key().or_else(|| rows.first().map(|r| (r.group.kind == Ck::Absolute, r.group.id.clone()))).and_then(|(abs, g)| {
+                let pos = self.ph.get(abs, &g)?;
+                let sh = if abs { 0.0 } else { rows.iter().find(|r| r.group.id == g).map_or(0.0, |r| shift_of(&self.tls, r, self.tl.0)) };
+                Some(pos + sh)
+            });
+            if self.follow {
                 let span = (self.tl.1 - self.tl.0).clamp(60.0, 30.0 * 86_400.0);
-                self.tl = (end - span * 0.95, end + span * 0.05);
+                match head {
+                    Some(x) if self.ph.playing => self.tl = (x - span * 0.75, x + span * 0.25),
+                    Some(x) if x < self.tl.0 + span * 0.05 || x > self.tl.0 + span * 0.95 => self.tl = (x - span * 0.25, x + span * 0.75),
+                    Some(_) => {}
+                    None if end > f64::MIN => self.tl = (end - span * 0.95, end + span * 0.05),
+                    None => {}
+                }
             }
             let span = (self.tl.1 - self.tl.0).max(1e-3);
             if let Some(hp) = resp.hover_pos() {
