@@ -170,6 +170,15 @@ fn canvas_groups_colours_and_styles() {
     assert_eq!(cg.groups.iter().map(|g| g.kind).collect::<Vec<_>>(), vec![Ck::Absolute, Ck::Relative]);
     assert_eq!(cg.of_node[b], cg.of_node[c]);
     assert_ne!(cg.of_node[a], cg.of_node[b]);
+
+    // A node group holding a and b glows in both their groups' colours.
+    let g = app.add(Kind::Group { def: "Group".into(), rows: Vec::new() }, Pos2::ZERO);
+    app.nodes[a].parent = Some(g);
+    app.nodes[b].parent = Some(g);
+    let cg = app.canvas_groups();
+    let mut both = [cg.of_node[a].clone(), cg.of_node[b].clone()].concat();
+    both.sort_unstable();
+    assert_eq!(cg.of_node[g], both);
 }
 
 /// The wire box: UTC time, count and span, error at each confidence, red over the maximum.

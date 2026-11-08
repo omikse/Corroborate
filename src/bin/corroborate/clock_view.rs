@@ -272,7 +272,7 @@ impl App {
                 g.color = PALETTE[1 + (n - 1) % (PALETTE.len() - 1)];
             }
         }
-        let of_node = per
+        let mut of_node: Vec<Vec<usize>> = per
             .iter()
             .map(|cs| {
                 let mut g: Vec<usize> = cs.iter().filter_map(|c| groups.iter().position(|g| g.id == self.ev.clocks.get(c).group)).collect();
@@ -281,6 +281,17 @@ impl App {
                 g
             })
             .collect();
+        // A node group is on the clock groups of the nodes inside it (its glow outside).
+        for i in 0..self.nodes.len() {
+            let mut p = self.nodes[i].parent;
+            while let Some(g) = p {
+                let add = of_node[i].clone();
+                of_node[g].extend(add);
+                of_node[g].sort_unstable();
+                of_node[g].dedup();
+                p = self.nodes[g].parent;
+            }
+        }
         CanvasGroups { groups, of_node, nums }
     }
 
@@ -363,13 +374,25 @@ impl App {
             }
         }
         // The group's number (1°, 2°…) above its top-left node, as on the timeline.
+        // Several on one node (a node group holding several clock groups): side by side.
+        let mut used: Vec<(NodeId, f32)> = Vec::new();
         for (g, grp) in cg.groups.iter().enumerate() {
             let first = (0..self.nodes.len())
                 .filter(|&i| here(i) && cg.of_node[i].contains(&g))
-                .map(|i| self.node_rect(origin, i))
-                .min_by(|a, b| (a.top() + a.left()).total_cmp(&(b.top() + b.left())));
-            if let Some(r) = first {
-                painter.text(r.left_top() + Vec2::new(2.0, -12.0) * z, Align2::LEFT_BOTTOM, group_label(cg.nums[g]), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
+                .min_by(|&a, &b| {
+                    let (ra, rb) = (self.node_rect(origin, a), self.node_rect(origin, b));
+                    (ra.top() + ra.left()).total_cmp(&(rb.top() + rb.left()))
+                });
+            if let Some(i) = first {
+                let r = self.node_rect(origin, i);
+                let dx = used.iter().find(|(n, _)| *n == i).map_or(0.0, |(_, x)| *x);
+                let at = r.left_top() + Vec2::new(2.0 * z + dx, -12.0 * z);
+                let shown = painter.text(at, Align2::LEFT_BOTTOM, group_label(cg.nums[g]), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
+                let w = shown.width() + 6.0 * z;
+                match used.iter_mut().find(|(n, _)| *n == i) {
+                    Some((_, x)) => *x += w,
+                    None => used.push((i, w)),
+                }
             }
         }
         for w in self.graph.wires().iter().filter(|w| here(w.from) && here(w.to)) {

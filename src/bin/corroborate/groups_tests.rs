@@ -331,6 +331,8 @@ fn groups_on_a_big_project() {
     }
     assert!(d.app().nodes[m].state.lock().unwrap().done, "the match inside the group ends");
     println!("{n} frames while it ran, worst {:.0} ms", worst * 1000.0);
+    d.frames(3);
+    d.shot("groups_jiku_top_matched");
     // Inside, framed.
     d.app().pick_only(g);
     let t = Instant::now();
