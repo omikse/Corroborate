@@ -394,6 +394,60 @@ fn add_use_from_menu_and_make_single() {
     d.shot("groups_12_single");
 }
 
+/// By mouse only: a box dragged round two nodes, right-click → Group, a double-click opens it,
+/// the path's Top goes back out, right-click → Ungroup.
+#[test]
+fn group_by_mouse() {
+    let Scene { mut d, inv, comb, .. } = scene();
+    let before = wires(d.app());
+    // A box from empty canvas over Invert and Combine (right-drag, as box select does).
+    let app = d.app();
+    let (ri, rc) = (app.node_rect(app.canvas_origin, inv), app.node_rect(app.canvas_origin, comb));
+    // From empty canvas right of Combine and above Invert, to inside Invert's left part.
+    let from = Pos2::new(rc.right() + 20.0, ri.top() - 15.0);
+    let to = Pos2::new(ri.center().x, rc.bottom() - 20.0);
+    d.h.hover_at(from);
+    d.h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    d.frames(1);
+    for k in 1..=6 {
+        d.h.hover_at(from + (to - from) * (k as f32 / 6.0));
+        d.frames(1);
+    }
+    d.h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    d.frames(2);
+    assert_eq!(d.app().picked(), vec![inv, comb], "the box picks the two");
+    let t = d.node_title(inv);
+    d.right_click_at(t.x, t.y);
+    d.click("Group (Ctrl+G)");
+    let g = group_of(d.app());
+    assert_eq!(d.app().nodes[comb].parent, Some(g));
+    // Double-click its title (a moment after the clicks before, or egui counts a triple click).
+    d.frames(20);
+    let t = d.node_title(g);
+    d.h.hover_at(t);
+    // The harness's clock moves 0.25 s a frame: egui's 0.3 s for a double-click is made 1.5 s
+    // here, so a click a frame (press and release in one) is a double-click.
+    d.h.ctx.options_mut(|o| o.input_options.max_double_click_delay = 1.5);
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            d.h.event(egui::Event::PointerButton { pos: t, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        }
+        d.h.step();
+    }
+    d.frames(3);
+    let (view, msg) = (d.app().view, d.msg());
+    assert_eq!(view, Some(g), "a double-click opens the group: {msg}");
+    d.click("Top");
+    assert_eq!(d.app().view, None);
+    let t = d.node_title(g);
+    d.right_click_at(t.x, t.y);
+    d.click("Ungroup (Alt+G)");
+    let app = d.app();
+    assert!(app.nodes[g].hidden && app.nodes[inv].parent.is_none());
+    assert_eq!(wires(d.app()), before);
+    d.shot("groups_14_by_mouse");
+}
+
 /// A port renamed in the group's menu: renamed in every use, each keeping its wires outside.
 #[test]
 fn rename_a_port() {

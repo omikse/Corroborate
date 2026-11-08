@@ -1112,7 +1112,12 @@ impl App {
                     self.pick_only(i);
                 }
                 match act {
-                    1 => self.enter_group(i, area),
+                    1 => {
+                        self.enter_group(i, area);
+                        // This frame's click picked the group: picking it now would take the
+                        // canvas back out to the group's level.
+                        clicked = None;
+                    }
                     2 => {
                         self.pick_only(i);
                         self.ungroup_selected();
