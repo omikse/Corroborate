@@ -954,6 +954,29 @@ impl App {
         self.sync_many_ports();
     }
 
+    /// How many groups share group `g`'s definition (itself included).
+    pub(crate) fn group_uses(&self, g: NodeId) -> usize {
+        let def = self.nodes[g].kind.saved_param();
+        self.nodes.iter().filter(|n| !n.hidden && matches!(&n.kind, Kind::Group { def: d, .. } if *d == def)).count()
+    }
+
+    /// Make single: group `g` gets a definition of its own (named like the old one, numbered),
+    /// so changes inside it no longer reach the other uses, nor theirs it.
+    pub(crate) fn make_single(&mut self, g: NodeId) {
+        let Kind::Group { def, .. } = &self.nodes[g].kind else { return };
+        let old = def.clone();
+        let defs: Vec<String> = self.group_defs_list().into_iter().map(|(d, _)| d).collect();
+        let new = unique(&old, &defs);
+        if let Kind::Group { def, .. } = &mut self.nodes[g].kind {
+            *def = new.clone();
+        }
+        if self.nodes[g].label == old {
+            self.nodes[g].label = new.clone();
+        }
+        self.msg = format!("made single: this use of {old} is {new} now, changes inside it stay in it");
+        self.save_project();
+    }
+
     /// Definitions in the project, each with one use of it (Add node → Groups).
     pub(crate) fn group_defs_list(&self) -> Vec<(String, NodeId)> {
         let mut v: Vec<(String, NodeId)> = Vec::new();
@@ -1003,7 +1026,7 @@ impl look::NodeLook for GroupLook {
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
         let r = look::content(app, ui, i);
         let def = app.nodes[i].kind.saved_param();
-        let uses = app.nodes.iter().filter(|n| !n.hidden && matches!(&n.kind, Kind::Group { def: d, .. } if *d == def)).count();
+        let uses = app.group_uses(i);
         let n = app.inside(i).into_iter().filter(|&x| !app.is_port_node(x)).count();
         look::area(ui, r, |ui| {
             look::line(ui, format!("{n} node(s) inside"), TEXT);

@@ -1023,6 +1023,7 @@ impl App {
             let is_group = matches!(self.nodes[i].kind, Kind::Group { .. });
             let can_group = !matches!(self.nodes[i].kind, Kind::GroupInput | Kind::GroupOutput);
             let mut group_act: Option<u8> = None;
+            let uses = if is_group { self.group_uses(i) } else { 0 };
             if is_group && resp.double_clicked() {
                 group_act = Some(1);
             }
@@ -1052,6 +1053,10 @@ impl App {
                     group_act = Some(2);
                     ui.close();
                 }
+                if is_group && uses > 1 && ui.button("Make single").on_hover_text("This use gets a definition of its own: changes inside it stop reaching the other uses").clicked() {
+                    group_act = Some(4);
+                    ui.close();
+                }
                 if can_group && ui.button("Group (Ctrl+G)").on_hover_text("These nodes (the selected ones, or this one) into one group node").clicked() {
                     group_act = Some(3);
                     ui.close();
@@ -1071,6 +1076,7 @@ impl App {
                         self.pick_only(i);
                         self.ungroup_selected();
                     }
+                    4 => self.make_single(i),
                     _ => {
                         self.group_selected();
                     }
@@ -1102,7 +1108,7 @@ impl App {
             let lab = &self.nodes[i].label;
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
             painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
-            painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, role_text(spec.role), FontId::proportional(10.0 * self.zoom), DIM);
+            painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, if spec.name == groups::GROUP { "group" } else { role_text(spec.role) }, FontId::proportional(10.0 * self.zoom), DIM);
             // The node's own drawing and controls: its look.rhai when it has one (which may call
             // the folder's Rust `Look` as native()), else that `Look`.
             let show_status = frame.status.unwrap_or_else(|| nl.status());

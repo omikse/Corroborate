@@ -5,6 +5,7 @@
 use super::drive::{self, Drive};
 use super::*;
 use egui::{Key, Modifiers};
+use egui_kittest::kittest::{NodeT, Queryable};
 
 /// Two places → Invert → Combine (all) ← the second place; Combine → Map.
 struct Scene {
@@ -337,6 +338,41 @@ fn groups_on_a_big_project() {
     d.app().stop_run();
     d.wait_until(10.0, |a| !a.running());
     assert!(worst < 2.0, "no frame takes seconds: worst {worst:.1} s");
+}
+
+/// Add node → Groups adds another use of a group; right-click → Make single gives one use a
+/// definition of its own, after which changes inside the first no longer reach it.
+#[test]
+fn add_use_from_menu_and_make_single() {
+    let Scene { mut d, inv, comb, .. } = scene();
+    d.app().sel.picked = [inv, comb].into_iter().collect();
+    key(&mut d, Modifiers::COMMAND, Key::G);
+    let g1 = group_of(d.app());
+    // Right-click on empty canvas, low on the left, and pick the group under GROUPS.
+    let o = d.app().canvas_origin;
+    d.right_click_at(o.x + 300.0, o.y + 600.0);
+    d.shot("groups_11_add_menu");
+    // The menu's button (the group node shows its definition's name too).
+    d.h.get_all_by_role(egui::accesskit::Role::Button).filter(|n| n.accesskit_node().label().as_deref() == Some("Group")).last().unwrap().click();
+    d.frames(3);
+    let uses: Vec<NodeId> = (0..d.app().nodes.len()).filter(|&i| !d.app().nodes[i].hidden && matches!(d.app().nodes[i].kind, Kind::Group { .. })).collect();
+    assert_eq!(uses.len(), 2, "{}", d.msg());
+    let g2 = uses[1];
+    assert_eq!(d.app().group_uses(g1), 2);
+    d.frames(3);
+    // Make single, from the second use's menu.
+    let t = d.node_title(g2);
+    d.right_click_at(t.x, t.y);
+    d.click("Make single");
+    assert_eq!(d.app().group_uses(g1), 1);
+    assert_eq!(d.app().group_uses(g2), 1);
+    assert_eq!(d.app().nodes[g2].label, "Group 2");
+    // A change inside the first stays there.
+    d.app().nodes[inv].label = "Only here".into();
+    d.frames(3);
+    let inv2 = d.app().inside(g2).into_iter().find(|&x| matches!(d.app().nodes[x].kind, Kind::InvertLocation)).unwrap();
+    assert_eq!(d.app().nodes[inv2].label, "Invert location");
+    d.shot("groups_12_single");
 }
 
 /// Right-click on a Group Output port removes the port and its wires outside; on a group's
