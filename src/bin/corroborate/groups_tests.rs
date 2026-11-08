@@ -278,6 +278,67 @@ fn pick_inside_and_delete() {
     assert!(app.graph.feeder(map, "location").is_none());
 }
 
+/// The Jiku project (50 videos into one Audio match; a copy in target\drive) all in one group:
+/// Ctrl+A, Ctrl+G, then run it from outside and look inside. Frames stay quick, the match runs
+/// through the group as before. PNGs groups_jiku_top, groups_jiku_inside.
+/// Run: cargo test --profile fast --bin corroborate groups_on_a_big_project -- --ignored --nocapture
+#[test]
+#[ignore]
+fn groups_on_a_big_project() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let made = root.join("app").join("projects").join("Jiku GT_090912").join("Jiku GT_090912.txt");
+    assert!(made.is_file(), "make it first: make_jiku_project");
+    let dir = drive::out_dir().join("Jiku groups");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Jiku groups.txt");
+    std::fs::copy(&made, &file).unwrap();
+    let mut d = Drive::new();
+    d.app().open_project(file.clone());
+    d.app().places.open = false;
+    d.frames(3);
+    let before = wires(d.app());
+    key(&mut d, Modifiers::COMMAND, Key::A);
+    let t = Instant::now();
+    key(&mut d, Modifiers::COMMAND, Key::G);
+    println!("Ctrl+G on 51 nodes: {:.0} ms (3 frames)", t.elapsed().as_secs_f64() * 1000.0);
+    let g = group_of(d.app());
+    assert_eq!(d.app().inside(g).len(), 53, "51 nodes and the two port nodes");
+    assert_eq!(wires(d.app()), before);
+    d.frames(2);
+    d.shot("groups_jiku_top");
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
+    d.click("▶ Run");
+    let (mut worst, mut n) = (0.0f64, 0);
+    let end = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < end && !d.app().nodes[m].state.lock().unwrap().done {
+        let t = Instant::now();
+        d.h.step();
+        worst = worst.max(t.elapsed().as_secs_f64());
+        n += 1;
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(d.app().nodes[m].state.lock().unwrap().done, "the match inside the group ends");
+    println!("{n} frames while it ran, worst {:.0} ms", worst * 1000.0);
+    // Inside, framed.
+    d.app().pick_only(g);
+    let t = Instant::now();
+    key(&mut d, Modifiers::NONE, Key::Tab);
+    println!("Tab into 53 nodes: {:.0} ms (3 frames)", t.elapsed().as_secs_f64() * 1000.0);
+    d.frames(3);
+    d.shot("groups_jiku_inside");
+    // Saved and opened again: still one group of 51.
+    assert!(d.app().save());
+    let mut e = Drive::new();
+    e.app().open_project(file);
+    e.frames(3);
+    let g2 = group_of(e.app());
+    assert_eq!(e.app().inside(g2).len(), 53);
+    d.app().stop_run();
+    d.wait_until(10.0, |a| !a.running());
+    assert!(worst < 2.0, "no frame takes seconds: worst {worst:.1} s");
+}
+
 /// Right-click on a Group Output port removes the port and its wires outside; on a group's
 /// input, the wire into it goes and the port stays.
 #[test]

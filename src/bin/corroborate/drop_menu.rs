@@ -72,21 +72,23 @@ impl App {
             self.nodes[id].pos.x -= w + 20.0;
         }
         let spec = self.graph.nodes()[id].spec.clone();
-        match end {
-            End::Out(n, k) => {
-                let out = self.graph.nodes()[n].spec.outputs[k].name;
-                match spec.inputs.iter().find(|p| p.kind == want) {
-                    Some(p) => self.wire(n, out, id, p.name),
-                    None => self.wire_many(n, out, id),
+        // Through `connect_shown`: either end may be a group's port or its Group Input / Output.
+        let made = match end {
+            End::Out(n, k) => match spec.inputs.iter().position(|p| p.kind == want).or_else(|| spec.inputs.iter().position(|p| p.kind == PortKind::Any)) {
+                Some(p) => self.connect_shown(n, k, id, p),
+                None => {
+                    let out = self.graph.nodes()[n].spec.outputs[k].name;
+                    self.wire_many(n, out, id);
+                    Ok(String::new())
                 }
-            }
-            End::In(n, k) => {
-                let inp = self.graph.nodes()[n].spec.inputs[k].name;
-                if let Some(p) = spec.outputs.iter().find(|p| p.kind == want || want == PortKind::Any) {
-                    self.graph.disconnect(n, inp);
-                    self.wire(id, p.name, n, inp);
-                }
-            }
+            },
+            End::In(n, k) => match spec.outputs.iter().position(|p| p.kind == want || want == PortKind::Any) {
+                Some(p) => self.connect_shown(id, p, n, k),
+                None => Ok(String::new()),
+            },
+        };
+        if let Err(e) = made {
+            self.msg = e;
         }
         self.sync_many_ports();
         self.pick_only(id);

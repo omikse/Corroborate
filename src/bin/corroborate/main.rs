@@ -243,6 +243,8 @@ struct App {
     last_project_save: Instant,
     /// Where the canvas starts on screen (last frame); tests use it to find nodes.
     canvas_origin: Pos2,
+    /// The canvas on screen (last frame).
+    canvas_rect: Rect,
     /// Programs on the data bus, by node, while the graph runs; when inputs were last sent.
     programs: HashMap<NodeId, bus::Program>,
     bus_sent: Instant,
@@ -329,6 +331,7 @@ impl App {
             group_nums: Default::default(),
             last_project_save: Instant::now(),
             canvas_origin: Pos2::ZERO,
+            canvas_rect: Rect::NOTHING,
             programs: HashMap::new(),
             bus_sent: Instant::now(),
             changes: Vec::new(),
@@ -945,6 +948,7 @@ impl App {
         }
         let origin = area.min;
         self.canvas_origin = origin;
+        self.canvas_rect = area;
         self.box_select(ui, &bg, &painter, origin);
         let menu_at = (bg.interact_pointer_pos().or(ui.ctx().pointer_hover_pos()).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         bg.context_menu(|ui| self.add_menu(ui, menu_at.to_pos2()));

@@ -564,6 +564,12 @@ impl App {
         }
         // The group shown keeps the ends it had; nothing else changes in the graph.
         self.set_iface(g, &f);
+        // The group where it can be seen: a big selection's middle may be off screen.
+        let area = self.canvas_rect;
+        if area.is_positive() && !area.contains_rect(self.node_rect(self.canvas_origin, g)) {
+            let r = self.node_rect(self.canvas_origin, g);
+            self.pan += area.center() - r.center();
+        }
         self.pick_only(g);
         self.msg = format!("grouped {} node(s) into {def}: Tab opens it, Alt+G ungroups", sel.len());
         self.save_project();
