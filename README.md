@@ -33,12 +33,25 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 In the workbench: right-click (or **Add node**) to add nodes, drag from a dot to a dot to wire
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
-Projects: the top bar shows the project's name beside **File**. **New** empties the canvas,
-**Open…** opens a project file and **Save as…** saves this one to a new file (both start in
-`app\projects\`); every project saves itself to its own file as you work. Until it is saved
-somewhere, the project is "untitled" and lives in `settings\project.txt`; New keeps a non-empty
-untitled one as `settings\project.bak.txt`. The project last opened opens at the next start
-(`settings\last_project.txt` says which). `--new` starts with an empty untitled project.
+Projects: the top bar shows **File**, the project's name (with • while it has unsaved changes)
+and **Recordings**. File has **New** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**, **Save**
+(Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project
+folder**. A saved project is a folder named after it, `<name>\<name>.txt`, with `results\` (what
+its Result records write) and `recordings\` (files copied into it); the dialogs start in
+`app\projects\`. The project file changes only on Save; until then changes are kept in
+`<name>.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
+ask Save, Don't save or Cancel when there are unsaved changes. Until it is saved somewhere, the
+project is "untitled" and lives in `settings\project.txt` (written as you work); New keeps the old
+one as `settings\project.bak.txt`. The project last opened opens at the next start
+(`settings\last_project.txt`; the ten last opened are `settings\recent.txt`). `--new` starts with an empty untitled project.
+
+Recordings belong to the project: every file a SOURCER reads is listed under **Recordings** with
+its size and a print of its first and last 64 KiB, and stays listed when its SOURCER is deleted
+(until Remove). Files stay where they are unless **Copy into project** puts them in the project's
+`recordings\`. The project keeps each one's path relative to the project file and its absolute
+path; Open looks at the relative path first, then the absolute one, then for a file of the same
+size and print in the project folder, and points the SOURCERs at it. Recordings that are missing
+(**Locate…**) or changed since they were added (**Accept change**) are marked.
 
 Canvas keys and mouse:
 

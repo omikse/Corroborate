@@ -259,7 +259,7 @@ impl App {
     /// Start every protocol-2 module's program (the graph is starting).
     pub(crate) fn start_programs(&mut self) {
         self.programs.clear();
-        let dir = results_dir();
+        let dir = self.results_dir();
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             let Kind::Module { m, settings } = &n.kind else { continue };

@@ -28,6 +28,8 @@ mod clock_tests;
 mod look_tests;
 #[cfg(test)]
 mod canvas_tests;
+#[cfg(test)]
+mod recordings_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
@@ -38,6 +40,7 @@ mod places;
 mod playhead;
 mod sound;
 mod project;
+mod recordings;
 mod layout;
 mod look;
 mod nodes;
@@ -190,10 +193,6 @@ struct NodeData {
 }
 
 
-fn results_dir() -> PathBuf {
-    corroborate::home().join("results")
-}
-
 fn clean(s: &str) -> String {
     s.replace(['|', '\n', '\r'], " ")
 }
@@ -269,6 +268,16 @@ struct App {
     sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
+    /// The project's recordings (recordings.rs), and relative paths read but not resolved yet.
+    library: recordings::Library,
+    rel_pending: Vec<(String, String)>,
+    /// The project's text as its file has it (unsaved changes differ from it), the question
+    /// about unsaved changes waiting for an answer, and the window's closing (project.rs).
+    saved_text: String,
+    ask: Option<project::Then>,
+    close_now: bool,
+    quitting: bool,
+    title: String,
 }
 
 const NODE_W: f32 = 210.0;
@@ -321,6 +330,13 @@ impl App {
             places: Default::default(),
             ph: Default::default(),
             sound: Default::default(),
+            library: Default::default(),
+            rel_pending: Vec::new(),
+            saved_text: String::new(),
+            ask: None,
+            close_now: false,
+            quitting: false,
+            title: String::new(),
         }
     }
 
@@ -332,8 +348,7 @@ impl App {
             let _ = std::fs::copy(dir.join("project.txt"), dir.join("project.bak.txt"));
             project::remember(None);
         } else {
-            app.project_path = project::last_used();
-            app.load_project();
+            app.open_at_start();
         }
         if let Some(src) = start {
             // A path or URL on the command line goes into the first source node.
@@ -370,28 +385,19 @@ impl App {
 
     // ---------------- project file
 
-    fn save_project(&mut self) {
-        if let Some(path) = self.project_file() {
-            self.save_project_to(&path);
-        }
-        self.last_project_save = Instant::now();
-    }
+    // Saving, opening and the File menu: project.rs.
 
-    /// Writes the project to `path`: first beside it as `<name>.tmp`, then renamed over it, so a
-    /// crash while saving leaves the previous project whole, never half a file.
-    fn save_project_to(&self, path: &std::path::Path) -> bool {
-        if let Some(d) = path.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, self.project_text()).is_ok() && std::fs::rename(&tmp, path).is_ok()
-    }
-
-    /// The project file's text: visible nodes (renumbered), Manual rows and wires, one per line.
+    /// The project file's text: visible nodes (renumbered), Manual rows and wires, clocks and
+    /// evidence, recordings (paths relative to the project file's folder), one per line.
     fn project_text(&self) -> String {
+        self.project_text_in(self.project_file().as_deref().and_then(std::path::Path::parent))
+    }
+
+    /// The project's text for a file in folder `dir` (recording paths are relative to it).
+    fn project_text_in(&self, dir: Option<&std::path::Path>) -> String {
         // Only visible nodes, renumbered.
         let keep: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
-        self.nodes_text(&keep) + self.evidence_text().as_str()
+        self.nodes_text(&keep) + self.evidence_text().as_str() + self.recordings_text(dir).as_str()
     }
 
     /// Nodes `keep` in project-file form (renumbered from 0), with the wires between them: the
@@ -420,11 +426,6 @@ impl App {
             }
         }
         text
-    }
-
-    fn load_project(&mut self) -> bool {
-        let Some(text) = self.project_file().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
-        self.load_project_text(&text)
     }
 
     /// Adds the nodes, rows and wires of a project file's text. Lines it does not understand
@@ -461,7 +462,9 @@ impl App {
                 ["wire", a, o, b, i] => wires.push((a.parse().unwrap_or(usize::MAX), o.to_string(), b.parse().unwrap_or(usize::MAX), i.to_string())),
                 // Clocks and evidence belong to the project: loading reads them, pasting does not.
                 other if keep_ids => {
-                    self.evidence_line(other);
+                    if !self.evidence_line(other) {
+                        self.recording_line(other);
+                    }
                 }
                 _ => {}
             }
@@ -575,7 +578,7 @@ impl App {
         self.save_project();
         self.runs += 1;
         self.start_programs();
-        let dir = results_dir();
+        let dir = self.results_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.msg = format!("cannot create {}: {e}", dir.display());
             return;
@@ -1249,8 +1252,8 @@ impl App {
                         self.save_project();
                     }
                 });
-                if ui.button("Results folder").clicked() {
-                    let d = results_dir();
+                if ui.button("Results folder").on_hover_text(self.results_dir().display().to_string()).clicked() {
+                    let d = self.results_dir();
                     let _ = std::fs::create_dir_all(&d);
                     let _ = std::process::Command::new("explorer").arg(d).spawn();
                 }
@@ -1355,6 +1358,9 @@ impl App {
             self.graph_view(ui);
         });
         let ctx = ui.ctx().clone();
+        self.ask_ui(&ctx);
+        self.sync_recordings();
+        self.window_tick(&ctx);
 
         let running = self.running();
         self.history_tick(&ctx);
@@ -1369,7 +1375,7 @@ impl App {
         }
         // Live wires pulse: redraw smoothly while a live stream runs.
         let live = self.nodes.iter().any(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false));
-        ctx.request_repaint_after(Duration::from_millis(if live { 33 } else if running { 200 } else { 1000 }));
+        ctx.request_repaint_after(Duration::from_millis(if live { 33 } else if running || self.copying() { 200 } else { 1000 }));
     }
 }
 

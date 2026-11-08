@@ -99,7 +99,7 @@ impl App {
     pub(crate) fn record_folder(&self, rec: NodeId) -> PathBuf {
         match &self.nodes[rec].kind {
             Kind::ResultRecord { folder } if !folder.trim().is_empty() => PathBuf::from(folder.trim()),
-            _ => results_dir(),
+            _ => self.results_dir(),
         }
     }
 
@@ -289,10 +289,10 @@ impl App {
         let r = look::content(self, ui, i);
         look::area(ui, r, |ui| {
             let recording = self.recordings.contains_key(&i);
+            let hint = self.results_dir().display().to_string();
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("folder").small().color(DIM));
                 if let Kind::ResultRecord { folder } = &mut self.nodes[i].kind {
-                    let hint = results_dir().display().to_string();
                     let w = (ui.available_width() - 60.0 * z).max(40.0);
                     ui.add_enabled(!recording, egui::TextEdit::singleline(folder).hint_text(hint).desired_width(w));
                 }
