@@ -71,10 +71,34 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                 f(&mut s);
             }
         };
-        let decoded: Vec<Result<Clip, String>> = thread::scope(|sc| {
-            let hs: Vec<_> = files.iter().map(|w| sc.spawn(|| decode(&w.path).map(Clip::new))).collect();
-            hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("decoder crashed".into()))).collect()
+        // One decoder per core at a time: fifty at once (beside the sources' own) starve each
+        // other.
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let threads = thread::available_parallelism().map_or(4, |n| n.get()).min(files.len());
+        let mut decoded: Vec<(usize, Result<Clip, String>)> = thread::scope(|sc| {
+            let hs: Vec<_> = (0..threads)
+                .map(|_| {
+                    sc.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let k = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(w) = files.get(k) else { break };
+                            if stop2.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            done.push((k, decode(&w.path).map(Clip::new)));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
+        let mut slots: Vec<Result<Clip, String>> = files.iter().map(|_| Err("decoder crashed".to_string())).collect();
+        for (k, c) in decoded.drain(..) {
+            slots[k] = c;
+        }
+        let decoded = slots;
         if stop2.load(Ordering::Relaxed) {
             return;
         }

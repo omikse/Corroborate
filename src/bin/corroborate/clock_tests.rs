@@ -641,9 +641,68 @@ fn audio_match_links_two_recordings() {
     let Ok(Data::Json(drift)) = app.value_from(m, "clock drift") else { panic!("no drift: {st}") };
     assert_eq!(drift.matches("\"ppm\"").count(), 1, "only a and its copy span 30 s of links: {drift}");
     assert!(matches!(app.value_from(m, "speed change"), Ok(Data::Events(v)) if v.is_empty()));
+    assert!(matches!(app.value_from(m, "gaps"), Ok(Data::Events(v)) if v.is_empty()), "no gaps");
     let (ca, cb) = (app.ev.clocks.get(&ua), app.ev.clocks.get(&ub));
     assert_eq!((ca.kind, ca.group.clone()), (Ck::Relative, cb.group.clone()), "one group");
     let on_a = ca.back(cb.at(10.0));
     assert!((on_a - 30.5).abs() < 0.002, "b's 10 s is a's {on_a}");
     app.stop_all();
+}
+
+/// Makes the Jiku project in the app folder: app\projects\Jiku GT_090912\Jiku GT_090912.txt, one
+/// SOURCER per video of event GT_090912 (the .mp4 files in tests\data\jiku, referenced where
+/// they are, not copied: 13 GB), all wired into one Audio match node, and puts it first in Open
+/// recent. Then runs it headless (no window) and checks the recordings link into groups, drawn
+/// to target\drive\jiku_project.png. Fetch the videos first: python tools/jiku.py GT_090912.
+/// Run: cargo test --profile fast --bin corroborate make_jiku_project -- --ignored --nocapture
+#[test]
+#[ignore]
+fn make_jiku_project() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data = root.join("tests").join("data").join("jiku").join("GT_090912");
+    let mut videos: Vec<PathBuf> = std::fs::read_dir(&data).expect("no Jiku data: python tools/jiku.py GT_090912").filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "mp4")).collect();
+    videos.sort();
+    assert_eq!(videos.len(), 50, "the 50 videos of GT_090912");
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let cols = 5;
+    let mut sources = Vec::new();
+    for (k, v) in videos.iter().enumerate() {
+        let (c, r) = (k % cols, k / cols);
+        let s = app.add(Kind::Sourcer { input: v.to_string_lossy().into_owned() }, Pos2::new(30.0 + 470.0 * c as f32, 40.0 + 300.0 * r as f32));
+        // GT_090912_<phone>_<phone clock at the start, ms>.
+        let stem = v.file_stem().unwrap().to_string_lossy().into_owned();
+        let parts: Vec<&str> = stem.split('_').collect();
+        app.nodes[s].label = format!("phone {} {}", parts[2], parts[3]);
+        sources.push(s);
+    }
+    let m = app.add(Kind::AudioMatch, Pos2::new(30.0 + 470.0 * cols as f32 + 80.0, 40.0));
+    for &s in &sources {
+        app.wire_many(s, "audio", m);
+    }
+    assert_eq!(app.graph.wires().len(), 50, "every video wired in");
+    let file = project::project_place(&root.join("app").join("projects").join("Jiku GT_090912"));
+    app.save_project_as(file.clone());
+    assert!(file.is_file(), "{}", file.display());
+    project::push_recent(&root.join("app").join("settings"), &file);
+    println!("saved {}", file.display());
+    // Check it syncs: run it as the app would.
+    app.run();
+    let t0 = std::time::Instant::now();
+    assert!(d.wait_until(600.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    let app = d.app();
+    let st = app.nodes[m].state.lock().unwrap().status.clone();
+    println!("{st} ({:.0} s)", t0.elapsed().as_secs_f64());
+    if let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") {
+        let e = json.find("\"errors\"").unwrap_or(0);
+        println!("{}", &json[e..json.len().min(e + 3000)]);
+    }
+    app.update_clocks();
+    let groups: std::collections::BTreeSet<String> = sources.iter().map(|&s| app.ev.clocks.get(&uid(app, s)).group.clone()).collect();
+    println!("{} recordings in {} groups", sources.len(), groups.len());
+    d.frames(5);
+    d.shot("jiku_project");
+    let app = d.app();
+    app.stop_all();
+    assert!(st.contains("of 1225 pairs"), "all 50 matched: {st}");
 }

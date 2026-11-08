@@ -380,7 +380,7 @@ impl Manifest {
         NodeSpec { name: self.id, role: self.role, inputs, outputs: self.outputs.clone() }
     }
 
-    /// The names a `many` input takes, in order ("in 1" … "in 24"); empty without one.
+    /// The names a `many` input takes, in order ("in 1" … "in 64"); empty without one.
     pub fn many_names(&self) -> Vec<&'static str> {
         match &self.many {
             Some(base) => (1..=MANY_MAX).map(|k| intern(&format!("{base} {k}"))).collect(),
@@ -410,8 +410,9 @@ impl Manifest {
 
 /// A name that lives as long as the program, kept once however often it is asked for. Ports and
 /// node names are `&'static str`; names read from files come through here.
-/// The most ports a `many = true` input grows to.
-pub const MANY_MAX: usize = 24;
+/// The most ports a `many = true` input grows to (an Audio match over one event's phones needs
+/// 50: Jiku GT_090912).
+pub const MANY_MAX: usize = 64;
 
 pub fn intern(s: &str) -> &'static str {
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
