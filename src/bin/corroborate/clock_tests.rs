@@ -579,9 +579,11 @@ fn drift_margins_drawn() {
     d.shot("timeline_drift_end");
 }
 
-/// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start) wired
-/// into an Audio match node give links naming both clocks, and the clock solve puts b's 10 s at
-/// a's 30.5 s, in one group.
+/// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start; b's
+/// microphone hears an echo and its own noise) wired into an Audio match node give links naming
+/// both clocks, and the clock solve puts b's 10 s at a's 30.5 s, in one group. A third file, a
+/// quieter copy of a, is called the same recording as a (and b is not); a and its copy's links
+/// span 45 s, enough for their drift (none).
 #[test]
 fn audio_match_links_two_recordings() {
     let ev = corroborate::synth::notes(90.0, 8000, 11);
@@ -595,16 +597,28 @@ fn audio_match_links_two_recordings() {
         w.finalize().unwrap();
         p.to_string_lossy().into_owned()
     };
-    let (pa, pb) = (write("match_a.wav", &ev[..60 * 8000]), write("match_b.wav", &ev[(20.5 * 8000.0) as usize..]));
+    let s0 = (20.5 * 8000.0) as usize;
+    let mut n = 3u32;
+    let other: Vec<f32> = (s0..ev.len())
+        .map(|i| {
+            n = n.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            ev[i] + 0.8 * ev[i - 47] + 0.2 * ((n >> 16) as f32 / 32768.0 - 1.0)
+        })
+        .map(|v| 0.5 * v)
+        .collect();
+    let copy: Vec<f32> = ev[..60 * 8000].iter().map(|&v| 0.7 * v).collect();
+    let (pa, pb, pc) = (write("match_a.wav", &ev[..60 * 8000]), write("match_b.wav", &other), write("match_c.wav", &copy));
     // Headless, drawn to target/drive/audio_match.png (no window).
     let mut d = crate::drive::Drive::new();
     let app = d.app();
     let a = app.add(Kind::Sourcer { input: pa }, Pos2::new(30.0, 40.0));
     let b = app.add(Kind::Sourcer { input: pb }, Pos2::new(30.0, 300.0));
+    let c = app.add(Kind::Sourcer { input: pc }, Pos2::new(30.0, 560.0));
     let m = app.add(Kind::AudioMatch, Pos2::new(460.0, 120.0));
     app.wire_many(a, "audio", m);
     app.wire_many(b, "audio", m);
     assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 3, "two wired and one free");
+    app.wire_many(c, "audio", m);
     app.run();
     assert!(d.wait_until(30.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.frames(5);
@@ -614,9 +628,19 @@ fn audio_match_links_two_recordings() {
     let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") else { panic!("no quality: {st}") };
     assert!(json.contains("\"level\":\"good\""), "{json}");
     app.update_clocks();
-    let (ua, ub) = (uid(app, a), uid(app, b));
-    assert!(app.ev.links.len() >= 2, "links: {} ({st})", app.ev.links.len());
-    assert!(app.ev.links.iter().all(|l| (l.a == ua && l.b == ub) || (l.a == ub && l.b == ua)), "both clocks named");
+    let (ua, ub, uc) = (uid(app, a), uid(app, b), uid(app, c));
+    let ab: Vec<_> = app.ev.links.iter().filter(|l| (l.a == ua && l.b == ub) || (l.a == ub && l.b == ua)).collect();
+    assert!(ab.len() >= 2, "links between a and b: {} ({st})", ab.len());
+    let Ok(Data::Events(same)) = app.value_from(m, "same recording") else { panic!("no same recording output: {st}") };
+    let mut on: Vec<&str> = same.iter().map(|e| e.clock.as_str()).collect();
+    on.sort();
+    let mut want = vec![ua.as_str(), uc.as_str()];
+    want.sort();
+    assert_eq!(on, want, "a and its copy are one recording, b is not: {same:?}");
+    assert!(same.iter().all(|e| e.t_end - e.t_start > 40.0), "{same:?}");
+    let Ok(Data::Json(drift)) = app.value_from(m, "clock drift") else { panic!("no drift: {st}") };
+    assert_eq!(drift.matches("\"ppm\"").count(), 1, "only a and its copy span 30 s of links: {drift}");
+    assert!(matches!(app.value_from(m, "speed change"), Ok(Data::Events(v)) if v.is_empty()));
     let (ca, cb) = (app.ev.clocks.get(&ua), app.ev.clocks.get(&ub));
     assert_eq!((ca.kind, ca.group.clone()), (Ck::Relative, cb.group.clone()), "one group");
     let on_a = ca.back(cb.at(10.0));

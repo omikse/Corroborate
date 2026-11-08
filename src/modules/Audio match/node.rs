@@ -7,7 +7,7 @@
 
 use super::*;
 use corroborate::audio_match::{self, Clip};
-use corroborate::data::Data;
+use corroborate::data::{Data, Event};
 use std::sync::atomic::AtomicU64;
 use std::thread;
 
@@ -93,11 +93,17 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         set(&|s| s.status = format!("matching {} pairs…", clips.len() * clips.len().saturating_sub(1) / 2));
         let refs: Vec<&Clip> = clips.iter().collect();
         let found = audio_match::match_all(&refs);
-        let (links, quality, status) = results(&used, &found, &errors);
+        let r = results(&used, &found, &errors);
         set(&|s| {
-            s.outbox = vec![("links", Data::Custom { kind: "link", json: links.clone() }), ("quality", Data::Custom { kind: "quality", json: quality.clone() })];
+            s.outbox = vec![
+                ("links", Data::Custom { kind: "link", json: r.links.clone() }),
+                ("quality", Data::Custom { kind: "quality", json: r.quality.clone() }),
+                ("clock drift", Data::Json(r.drift.clone())),
+                ("same recording", Data::Events(r.same.clone())),
+                ("speed change", Data::Events(r.speed.clone())),
+            ];
             s.outbox_rev += 1;
-            s.status = format!("{status}{note}");
+            s.status = format!("{}{note}", r.status);
             s.running = false;
             s.done = true;
         });
@@ -114,9 +120,32 @@ fn decode(path: &str) -> Result<Vec<f32>, String> {
     if out.is_empty() { Err("no audio".into()) } else { Ok(out) }
 }
 
-/// The links (JSON list of the `link` type, both clocks named), the quality (the `quality`
-/// type's fields, then the counts it rests on and each pair's), and the status line.
-fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors: &[String]) -> (String, String, String) {
+/// What the match gives on the node's outputs.
+struct Results {
+    /// JSON list of the `link` type, both clocks named.
+    links: String,
+    /// The `quality` type's fields, then the counts it rests on and each pair's.
+    quality: String,
+    /// JSON list, one per pair with a long enough span of links: how fast a's clock runs
+    /// against b's (`audio_match::drift`).
+    drift: String,
+    /// For each pair that is one recording twice, an event on each of the two clocks over the
+    /// matched stretch; for each pair one of which plays at another speed, one on b's clock.
+    same: Vec<Event>,
+    speed: Vec<Event>,
+    status: String,
+}
+
+/// The stretch of clock b (`a`: of clock a) the hits cover, with half a window either side.
+fn span(hits: &[audio_match::Hit], a: bool) -> (f64, f64) {
+    let t = |h: &audio_match::Hit| if a { h.t_a } else { h.t_b };
+    let lo = hits.iter().map(t).fold(f64::MAX, f64::min) - audio_match::WIN_S / 2.0;
+    let hi = hits.iter().map(t).fold(f64::MIN, f64::max) + audio_match::WIN_S / 2.0;
+    (lo.max(0.0), hi)
+}
+
+fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors: &[String]) -> Results {
+    let (mut drifts, mut same, mut speed) = (Vec::new(), Vec::new(), Vec::new());
     let mut links = Vec::new();
     let mut pairs = Vec::new();
     let (mut chunks, mut cands, mut weak, mut linked) = (0, 0, 0, 0);
@@ -137,6 +166,51 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
             linked += 1;
             let (ra, rb) = (root(&mut group, *a), root(&mut group, *b));
             group[ra] = rb;
+        }
+        if audio_match::same_recording(&p.hits) {
+            let corr = p.hits.iter().map(|h| h.corr).fold(0.0, f64::max);
+            for (w, o, on_a) in [(wa, wb, true), (wb, wa, false)] {
+                let (t0, t1) = span(&p.hits, on_a);
+                same.push(Event {
+                    clock: w.clock.clone(),
+                    t_start: t0,
+                    t_end: t1,
+                    label: format!("same recording as {}", o.label),
+                    detail: format!("the audio correlates {corr:.3} (two microphones stay under {}): a copy, not a second witness", audio_match::SAME_CORR),
+                    error_s: 0.0,
+                });
+            }
+        }
+        if let Some(d) = audio_match::drift(&p.hits) {
+            drifts.push(format!(
+                "{{\"a\":\"{}\",\"b\":\"{}\",\"ppm\":{:.1},\"error_ppm\":{:.1},\"span_s\":{:.1},\"links\":{}}}",
+                json_escape(&wa.label),
+                json_escape(&wb.label),
+                d.ppm,
+                d.error_ppm,
+                d.span_s,
+                d.links
+            ));
+            if audio_match::speed_changed(&d) {
+                let (t0, t1) = span(&p.hits, false);
+                speed.push(Event {
+                    clock: wb.clock.clone(),
+                    t_start: t0,
+                    t_end: t1,
+                    label: format!("speed {:+.2} % against {}", d.ppm * 1e-4, wa.label),
+                    detail: format!(
+                        "{} plays {:.0} ± {:.0} ppm {} than {} over {:.0} s: far beyond clock drift ({} ppm), so one was sped up or slowed down",
+                        wb.label,
+                        d.ppm.abs(),
+                        d.error_ppm,
+                        if d.ppm > 0.0 { "faster" } else { "slower" },
+                        wa.label,
+                        d.span_s,
+                        audio_match::SPEED_CHANGE_PPM
+                    ),
+                    error_s: 0.0,
+                });
+            }
         }
         for h in &p.hits {
             links.push(format!(
@@ -185,8 +259,14 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
         errs.join(","),
         pairs.join(",")
     );
-    let status = format!("{} links, {linked} of {} pairs, {groups} group{}", links.len(), found.len(), if groups == 1 { "" } else { "s" });
-    (format!("[{}]", links.join(",")), quality, status)
+    let mut status = format!("{} links, {linked} of {} pairs, {groups} group{}", links.len(), found.len(), if groups == 1 { "" } else { "s" });
+    if !same.is_empty() {
+        status += &format!(", {} same recording", same.len() / 2);
+    }
+    if !speed.is_empty() {
+        status += &format!(", {} speed change", speed.len());
+    }
+    Results { links: format!("[{}]", links.join(",")), quality, drift: format!("[{}]", drifts.join(",")), same, speed, status }
 }
 
 /// The node's part of the result file: what it gave on each output.

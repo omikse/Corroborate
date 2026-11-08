@@ -13,8 +13,16 @@ Outputs:
 - `quality`: level (good: all recordings in one group; weak: several groups; none: no links),
   the verdict, and the counts it rests on, per pair too: chunks tried, fingerprint candidates,
   candidates the cross-correlation did not confirm, links.
-- Planned and possible (drawn greyed): clock drift, same recording, edits, shared sounds, sound
-  source, speed change, gaps.
+- `clock drift`: for each pair whose links span 30 s or more, how fast one clock runs against
+  the other (ppm, with its error), from that pair's links alone (the solve uses all of them).
+  On Jiku within 24 ppm of the truth (median), 300 ppm (95 %): short overlaps and moving phones.
+- `same recording`: two files that are one recording (a copy, a re-upload, a re-encode), so not
+  two witnesses: an event on each over the stretch they share, when their lined-up audio
+  correlates over 0.8 (Jiku: two phones 0.18 median, 0.64 at most; a video against its own
+  audio 1.000).
+- `speed change`: a pair drifting over 1000 ppm beyond 3 sigma (quartz stays within about 300):
+  one was sped up or slowed down. Only up to about 1 %, where the fingerprints still match.
+- Possible (drawn greyed): edits, shared sounds, sound source, gaps.
 
 How: Wang landmark fingerprints (audiofp) of each recording at 8 kHz; every 15 s of one
 recording is matched against the whole other; each clear match is refined with GCC-PHAT

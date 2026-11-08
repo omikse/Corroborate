@@ -155,11 +155,11 @@ fn overlaps(recs: &[Rec]) -> Vec<(usize, usize, f64, f64)> {
 
 /// Links from the audio match over every pair of recordings: links, pairs with a link, chunks
 /// tried, fingerprint candidates, and candidates the cross-correlation did not confirm.
-fn links(recs: &[Rec]) -> (Vec<Link>, usize, usize, usize, usize) {
+fn links(recs: &[Rec]) -> (Vec<Link>, usize, usize, usize, usize, Vec<(usize, usize, audio_match::Pair)>) {
     let clips: Vec<&Clip> = recs.iter().map(|r| r.clip.as_ref().unwrap()).collect();
     let found = audio_match::match_all(&clips);
     let (mut out, mut linked, mut chunks, mut cands, mut weak) = (Vec::new(), 0, 0, 0, 0);
-    for (a, b, p) in found {
+    for (a, b, p) in found.clone() {
         chunks += p.chunks;
         cands += p.candidates;
         weak += p.weak;
@@ -176,7 +176,7 @@ fn links(recs: &[Rec]) -> (Vec<Link>, usize, usize, usize, usize) {
             });
         }
     }
-    (out, linked, chunks, cands, weak)
+    (out, linked, chunks, cands, weak, found)
 }
 
 /// Spanning-tree edges of the overlap graph: recordings minus connected clusters.
@@ -211,7 +211,7 @@ fn jiku_gt_090912_sync_from_audio() {
     let recs = load("GT_090912");
     let pairs = overlaps(&recs);
     let t0 = std::time::Instant::now();
-    let (ls, linked, chunks, cands, weak) = links(&recs);
+    let (ls, linked, chunks, cands, weak, found_pairs) = links(&recs);
     println!(
         "{} recordings, {} pairs overlapping 20 s or more in the truth; audio match ({:.0} s): {chunks} chunks, {cands} fingerprint candidates, {weak} not confirmed, {} links on {linked} pairs",
         recs.len(),
@@ -353,6 +353,54 @@ fn jiku_gt_090912_sync_from_audio() {
             println!("  devices {devs}: solved {:+.0} ppm, truth {:+.0} ppm", sv * 1e6, tr * 1e6);
         }
     }
+    // Each pair's own drift (a line through its links, `audio_match::drift`) against the truth.
+    let mut dd = Vec::new();
+    let mut outside = 0;
+    for (a, b, p) in &found_pairs {
+        let Some(d) = audio_match::drift(&p.hits) else { continue };
+        let truth = match conv {
+            Conv::Mul => recs[*b].speed / recs[*a].speed - 1.0,
+            Conv::Div => recs[*a].speed / recs[*b].speed - 1.0,
+        } * 1e6;
+        dd.push((d.ppm - truth).abs());
+        outside += usize::from((d.ppm - truth).abs() > 3.0 * d.error_ppm);
+        assert!(!audio_match::speed_changed(&d), "{}-{}: {d:?} called a speed change", recs[*a].name, recs[*b].name);
+    }
+    if !dd.is_empty() {
+        println!("pair drift from the links alone, {} pairs: off the truth by median {:.0} ppm, 95% {:.0} ppm; {outside} outside 3 sigma", dd.len(), pct(&mut dd, 0.5), pct(&mut dd, 0.95));
+    }
+    // Two phones never correlate like one recording: the highest correlation of any link.
+    let mut corr: Vec<f64> = found_pairs.iter().flat_map(|(_, _, p)| p.hits.iter().map(|h| h.corr)).collect();
+    let mut score: Vec<f64> = found_pairs.iter().flat_map(|(_, _, p)| p.hits.iter().map(|h| h.score as f64)).collect();
+    println!(
+        "links' correlation between phones: median {:.2}, 95% {:.2}, max {:.2}; fingerprint score median {:.3}, max {:.3}",
+        pct(&mut corr, 0.5),
+        pct(&mut corr, 0.95),
+        pct(&mut corr, 1.0),
+        pct(&mut score, 0.5),
+        pct(&mut score, 1.0)
+    );
+    let same: Vec<String> = found_pairs.iter().filter(|(_, _, p)| audio_match::same_recording(&p.hits)).map(|(a, b, _)| format!("{}-{}", recs[*a].name, recs[*b].name)).collect();
+    assert!(same.is_empty(), "two phones called one recording: {same:?}");
+    // The same recording twice: each video's own audio track (decoded from the .mp4) against
+    // its .m4a.
+    let dir = data_dir("GT_090912");
+    let mut copies = 0;
+    for r in recs.iter().take(4) {
+        let mp4 = dir.join(format!("{}.mp4", r.name));
+        if !mp4.exists() {
+            continue;
+        }
+        let video = Clip::new(decode(&mp4));
+        let p = audio_match::match_pair(r.clip.as_ref().unwrap(), &video, &mut realfft::RealFftPlanner::new());
+        let d = audio_match::drift(&p.hits);
+        let c: Vec<String> = p.hits.iter().map(|h| format!("{:.3}", h.corr)).collect();
+        println!("{} .m4a vs .mp4: {} links, correlation {}, drift {:?}", r.name, p.hits.len(), c.join(" "), d.as_ref().map(|d| (d.ppm, d.error_ppm)));
+        assert!(audio_match::same_recording(&p.hits), "{}: its own video not called the same recording", r.name);
+        copies += 1;
+    }
+    println!("{copies} recordings found the same recording as their own video");
+
     // What this test holds the audio path to. The ground truth is itself only "almost all within
     // 10 ms" with lab drift values per phone model (± 17 ppm), and phones move in the crowd (1 m is
     // 3 ms), so the solve is held to its own links (within their errors) and the ground truth

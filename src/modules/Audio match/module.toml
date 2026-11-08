@@ -33,9 +33,9 @@ min_quality = "none"
 
 [[output]]
 name = "clock drift"
-kind = "link"
-status = "planned"
-about = "Each recording's clock speed against the others, in ppm (the clock solve learns it from the links already)."
+kind = "json"
+title = "clock drift"
+about = "For each pair whose links span 30 s or more: how fast one clock runs against the other (ppm, with its error), from a line through that pair's links alone. The clock solve learns drift from all links together; this is each pair's own view of it (on Jiku within 24 ppm of the truth, median)."
 needs = ["audio", "audio 2"]
 when = "long overlaps"
 source = "Guggenberger, Lux, Böszörmenyi 2015"
@@ -44,8 +44,8 @@ min_quality = "good"
 [[output]]
 name = "same recording"
 kind = "event"
-status = "planned"
-about = "Two files that are one recording (a re-upload, a copy): not independent witnesses."
+title = "same recording"
+about = "Two files that are one recording (a re-upload, a copy, a re-encode): not independent witnesses. An event on each file over the stretch they share, when their audio correlates over 0.8 (two phones at one event: 0.64 at most on Jiku; a video against its own audio: 1.000)."
 needs = ["audio", "audio 2"]
 when = "identical audio, no second microphone"
 min_quality = "good"
@@ -80,8 +80,8 @@ min_quality = "good"
 [[output]]
 name = "speed change"
 kind = "event"
-status = "possible"
-about = "A recording played faster or slower than it was recorded: a steady slope in its match far beyond any clock drift."
+title = "speed change"
+about = "A recording played faster or slower than it was recorded: its clock drift against another over 1000 ppm beyond 3 sigma, far past a quartz clock's 300. Fingerprints match up to about 1 % of speed change only; more is not found."
 needs = ["audio", "audio 2"]
 when = "long overlap"
 min_quality = "good"

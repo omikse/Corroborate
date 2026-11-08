@@ -43,6 +43,12 @@
 //!   (95 %); pairs' relative speeds within 4 ppm (median) and 90 ppm (95 %) with one speed per
 //!   phone, 27 and 127 ppm without. Matching all 1225 pairs takes about a second on 12 threads;
 //!   decoding and fingerprinting the audio take most of the rest.
+//! - Each pair's own drift (`drift`, a line through its links) is within 24 ppm of the truth
+//!   (median) but 300 ppm at 95 %, 3 of 53 pairs outside 3 sigma: overlaps are short and phones
+//!   move; the clock solve over all links (one speed per phone) does far better.
+//! - Same recording (`same_recording`): links between two phones correlate (Pearson's, windows
+//!   lined up) 0.18 median, 0.49 at 95 %, 0.64 at most; a video's audio against its own .m4a
+//!   1.000. The fingerprint score between phones: 0.009 median, 0.056 at most.
 //! - Later work on Jiku: Başaran, Cemgil, Anarım (DSP 2017, sequential Monte Carlo over pairwise
 //!   match / no-match); Uikey … Saini (MTAP 2024, overlap from landmark scatter plots and a
 //!   CNN); ASTAnet (Singh … Saini, ICME 2025, a Siamese vision transformer). Another dataset with
@@ -79,6 +85,17 @@ pub const SURE_PSR: f64 = 12.0;
 /// event 0.02–0.05 with noise), while the prominence of a true offset stays in the hundreds.
 pub const MIN_VOTES: u32 = 8;
 pub const MIN_PROMINENCE: f32 = 10.0;
+
+/// The correlation (Pearson's, of the two windows lined up) over which a pair's links say the
+/// two files are one recording: a copy, a re-upload, a re-encode. Two microphones in one room
+/// hear the same sound through different paths, rooms and noise, and correlate far lower.
+pub const SAME_CORR: f64 = 0.8;
+/// A pair's clocks differing by more than this (ppm), beyond 3 sigma, is a recording played at
+/// another speed rather than drift: quartz clocks stay within about 300 (Jiku's phones: 266 at
+/// most). The fingerprints only match up to about 1 % (10000 ppm) of speed change.
+pub const SPEED_CHANGE_PPM: f64 = 1000.0;
+/// Shortest span of links a pair's drift is given for, seconds.
+pub const DRIFT_SPAN_S: f64 = 30.0;
 
 fn match_config() -> WangMatchConfig {
     WangMatchConfig { min_score: 0.0, min_votes: MIN_VOTES, min_prominence: MIN_PROMINENCE, ..Default::default() }
@@ -119,6 +136,10 @@ pub struct Hit {
     /// other offsets.
     pub votes: u32,
     pub prominence: f32,
+    /// The fingerprint score (matching hashes per hash of the chunk).
+    pub score: f32,
+    /// Pearson's correlation of the two windows lined up at the refined lag (to the sample).
+    pub corr: f64,
 }
 
 /// What matching clip b against clip a found, and how much was tried: its match quality.
@@ -163,19 +184,89 @@ pub fn match_pair(a: &Clip, b: &Clip, planner: &mut RealFftPlanner<f32>) -> Pair
         }
         let ia = ia as usize;
         let t_b = ib as f64 / sr + WIN_S / 2.0;
-        match gcc_phat(planner, &b.audio[ib..ib + w], &a.audio[ia..ia + w + 2 * s]) {
-            Some((lag, psr)) if psr >= MIN_PSR && (lag - s as f64).abs() / sr <= AGREE_S => out.hits.push(Hit {
-                t_a: (ia as f64 + lag) / sr + WIN_S / 2.0,
-                t_b,
-                error_s: LINK_ERROR_S * (SURE_PSR / psr).max(1.0).powf(1.5),
-                psr,
-                votes: r.votes,
-                prominence: r.prominence,
-            }),
+        let wb = &b.audio[ib..ib + w];
+        match gcc_phat(planner, wb, &a.audio[ia..ia + w + 2 * s]) {
+            Some((lag, psr)) if psr >= MIN_PSR && (lag - s as f64).abs() / sr <= AGREE_S => {
+                let k = ia + lag.round().max(0.0) as usize;
+                out.hits.push(Hit {
+                    t_a: (ia as f64 + lag) / sr + WIN_S / 2.0,
+                    t_b,
+                    error_s: LINK_ERROR_S * (SURE_PSR / psr).max(1.0).powf(1.5),
+                    psr,
+                    votes: r.votes,
+                    prominence: r.prominence,
+                    score: r.score,
+                    corr: a.audio.get(k..k + w).map_or(0.0, |wa| pearson(wa, wb)),
+                })
+            }
             _ => out.weak += 1,
         }
     }
     out
+}
+
+/// Pearson's correlation of two equally long signals.
+pub fn pearson(x: &[f32], y: &[f32]) -> f64 {
+    let n = x.len().min(y.len()) as f64;
+    if n < 2.0 {
+        return 0.0;
+    }
+    let (mx, my) = (x.iter().map(|&v| v as f64).sum::<f64>() / n, y.iter().map(|&v| v as f64).sum::<f64>() / n);
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for (&a, &b) in x.iter().zip(y) {
+        let (a, b) = (a as f64 - mx, b as f64 - my);
+        sxy += a * b;
+        sxx += a * a;
+        syy += b * b;
+    }
+    if sxx > 0.0 && syy > 0.0 { sxy / (sxx * syy).sqrt() } else { 0.0 }
+}
+
+/// How fast clock a runs against clock b, from a pair's links: t_a − t_b fitted as a line over
+/// t_b, weighted by each link's error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drift {
+    /// a's seconds per b's second, minus 1, in ppm (positive: a runs fast).
+    pub ppm: f64,
+    /// Its error (1 sigma), ppm: from the links' errors, grown by how much more they scatter
+    /// about the line than those errors say (phones moving, echoes).
+    pub error_ppm: f64,
+    /// From the first link to the last, on b's clock, seconds; and how many links.
+    pub span_s: f64,
+    pub links: usize,
+}
+
+/// The pair's drift, when its links span `DRIFT_SPAN_S` or more (three links at least).
+pub fn drift(hits: &[Hit]) -> Option<Drift> {
+    if hits.len() < 3 {
+        return None;
+    }
+    let (lo, hi) = hits.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(x.t_b), h.max(x.t_b)));
+    if hi - lo < DRIFT_SPAN_S {
+        return None;
+    }
+    let w: Vec<f64> = hits.iter().map(|h| 1.0 / h.error_s.max(1e-6).powi(2)).collect();
+    let sw: f64 = w.iter().sum();
+    let mx = hits.iter().zip(&w).map(|(h, w)| w * h.t_b).sum::<f64>() / sw;
+    let my = hits.iter().zip(&w).map(|(h, w)| w * (h.t_a - h.t_b)).sum::<f64>() / sw;
+    let sxx: f64 = hits.iter().zip(&w).map(|(h, w)| w * (h.t_b - mx).powi(2)).sum();
+    let sxy: f64 = hits.iter().zip(&w).map(|(h, w)| w * (h.t_b - mx) * (h.t_a - h.t_b - my)).sum();
+    let r = sxy / sxx;
+    let chi2: f64 = hits.iter().zip(&w).map(|(h, w)| w * (h.t_a - h.t_b - my - r * (h.t_b - mx)).powi(2)).sum();
+    let scale = (chi2 / (hits.len() - 2) as f64).sqrt().max(1.0);
+    Some(Drift { ppm: r * 1e6, error_ppm: scale / sxx.sqrt() * 1e6, span_s: hi - lo, links: hits.len() })
+}
+
+/// Whether a pair's two files are one recording: half its links or more over `SAME_CORR`. On
+/// Jiku, links between two phones correlate 0.18 (median), 0.49 (95 %), 0.64 at most; a video's
+/// audio against its own .m4a, 1.000.
+pub fn same_recording(hits: &[Hit]) -> bool {
+    !hits.is_empty() && hits.iter().filter(|h| h.corr >= SAME_CORR).count() * 2 >= hits.len()
+}
+
+/// Whether a pair's drift says one was played at another speed (`SPEED_CHANGE_PPM`).
+pub fn speed_changed(d: &Drift) -> bool {
+    d.ppm.abs() - 3.0 * d.error_ppm > SPEED_CHANGE_PPM
 }
 
 /// Every pair of clips (a before b in the list), matched on all cores.
@@ -266,15 +357,18 @@ mod tests {
     #[test]
     fn finds_the_overlap_and_its_offset() {
         let ev = event(200.0);
-        // a hears 0–120 s of the event, b 70.0123–200 s, with its own noise.
+        // a hears 0–120 s of the event, b 70.0123–200 s, with its own noise and an echo off a
+        // wall 2 m further (another microphone in the room).
         let a = Clip::new(ev[..120 * SR as usize].to_vec());
         let start = (70.0123 * SR as f64) as usize;
         let mut n = 7u32;
+        let echo = 47;
         let b_audio: Vec<f32> = ev[start..]
             .iter()
-            .map(|&v| {
+            .enumerate()
+            .map(|(i, &v)| {
                 n = n.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                v + 0.1 * ((n >> 16) as f32 / 32768.0 - 1.0)
+                v + 0.8 * ev[start + i - echo] + 0.2 * ((n >> 16) as f32 / 32768.0 - 1.0)
             })
             .collect();
         let b = Clip::new(b_audio);
@@ -288,5 +382,38 @@ mod tests {
         // An unrelated clip matches nothing.
         let other = Clip::new(crate::synth::notes(200.0, SR, 8));
         assert!(match_pair(&other, &b, &mut RealFftPlanner::new()).hits.is_empty());
+        // Two microphones (each its own noise) are not one recording; a copy is.
+        assert!(!same_recording(&p.hits), "{p:?}");
+        let copy = Clip::new(a.audio.iter().map(|&v| 0.7 * v).collect());
+        let c = match_pair(&a, &copy, &mut RealFftPlanner::new());
+        assert!(same_recording(&c.hits), "{c:?}");
+    }
+
+    /// `audio` resampled to play `1 + ppm / 1e6` times slower (linear interpolation).
+    fn stretch(audio: &[f32], ppm: f64) -> Vec<f32> {
+        let k = 1.0 / (1.0 + ppm * 1e-6);
+        (0..((audio.len() - 1) as f64 / k) as usize)
+            .map(|i| {
+                let x = i as f64 * k;
+                let (j, f) = (x as usize, (x - x.floor()) as f32);
+                audio[j] * (1.0 - f) + audio[j + 1] * f
+            })
+            .collect()
+    }
+
+    #[test]
+    fn measures_drift_and_tells_a_speed_change() {
+        let ev = event(240.0);
+        let a = Clip::new(ev.clone());
+        // b's clock runs 200 ppm slow: each of its seconds is 1.0002 of a's. Within quartz drift.
+        for (ppm, changed) in [(200.0, false), (3000.0, true)] {
+            let b = Clip::new(stretch(&ev, -ppm).iter().map(|&v| 0.5 * v).collect());
+            let p = match_pair(&a, &b, &mut RealFftPlanner::new());
+            let d = drift(&p.hits).expect("drift");
+            // t_a = t_b · (1 + ppm): a's clock counts ppm more per b's second.
+            assert!((d.ppm - ppm).abs() < 3.0 * d.error_ppm.max(5.0), "{ppm}: {d:?}");
+            assert_eq!(speed_changed(&d), changed, "{ppm}: {d:?}");
+        }
+        assert!(drift(&[]).is_none());
     }
 }
