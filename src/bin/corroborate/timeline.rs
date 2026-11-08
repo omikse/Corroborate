@@ -21,6 +21,8 @@
 //!   Links are drawn between rows, anchors are pinned to the axis, both as plain diamonds: their
 //!   error shows only as the see-through margins of the media (and in the hover text).
 //! - A click on a wire box on the canvas (`Evidence.focus`) opens and highlights that group's row.
+//! - **Wheel** over the rows: zooms the time axis around the pointer; with Alt it moves the rows
+//!   up and down.
 
 use super::*;
 use crate::clock_view::{groups_of, Confidence, Group};
@@ -151,6 +153,8 @@ pub struct TlState {
     pub bars: Vec<(String, Rect)>,
     /// The Sync list's pairs of recordings opened to their links (`pair_key`).
     pub sync_open: BTreeSet<String>,
+    /// Alt was held when the wheel last turned: the wheel moves the rows, not the time axis.
+    pub wheel_alt: bool,
     /// Events tests put on the timeline.
     #[cfg(test)]
     pub extra: Vec<(NodeId, Event)>,
@@ -169,6 +173,7 @@ impl Default for TlState {
             row_y: Vec::new(),
             bars: Vec::new(),
             sync_open: BTreeSet::new(),
+            wheel_alt: false,
             #[cfg(test)]
             extra: Vec::new(),
         }
@@ -646,7 +651,14 @@ impl App {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rows_rect).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
             ui.set_clip_rect(rows_rect.intersect(clip));
             ui.vertical(|ui| {
-        egui::ScrollArea::vertical().id_salt("timeline-rows").max_height(panel_h).auto_shrink([false, false]).show(ui, |ui| {
+        // The wheel zooms the time axis; with Alt it moves the rows up and down. Decided when the
+        // wheel turns, as a turn plays out over several frames (smooth scrolling).
+        if let Some(alt) = ui.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::MouseWheel { modifiers, .. } = e { Some(modifiers.alt) } else { None })) {
+            self.tls.wheel_alt = alt;
+        }
+        let wheel_moves_rows = self.tls.wheel_alt;
+        let source = egui::containers::scroll_area::ScrollSource { mouse_wheel: wheel_moves_rows, ..Default::default() };
+        egui::ScrollArea::vertical().id_salt("timeline-rows").max_height(panel_h).auto_shrink([false, false]).scroll_source(source).show(ui, |ui| {
             let (area, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h.max(ui.available_height())), Sense::click_and_drag());
             let p = ui.painter_at(area);
             p.rect_filled(area, 0.0, PANEL);
@@ -677,9 +689,10 @@ impl App {
             let span = (self.tl.1 - self.tl.0).max(1e-3);
             if let Some(hp) = resp.hover_pos() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-                if scroll != 0.0 && track.contains(hp) {
+                if scroll != 0.0 && !wheel_moves_rows {
                     let f = (-scroll as f64 * 0.002).exp();
-                    let at = self.tl.0 + ((hp.x - track.left()) / track.width()) as f64 * span;
+                    // The moment under the pointer stays put (over the labels: the view's start).
+                    let at = self.tl.0 + ((hp.x.max(track.left()) - track.left()) / track.width()) as f64 * span;
                     self.tl = (at - (at - self.tl.0) * f, at + (self.tl.1 - at) * f);
                 }
             }

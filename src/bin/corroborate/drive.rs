@@ -135,8 +135,13 @@ impl Drive {
 
     /// Turns the mouse wheel at `at` by `notches` (up is positive), letting smooth scrolling end.
     pub fn scroll(&mut self, at: Pos2, notches: f32) {
+        self.scroll_with(at, notches, egui::Modifiers::NONE);
+    }
+
+    /// `scroll` with keys held (Alt, Ctrl…).
+    pub fn scroll_with(&mut self, at: Pos2, notches: f32, modifiers: egui::Modifiers) {
         self.h.hover_at(at);
-        self.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: Vec2::new(0.0, notches), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+        self.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: Vec2::new(0.0, notches), phase: egui::TouchPhase::Move, modifiers });
         self.frames(20);
     }
 

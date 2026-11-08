@@ -895,12 +895,12 @@ fn timeline_on_a_big_project() {
     let seen = |t: Rect| Rect::from_min_max(t.min, Pos2::new(t.right(), t.bottom().min(880.0)));
     let track = seen(track);
     let y_before = d.app().tls.row_y.last().map(|r| r.1);
-    d.scroll(Pos2::new(track.left() - 100.0, track.center().y), -6.0);
+    d.scroll_with(Pos2::new(track.left() - 100.0, track.center().y), -6.0, egui::Modifiers::ALT);
     let y_after = d.app().tls.row_y.last().map(|r| r.1);
     println!("last row y {y_before:?} -> {y_after:?}");
-    assert!(y_after < y_before, "the wheel over the labels scrolls the rows");
+    assert!(y_after < y_before, "Alt + wheel over the labels scrolls the rows");
     d.shot("tl_4_scrolled");
-    d.scroll(Pos2::new(track.left() - 100.0, track.center().y), 20.0);
+    d.scroll_with(Pos2::new(track.left() - 100.0, track.center().y), 20.0, egui::Modifiers::ALT);
     let (track, ..) = d.app().tls.geom.unwrap();
     let track = seen(track);
 
@@ -941,7 +941,8 @@ fn timeline_on_a_big_project() {
     d.app().stop_run();
 }
 
-/// The timeline's rows scroll with the wheel over their labels when there are more than fit.
+/// With more rows than fit: the wheel zooms the time axis and leaves the rows where they are, Alt +
+/// wheel moves the rows and leaves the time axis, over the track and over the labels alike.
 #[test]
 fn timeline_rows_scroll() {
     let mut app = App::empty();
@@ -950,9 +951,30 @@ fn timeline_rows_scroll() {
     let mut d = crate::drive::Drive::with(app);
     d.frames(3);
     let (track, ..) = d.app().tls.geom.expect("drawn");
-    let first = d.app().tls.row_y[0].1;
-    d.scroll(Pos2::new(track.left() - 100.0, track.top() + 60.0), -5.0);
-    let after = d.app().tls.row_y[0].1;
-    d.shot("timeline_rows_scroll");
-    assert!(after < first - 20.0, "rows scrolled up: {first} -> {after}");
+    let alt = egui::Modifiers::ALT;
+    let none = egui::Modifiers::NONE;
+    let on_labels = Pos2::new(track.left() - 100.0, track.top() + 60.0);
+    let on_track = Pos2::new(track.left() + track.width() * 0.25, track.top() + 60.0);
+    let state = |d: &mut crate::drive::Drive| (d.app().tls.row_y[0].1, d.app().tl);
+    for at in [on_track, on_labels] {
+        // Plain wheel: the time axis zooms out, the rows stay.
+        let (y0, tl0) = state(&mut d);
+        d.scroll_with(at, -5.0, none);
+        let (y1, tl1) = state(&mut d);
+        assert_eq!(y1, y0, "the wheel leaves the rows where they are");
+        assert!(tl1.1 - tl1.0 > (tl0.1 - tl0.0) * 1.2, "the wheel zooms out: {tl0:?} -> {tl1:?}");
+        if at == on_track {
+            let time_at = |tl: (f64, f64)| tl.0 + (tl.1 - tl.0) * 0.25;
+            assert!((time_at(tl1) - time_at(tl0)).abs() < (tl0.1 - tl0.0) * 0.02, "around the pointer: {tl0:?} -> {tl1:?}");
+        }
+        d.shot("timeline_wheel_zoomed");
+        // Alt + wheel: the rows move, the time axis stays. Back up to the top afterwards.
+        d.scroll_with(at, -5.0, alt);
+        let (y2, tl2) = state(&mut d);
+        assert!(y2 < y1 - 20.0, "Alt + wheel moves the rows: {y1} -> {y2}");
+        assert_eq!(tl2, tl1, "and leaves the time axis");
+        d.shot("timeline_alt_wheel_rows");
+        d.scroll_with(at, 20.0, alt);
+        assert_eq!(state(&mut d).0, y1, "Alt + wheel back up");
+    }
 }

@@ -59,6 +59,7 @@ Canvas keys and mouse:
 | Do | How |
 |---|---|
 | Zoom | scroll wheel |
+| Timeline zoom, rows up and down | over the timeline's rows: scroll wheel zooms the time axis, Alt + wheel moves the rows |
 | Pan | middle-drag |
 | Select | click a node; Shift- or Ctrl-click adds or removes; right-drag a box on empty canvas (with Shift or Ctrl it adds or removes what it touches); Ctrl+A all; Escape none |
 | Menus | right-click without moving: on a node, its menu; on empty canvas, Add node |
