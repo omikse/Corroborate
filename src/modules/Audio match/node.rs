@@ -1,6 +1,8 @@
-//! The Audio match node in the workbench. Once the graph runs it decodes each wired file again
-//! (8 kHz mono, the fingerprints' rate), matches every pair (`corroborate::audio_match`) on its
-//! own thread, and puts the links (with both clocks named) and their quality on its outputs; the
+//! The Audio match node in the workbench. Once the graph runs it takes the audio each wired
+//! source decodes (16 kHz, kept by the SOURCER) as soon as that source is done, brings it to
+//! 8 kHz (the fingerprints' rate, `audio_match::halve`), and fingerprints it, a core per
+//! recording; a source that gave no audio has its file decoded here instead. Then it matches every
+//! pair (`corroborate::audio_match`) on its own thread, and puts the links (with both clocks named) and their quality on its outputs; the
 //! links go into the clock solve from there like any link output. Files only for now: a stream or
 //! microphone wired in is named in the status and left out. Compiled into the `corroborate`
 //! program.
@@ -11,25 +13,31 @@ use corroborate::data::{Data, Event};
 use std::sync::atomic::AtomicU64;
 use std::thread;
 
-/// One wired recording: its source's label, clock and file.
+/// One wired recording: its source's label, clock and file, and the source's state with the run
+/// it was on before this run started (its audio is this run's once its run differs and is done).
 pub struct Wired {
     pub label: String,
     pub clock: String,
     pub path: String,
+    pub source: Option<(Shared, u64)>,
 }
 
 static RUNS: AtomicU64 = AtomicU64::new(1);
 
 impl App {
-    /// The files wired into node `i`, and the labels of sources that are not files.
-    pub(crate) fn audio_match_inputs(&self, i: NodeId) -> (Vec<Wired>, Vec<String>) {
+    /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
+    /// source's run before this run started.
+    pub(crate) fn audio_match_inputs(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> (Vec<Wired>, Vec<String>) {
         let (mut files, mut other) = (Vec::new(), Vec::new());
         for p in &self.graph.nodes()[i].spec.inputs {
             let Some((f, _)) = self.graph.feeder(i, p.name) else { continue };
             let label = self.nodes[f].label.clone();
             match &self.nodes[f].kind {
                 Kind::Sourcer { input } => match sourcer_node::input(input) {
-                    Some(runtime::Input::File(path)) => files.push(Wired { label, clock: self.clock_of(f).unwrap_or_default(), path }),
+                    Some(runtime::Input::File(path)) => {
+                        let source = before.get(&f).map(|&r| (self.nodes[f].state.clone(), r));
+                        files.push(Wired { label, clock: self.clock_of(f).unwrap_or_default(), path, source })
+                    }
                     _ => other.push(label),
                 },
                 _ => other.push(label),
@@ -61,7 +69,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
     }
     set(&|s| {
         s.running = true;
-        s.status = format!("decoding {} recordings…", files.len());
+        s.status = format!("waiting for {} recordings to decode…", files.len());
     });
     let stop2 = stop.clone();
     thread::spawn(move || {
@@ -79,9 +87,10 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                 s.status = "stopped".into();
             }
         };
-        // One decoder per core at a time: fifty at once (beside the sources' own) starve each
-        // other.
+        // A core per recording at a time: each waits for its source's audio (or decodes the
+        // file), then fingerprints it.
         let next = std::sync::atomic::AtomicUsize::new(0);
+        let ready = std::sync::atomic::AtomicUsize::new(0);
         let threads = thread::available_parallelism().map_or(4, |n| n.get()).min(files.len());
         let mut decoded: Vec<(usize, Result<Clip, String>)> = thread::scope(|sc| {
             let hs: Vec<_> = (0..threads)
@@ -94,7 +103,18 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             if stop2.load(Ordering::Relaxed) {
                                 break;
                             }
-                            done.push((k, decode(&w.path, &stop2).map(Clip::new)));
+                            let audio = match &w.source {
+                                Some((st, before)) => from_source(st, *before, &stop2),
+                                None => None,
+                            };
+                            let audio = match audio {
+                                Some(a) if !a.is_empty() => Ok(a),
+                                _ if stop2.load(Ordering::Relaxed) => Err("stopped".to_string()),
+                                _ => decode(&w.path, &stop2),
+                            };
+                            done.push((k, audio.map(Clip::new)));
+                            let n = ready.fetch_add(1, Ordering::Relaxed) + 1;
+                            set(&|s| s.status = format!("fingerprinted {n} of {} recordings…", files.len()));
                         }
                         done
                     })
@@ -144,6 +164,25 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
             s.done = true;
         });
     });
+}
+
+/// The audio source `st` decoded in this run (its run differs from `before` and is done), at the
+/// match's rate. None: stopped, or the source ended with no audio (the file is decoded here then).
+fn from_source(st: &Shared, before: u64, stop: &AtomicBool) -> Option<Vec<f32>> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let audio = {
+            let s = st.lock().unwrap();
+            (s.run_id != before && s.done && !s.running).then(|| s.source.audio.clone())
+        };
+        if let Some(a) = audio {
+            let a = a.lock().unwrap();
+            return (!a.is_empty()).then(|| audio_match::halve(&a));
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {

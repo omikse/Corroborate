@@ -43,6 +43,9 @@
 //!   (95 %); pairs' relative speeds within 4 ppm (median) and 90 ppm (95 %) with one speed per
 //!   phone, 27 and 127 ppm without. Matching all 1225 pairs takes about a second on 12 threads;
 //!   decoding and fingerprinting the audio take most of the rest.
+//! - The workbench takes the sources' 16 kHz 16-bit audio and halves it (`halve`) instead of
+//!   decoding at 8 kHz again; on the same test (JIKU_HALVE=1) that gives 501 links on the 78
+//!   pairs, none over 50 ms off (median 5.6 ms, 95 % 21.9 ms), 42 of 44 edges: the same.
 //! - Each pair's own drift (`drift`, a line through its links) is within 24 ppm of the truth
 //!   (median) but 300 ppm at 95 %, 3 of 53 pairs outside 3 sigma: overlaps are short and phones
 //!   move; the clock solve over all links (one speed per phone) does far better.
@@ -102,6 +105,37 @@ pub const DRIFT_SPAN_S: f64 = 30.0;
 
 fn match_config() -> WangMatchConfig {
     WangMatchConfig { min_score: 0.0, min_votes: MIN_VOTES, min_prominence: MIN_PROMINENCE, ..Default::default() }
+}
+
+/// Audio at twice `SR` (the sources' 16 kHz, as 16-bit samples) brought to `SR`: a lowpass at
+/// 3.6 kHz (windowed sinc, 63 taps, Blackman: about -70 dB from 4.4 kHz, where 8 kHz's
+/// alias would land in the band the fingerprints use), then every second sample. Lets the match
+/// use the audio its sources decoded instead of decoding every file again.
+pub fn halve(x: &[i16]) -> Vec<f32> {
+    const HALF: usize = 31;
+    let fc = 3600.0 / (2.0 * SR as f64);
+    let taps: Vec<f32> = (0..=2 * HALF)
+        .map(|i| {
+            let n = i as f64 - HALF as f64;
+            let sinc = if n == 0.0 { 2.0 * fc } else { (2.0 * std::f64::consts::PI * fc * n).sin() / (std::f64::consts::PI * n) };
+            let a = 2.0 * std::f64::consts::PI * i as f64 / (2 * HALF) as f64;
+            (sinc * (0.42 - 0.5 * a.cos() + 0.08 * (2.0 * a).cos())) as f32
+        })
+        .collect();
+    let sum: f32 = taps.iter().sum();
+    let taps: Vec<f32> = taps.iter().map(|t| t / sum / 32768.0).collect();
+    let n = x.len();
+    (0..n.div_ceil(2))
+        .map(|k| {
+            let c = 2 * k;
+            if c >= HALF && c + HALF < n {
+                taps.iter().zip(&x[c - HALF..=c + HALF]).map(|(t, &v)| t * v as f32).sum()
+            } else {
+                // The edges: samples outside the recording count as silence.
+                (0..=2 * HALF).filter_map(|j| (c + j).checked_sub(HALF).filter(|&i| i < n).map(|i| taps[j] * x[i] as f32)).sum()
+            }
+        })
+        .collect()
 }
 
 /// A recording ready to match: its audio (`SR`, mono) and fingerprint.
@@ -389,6 +423,25 @@ mod tests {
 
     fn event(secs: f64) -> Vec<f32> {
         crate::synth::notes(secs, SR, 7)
+    }
+
+    /// 16 kHz to 8 kHz: a 1 kHz tone keeps its level, a 5 kHz one (which would alias to 3 kHz)
+    /// is gone, a click stays at its time, and the length halves.
+    #[test]
+    fn halve_keeps_the_band_and_the_time() {
+        let tone = |f: f64| -> Vec<i16> { (0..32_000).map(|i| ((2.0 * std::f64::consts::PI * f * i as f64 / 16_000.0).sin() * 16_000.0) as i16).collect() };
+        let rms = |x: &[f32]| (x[500..15_500].iter().map(|v| v * v).sum::<f32>() / 15_000.0).sqrt();
+        let low = halve(&tone(1000.0));
+        assert_eq!(low.len(), 16_000);
+        let want = 16_000.0 / 32_768.0 / 2f32.sqrt();
+        assert!((rms(&low) / want - 1.0).abs() < 0.01, "1 kHz kept: {} vs {want}", rms(&low));
+        let high = halve(&tone(5000.0));
+        assert!(rms(&high) < want * 0.001, "5 kHz gone (-60 dB): {}", rms(&high));
+        let mut click = vec![0i16; 8000];
+        click[4000] = 30_000;
+        let out = halve(&click);
+        let peak = (0..out.len()).max_by(|&a, &b| out[a].abs().total_cmp(&out[b].abs())).unwrap();
+        assert_eq!(peak, 2000, "a click at 0.25 s stays at 0.25 s");
     }
 
     #[test]

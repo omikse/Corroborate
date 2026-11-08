@@ -89,13 +89,21 @@ fn attr<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(&line[i..i + j])
 }
 
+/// At 8 kHz from ffmpeg; with JIKU_HALVE=1 as the workbench does it: the sources' 16 kHz 16-bit
+/// audio, halved (`audio_match::halve`).
 fn decode(path: &Path) -> Vec<f32> {
-    let (mut child, rx) = corroborate::ingest::spawn_ffmpeg(&path.to_string_lossy(), SR).expect("ffmpeg");
+    let halve = std::env::var("JIKU_HALVE").is_ok_and(|v| v == "1");
+    let sr = if halve { 2 * SR } else { SR };
+    let (mut child, rx) = corroborate::ingest::spawn_ffmpeg(&path.to_string_lossy(), sr).expect("ffmpeg");
     let mut out = Vec::new();
     for c in rx {
         out.extend(c);
     }
     let _ = child.wait();
+    if halve {
+        let pcm: Vec<i16> = out.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+        return audio_match::halve(&pcm);
+    }
     out
 }
 

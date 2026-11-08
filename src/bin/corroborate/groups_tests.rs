@@ -324,6 +324,7 @@ fn groups_on_a_big_project() {
     d.shot("groups_jiku_top");
     let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
     d.click("▶ Run");
+    let started = Instant::now();
     let (mut worst, mut n) = (0.0f64, 0);
     let end = Instant::now() + Duration::from_secs(180);
     while Instant::now() < end && !d.app().nodes[m].state.lock().unwrap().done {
@@ -334,7 +335,9 @@ fn groups_on_a_big_project() {
         std::thread::sleep(Duration::from_millis(30));
     }
     assert!(d.app().nodes[m].state.lock().unwrap().done, "the match inside the group ends");
-    println!("{n} frames while it ran, worst {:.0} ms", worst * 1000.0);
+    println!("{n} frames while it ran, worst {:.0} ms; the match took {:.1} s", worst * 1000.0, started.elapsed().as_secs_f64());
+    d.frames(3);
+    println!("{} links; {}", d.app().ev.links.len(), d.app().nodes[m].state.lock().unwrap().status);
     d.frames(3);
     d.shot("groups_jiku_top_matched");
     // Inside, framed.

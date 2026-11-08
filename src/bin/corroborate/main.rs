@@ -640,6 +640,9 @@ impl App {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let mut started = 0;
+        // Each source's run before this one: the Audio match takes a source's audio once it has
+        // been decoded again (its run changed and is done).
+        let before: HashMap<NodeId, u64> = (0..self.nodes.len()).filter(|&i| self.nodes[i].kind.is_source()).map(|i| (i, self.nodes[i].state.lock().unwrap().run_id)).collect();
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             if n.hidden || !n.kind.is_source() {
@@ -684,7 +687,7 @@ impl App {
         // Audio match nodes read their files themselves, all at once.
         for i in 0..self.nodes.len() {
             if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch) {
-                let (files, other) = self.audio_match_inputs(i);
+                let (files, other) = self.audio_match_inputs(i, &before);
                 audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
             }
         }
