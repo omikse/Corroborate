@@ -169,6 +169,16 @@ fn uses_of_one_group_stay_the_same() {
     assert_eq!(app.graph.feeder(inv, "location").map(|f| f.0), Some(a));
     let _ = a;
 
+    // Moving a node inside one use moves it in the other, and no wire is remade (in order, as
+    // they are kept: remaking them would restart a running graph).
+    let order = |app: &App| app.graph.wires().to_vec();
+    let before = order(d.app());
+    d.app().nodes[inv].pos += Vec2::new(25.0, 10.0);
+    d.frames(3);
+    let app = d.app();
+    assert_eq!(app.nodes[inv2].pos, app.nodes[inv].pos);
+    assert_eq!(order(d.app()), before, "a move rewires nothing");
+
     // A node added inside the second use shows up in the first.
     d.app().pick_only(g2);
     key(&mut d, Modifiers::NONE, Key::Tab);

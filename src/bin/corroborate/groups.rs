@@ -791,6 +791,15 @@ impl App {
     /// What a definition is, as one use of it holds it: the nodes inside (kind, settings, name,
     /// place, folded), the wires between them, and the ports.
     pub(crate) fn def_text(&self, g: NodeId) -> String {
+        let looks: String = self.paths(g).into_iter().map(|(path, x)| {
+            let n = &self.nodes[x];
+            format!("{path}|{}|{:.0}|{:.0}|{}\n", n.label, n.pos.x, n.pos.y, n.collapsed)
+        }).collect();
+        looks + self.shape_text(g).as_str()
+    }
+
+    /// `def_text` without names, places and folding: what the graph is made of.
+    fn shape_text(&self, g: NodeId) -> String {
         let mut s = String::new();
         for (path, x) in self.paths(g) {
             let n = &self.nodes[x];
@@ -798,7 +807,7 @@ impl App {
                 Kind::Group { rows, .. } => format!("{:?}", self.iface_rel(g, rows)),
                 k => format!("{:?}", k.rows()),
             };
-            s.push_str(&format!("{path}|{}|{}|{rows}|{}|{:.0}|{:.0}|{}\n", n.kind.spec().name, n.kind.saved_param(), n.label, n.pos.x, n.pos.y, n.collapsed));
+            s.push_str(&format!("{path}|{}|{}|{rows}\n", n.kind.spec().name, n.kind.saved_param()));
         }
         let mut w: Vec<String> = self
             .graph
@@ -852,6 +861,19 @@ impl App {
     /// Makes group `b` hold what group `a` holds. `b` keeps its wires outside (by port name) and
     /// its nodes that `a` also has keep their ids and results.
     fn copy_group(&mut self, a: NodeId, b: NodeId) {
+        // Only moved, renamed or folded (a node dragged inside): names, places and folding, and no
+        // wire is touched (rewiring every frame of a drag would restart a running graph).
+        if self.shape_text(a) == self.shape_text(b) {
+            let pb: HashMap<String, NodeId> = self.paths(b).into_iter().collect();
+            for (path, x) in self.paths(a) {
+                if let Some(&y) = pb.get(&path) {
+                    let (label, pos, collapsed) = (self.nodes[x].label.clone(), self.nodes[x].pos, self.nodes[x].collapsed);
+                    let n = &mut self.nodes[y];
+                    (n.label, n.pos, n.collapsed) = (label, pos, collapsed);
+                }
+            }
+            return;
+        }
         // B's wires outside, by port name.
         let bf = self.iface(b);
         let feeds: Vec<(String, (NodeId, &'static str))> = (0..bf.inputs.len()).filter_map(|k| Some((bf.inputs[k].name.clone(), self.outside_feeder(b, k)?))).collect();
