@@ -242,7 +242,7 @@ fn old_names_are_saved_as_ids() {
     }
 }
 
-/// File → Save as, New, Open: the project moves to its own folder, New empties the canvas, Open
+/// Project → Save as, New, Open: the project moves to its own folder, New empties the canvas, Open
 /// brings the saved project back, and Save writes changes to the opened file.
 #[test]
 fn new_open_save_as() {

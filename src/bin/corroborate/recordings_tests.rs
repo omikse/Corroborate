@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::drive::{out_dir, Drive};
-use project::{project_place, push_recent, recent_in, recovery_of, Answer, Then};
+use project::{project_file_of, project_in, project_place, push_recent, recent_in, recovery_of, Answer, Then};
 use recordings::{relative, State};
 use std::path::Path;
 
@@ -57,6 +57,26 @@ fn places_and_relative_paths() {
         assert_eq!(relative(&p(r"C:\Cases\One"), &p(r"c:\cases\one\a.wav")), Some(p("a.wav")), "any case on Windows");
         assert_eq!(relative(&p(r"C:\cases"), &p(r"D:\a.wav")), None, "another drive");
     }
+}
+
+/// Save as picks a folder: the project is `<folder>\<folder name>.txt`; Open on a folder finds
+/// that file, or the one project file there.
+#[test]
+fn folders_are_projects() {
+    let d = fresh("folders").join("case two");
+    std::fs::create_dir_all(&d).unwrap();
+    assert_eq!(project_in(&d), d.join("case two.txt"));
+    assert_eq!(project_file_of(&d), None, "an empty folder holds no project");
+    let mut a = App::empty();
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    a.save_project_as(project_in(&d));
+    assert_eq!(a.project_path.as_deref(), Some(d.join("case two.txt").as_path()), "no folder inside the picked one");
+    assert_eq!(project_file_of(&d), Some(d.join("case two.txt")));
+    let other = d.parent().unwrap().join("renamed");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(d.join("case two.txt"), other.join("old name.txt")).unwrap();
+    std::fs::write(other.join("notes.txt"), "not a project").unwrap();
+    assert_eq!(project_file_of(&other), Some(other.join("old name.txt")), "the only project file in a renamed folder");
 }
 
 #[test]
@@ -277,7 +297,7 @@ fn copy_into_project_and_remove() {
     assert!(d.app().library.list.is_empty());
 }
 
-/// The top bar: File menu open, with the project's name and Recordings beside it.
+/// The top bar: Project menu open, with the project's name and Recordings beside it.
 #[test]
 fn top_bar_shot() {
     let dir = fresh("top_bar");
@@ -289,6 +309,6 @@ fn top_bar_shot() {
     d.app().save_project_as(dir.join("hillingdon.txt"));
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.frames(2);
-    d.click("File");
+    d.click("Project");
     d.shot("project_top_bar");
 }

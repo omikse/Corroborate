@@ -1,9 +1,10 @@
-//! The project: File → New, Open…, Open recent, Save, Save as…, Save a copy…, Revert to saved.
+//! The project: Project → New, Open… (a project's folder), Open project file…, Open recent, Save,
+//! Save as… and Save a copy… (both pick a folder), Revert to saved.
 //!
 //! A saved project is a folder named after it: `<name>\<name>.txt` (nodes, wires, clocks,
 //! evidence and its recordings, one per line), with `results\` for what its Result records write
-//! and `recordings\` for files copied into it (recordings.rs). Save as makes the folder (unless
-//! the chosen file already sits in a folder of its name); projects\ next to the program is where
+//! and `recordings\` for files copied into it (recordings.rs). Save as picks (or makes) the
+//! folder, and the project file takes the folder's name; projects\ next to the program is where
 //! the dialogs start. Recordings are kept with their path relative to the project file and their
 //! absolute path, so a project folder can move.
 //!
@@ -99,12 +100,35 @@ pub(crate) fn project_place(p: &Path) -> PathBuf {
     }
 }
 
+/// The project file of project folder `dir`: `<dir>\<dir name>.txt`.
+pub(crate) fn project_in(dir: &Path) -> PathBuf {
+    dir.join(format!("{}.txt", dir.file_name().unwrap_or_default().to_string_lossy()))
+}
+
+/// The project in folder `dir` for Open: `<dir name>.txt`, else the only project file there
+/// (recovery files and others without nodes do not count).
+pub(crate) fn project_file_of(dir: &Path) -> Option<PathBuf> {
+    let own = project_in(dir);
+    if own.is_file() {
+        return Some(own);
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) && !p.to_string_lossy().ends_with(".recovery.txt"))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(|l| l.starts_with("node|"))))
+        .collect();
+    (found.len() == 1).then(|| found.remove(0))
+}
+
 /// What waits for an answer about unsaved changes.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Then {
     New,
     Open(PathBuf),
     OpenDialog,
+    OpenFileDialog,
     Quit,
     Revert,
 }
@@ -185,7 +209,7 @@ impl App {
         std::fs::write(&tmp, self.project_text_in(path.parent())).is_ok() && std::fs::rename(&tmp, path).is_ok()
     }
 
-    /// File → Save: writes the project file. False while untitled (that needs Save as).
+    /// Project → Save: writes the project file. False while untitled (that needs Save as).
     pub(crate) fn save(&mut self) -> bool {
         let Some(p) = self.project_path.clone() else { return false };
         self.sync_recordings();
@@ -200,7 +224,7 @@ impl App {
         true
     }
 
-    /// File → Save as: writes the project into its folder (see `project_place`), which becomes
+    /// Project → Save as: writes the project into its folder (see `project_place`), which becomes
     /// this project's; the old project's recovery file goes, as its changes are in the new one.
     pub(crate) fn save_project_as(&mut self, path: PathBuf) {
         let path = project_place(&path);
@@ -222,7 +246,7 @@ impl App {
         self.last_project_save = Instant::now();
     }
 
-    /// File → Save a copy: writes the project into another folder; this one stays open as it is.
+    /// Project → Save a copy: writes the project into another folder; this one stays open as it is.
     pub(crate) fn save_copy(&mut self, path: PathBuf) -> Option<PathBuf> {
         let path = project_place(&path);
         self.sync_recordings();
@@ -251,7 +275,7 @@ impl App {
         (self.earth, self.mics, self.canvas_origin) = (earth, mics, origin);
     }
 
-    /// File → New: an empty untitled project. The untitled project before it is kept as
+    /// Project → New: an empty untitled project. The untitled project before it is kept as
     /// settings\project.bak.txt.
     pub(crate) fn new_project(&mut self) {
         let had_nodes = self.project_path.is_none() && self.nodes.iter().any(|n| !n.hidden);
@@ -267,7 +291,7 @@ impl App {
         self.msg = if had_nodes { "new project (the old one is in settings\\project.bak.txt)".into() } else { "new project".into() };
     }
 
-    /// File → Open: opens `path` in place of this project (Open asks about unsaved changes first).
+    /// Project → Open: opens `path` in place of this project (Open asks about unsaved changes first).
     pub(crate) fn open_project(&mut self, path: PathBuf) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             self.msg = format!("cannot read {}", path.display());
@@ -315,7 +339,7 @@ impl App {
                 self.sync_recordings();
                 self.saved_text = saved;
                 if self.dirty() {
-                    self.msg = format!("restored unsaved changes from {}: Save keeps them, File → Revert to saved drops them", rec.display());
+                    self.msg = format!("restored unsaved changes from {}: Save keeps them, Project → Revert to saved drops them", rec.display());
                 } else {
                     let _ = std::fs::remove_file(&rec);
                 }
@@ -325,7 +349,7 @@ impl App {
         self.last_project_save = Instant::now();
     }
 
-    /// File → Revert to saved: drops the unsaved changes and opens the project file again.
+    /// Project → Revert to saved: drops the unsaved changes and opens the project file again.
     pub(crate) fn revert(&mut self) {
         let Some(p) = self.project_path.clone() else { return };
         let Ok(text) = std::fs::read_to_string(&p) else {
@@ -364,9 +388,9 @@ impl App {
                 let saved = if self.project_path.is_some() {
                     self.save()
                 } else {
-                    match self.dialog().set_file_name("untitled.txt").save_file() {
-                        Some(p) => {
-                            self.save_project_as(p);
+                    match self.folder_dialog("Save the project in this folder") {
+                        Some(d) => {
+                            self.save_project_as(project_in(&d));
                             self.project_path.is_some()
                         }
                         None => false,
@@ -392,6 +416,14 @@ impl App {
             Then::New => self.new_project(),
             Then::Open(p) => self.open_project(p),
             Then::OpenDialog => {
+                if let Some(d) = self.folder_dialog("Open the project in this folder") {
+                    match project_file_of(&d) {
+                        Some(p) => self.open_project(p),
+                        None => self.msg = format!("no project in {} (it holds no {}.txt)", d.display(), project_in(&d).file_stem().unwrap_or_default().to_string_lossy()),
+                    }
+                }
+            }
+            Then::OpenFileDialog => {
                 if let Some(p) = self.dialog().pick_file() {
                     self.open_project(p);
                 }
@@ -411,10 +443,20 @@ impl App {
         rfd::FileDialog::new().set_directory(start).add_filter("Corroborate project", &["txt"])
     }
 
+    /// A folder picker starting where `dialog` does.
+    fn folder_dialog(&self, title: &str) -> Option<PathBuf> {
+        let start = match &self.project_path {
+            Some(p) => p.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(projects_dir),
+            None => projects_dir(),
+        };
+        let _ = std::fs::create_dir_all(&start);
+        rfd::FileDialog::new().set_directory(start).set_title(title).pick_folder()
+    }
+
+    /// Save as: pick (or make) the project's folder; the project becomes `<folder>\<folder>.txt`.
     fn save_as_dialog(&mut self) {
-        let name = format!("{}.txt", self.project_name());
-        if let Some(p) = self.dialog().set_file_name(name).save_file() {
-            self.save_project_as(p);
+        if let Some(d) = self.folder_dialog("Save the project in this folder") {
+            self.save_project_as(project_in(&d));
         }
     }
 
@@ -435,20 +477,24 @@ impl App {
         }
     }
 
-    /// The File menu in the top bar, with the project's name beside it (• while it has unsaved
+    /// The Project menu in the top bar, with the project's name beside it (• while it has unsaved
     /// changes), then the Recordings menu.
     pub(crate) fn file_menu(&mut self, ui: &mut egui::Ui) {
         self.project_keys(&ui.ctx().clone());
         let named = self.project_path.is_some();
         let dirty = self.dirty();
-        ui.menu_button("File", |ui| {
+        ui.menu_button("Project", |ui| {
             if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
                 ui.close();
                 self.request(Then::New);
             }
-            if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+            if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).on_hover_text("pick a project's folder").clicked() {
                 ui.close();
                 self.request(Then::OpenDialog);
+            }
+            if ui.button("Open project file…").on_hover_text("pick a project's .txt file (projects saved as one file)").clicked() {
+                ui.close();
+                self.request(Then::OpenFileDialog);
             }
             ui.menu_button("Open recent", |ui| {
                 let list = recent();
@@ -482,9 +528,8 @@ impl App {
             }
             if ui.button("Save a copy…").on_hover_text("write the project into another folder; this one stays open").clicked() {
                 ui.close();
-                let name = format!("{} copy.txt", self.project_name());
-                if let Some(p) = self.dialog().set_file_name(name).save_file() {
-                    self.save_copy(p);
+                if let Some(d) = self.folder_dialog("Save a copy of the project in this folder") {
+                    self.save_copy(project_in(&d));
                 }
             }
             if ui.add_enabled(named && dirty, egui::Button::new("Revert to saved")).clicked() {
@@ -519,7 +564,7 @@ impl App {
         egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
             let what = match &then {
                 Then::New => "before a new project",
-                Then::Open(_) | Then::OpenDialog => "before opening another project",
+                Then::Open(_) | Then::OpenDialog | Then::OpenFileDialog => "before opening another project",
                 Then::Quit => "before closing",
                 Then::Revert => "they will be lost",
             };

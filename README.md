@@ -33,11 +33,12 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 In the workbench: right-click (or **Add node**) to add nodes, drag from a dot to a dot to wire
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
-Projects: the top bar shows **File**, the project's name (with • while it has unsaved changes)
-and **Recordings**. File has **New** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**, **Save**
-(Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project
-folder**. A saved project is a folder named after it, `<name>\<name>.txt`, with `results\` (what
-its Result records write) and `recordings\` (files copied into it); the dialogs start in
+Projects: the top bar shows **Project**, the project's name (with • while it has unsaved changes)
+and **Recordings**. Project has **New** (Ctrl+N), **Open…** (Ctrl+O, pick a project's folder),
+**Open project file…** (a single .txt project), **Open recent**, **Save** (Ctrl+S), **Save as…**
+(Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project folder**. Save as and Save
+a copy pick (or make) a folder: a project is that folder, its file `<folder>\<folder name>.txt`, with
+`results\` (what its Result records write) and `recordings\` (files copied into it); the dialogs start in
 `app\projects\`. The project file changes only on Save; until then changes are kept in
 `<name>.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
 ask Save, Don't save or Cancel when there are unsaved changes. Until it is saved somewhere, the

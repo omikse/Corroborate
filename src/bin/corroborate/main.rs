@@ -385,7 +385,7 @@ impl App {
 
     // ---------------- project file
 
-    // Saving, opening and the File menu: project.rs.
+    // Saving, opening and the Project menu: project.rs.
 
     /// The project file's text: visible nodes (renumbered), Manual rows and wires, clocks and
     /// evidence, recordings (paths relative to the project file's folder), one per line.
