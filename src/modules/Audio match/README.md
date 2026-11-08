@@ -22,7 +22,10 @@ Outputs:
   audio 1.000).
 - `speed change`: a pair drifting over 1000 ppm beyond 3 sigma (quartz stays within about 300):
   one was sped up or slowed down. Only up to about 1 %, where the fingerprints still match.
-- Possible (drawn greyed): edits, shared sounds, sound source, gaps.
+- `gaps`: where a pair's offset jumps 0.1 s or more between two links in a row, an event on the
+  recording that lacks the stretch (paused or cut there, or the other has an insert), between
+  its two links. A pair with a gap gets no drift. None on Jiku (unedited phone recordings).
+- Possible (drawn greyed): edits (for the cut detector), shared sounds, sound source.
 
 How: Wang landmark fingerprints (audiofp) of each recording at 8 kHz; every 15 s of one
 recording is matched against the whole other; each clear match is refined with GCC-PHAT

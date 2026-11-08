@@ -94,6 +94,9 @@ pub const SAME_CORR: f64 = 0.8;
 /// another speed rather than drift: quartz clocks stay within about 300 (Jiku's phones: 266 at
 /// most). The fingerprints only match up to about 1 % (10000 ppm) of speed change.
 pub const SPEED_CHANGE_PPM: f64 = 1000.0;
+/// Smallest jump in a pair's offset called a gap, seconds (beyond 5 sigma of the two links):
+/// 0.1 s is 34 m of sound, more than a phone walks between two chunks.
+pub const GAP_MIN_S: f64 = 0.1;
 /// Shortest span of links a pair's drift is given for, seconds.
 pub const DRIFT_SPAN_S: f64 = 30.0;
 
@@ -269,6 +272,40 @@ pub fn speed_changed(d: &Drift) -> bool {
     d.ppm.abs() - 3.0 * d.error_ppm > SPEED_CHANGE_PPM
 }
 
+/// Where a pair's offset jumps between two links in a row: one recording lacks a stretch the
+/// other has (it was paused, or cut), or has one the other lacks (an insert).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gap {
+    /// Which recording lacks it: a (true) or b. The jump alone cannot tell a cut from an insert
+    /// in the other; a third recording can.
+    pub on_a: bool,
+    /// Between these two moments of that recording (its links either side), seconds.
+    pub t0: f64,
+    pub t1: f64,
+    /// How much it lacks, seconds, and the error of that (1 sigma).
+    pub len_s: f64,
+    pub error_s: f64,
+}
+
+/// The gaps in a pair's links (`GAP_MIN_S`).
+pub fn gaps(hits: &[Hit]) -> Vec<Gap> {
+    let mut h: Vec<&Hit> = hits.iter().collect();
+    h.sort_by(|x, y| x.t_b.total_cmp(&y.t_b));
+    h.windows(2)
+        .filter_map(|w| {
+            let (x, y) = (w[0], w[1]);
+            let d = (y.t_a - y.t_b) - (x.t_a - x.t_b);
+            let err = x.error_s.hypot(y.error_s);
+            (d.abs() >= GAP_MIN_S.max(5.0 * err)).then(|| {
+                // a moved on d more than b: b lacks d seconds that a has.
+                let on_a = d < 0.0;
+                let (t0, t1) = if on_a { (x.t_a, y.t_a) } else { (x.t_b, y.t_b) };
+                Gap { on_a, t0, t1, len_s: d.abs(), error_s: err }
+            })
+        })
+        .collect()
+}
+
 /// Every pair of clips (a before b in the list), matched on all cores.
 pub fn match_all(clips: &[&Clip]) -> Vec<(usize, usize, Pair)> {
     let pairs: Vec<(usize, usize)> = (0..clips.len()).flat_map(|a| (a + 1..clips.len()).map(move |b| (a, b))).collect();
@@ -415,5 +452,25 @@ mod tests {
             assert_eq!(speed_changed(&d), changed, "{ppm}: {d:?}");
         }
         assert!(drift(&[]).is_none());
+    }
+
+    #[test]
+    fn finds_a_stretch_cut_out() {
+        // b is the event with 7.3 s cut out at 100 s (and quieter); a is all of it.
+        let ev = event(240.0);
+        let a = Clip::new(ev.clone());
+        let cut = (100.0 * SR as f64) as usize..(107.3 * SR as f64) as usize;
+        let b_audio: Vec<f32> = ev[..cut.start].iter().chain(&ev[cut.end..]).map(|&v| 0.6 * v).collect();
+        let p = match_pair(&a, &Clip::new(b_audio), &mut RealFftPlanner::new());
+        let g = gaps(&p.hits);
+        assert_eq!(g.len(), 1, "{g:?}");
+        assert!(!g[0].on_a && (g[0].len_s - 7.3).abs() < 0.01, "{g:?}");
+        assert!(g[0].t0 < 100.0 && g[0].t1 > 100.0, "the cut lies between its links: {g:?}");
+        // Seen the other way round (b as a), the same stretch is lacking on that side.
+        let g2 = gaps(&p.hits.iter().map(|h| Hit { t_a: h.t_b, t_b: h.t_a, ..h.clone() }).collect::<Vec<_>>());
+        assert!(g2.len() == 1 && g2[0].on_a, "{g2:?}");
+        // No cut, no gap.
+        let whole = match_pair(&a, &Clip::new(ev.iter().map(|&v| 0.6 * v).collect()), &mut RealFftPlanner::new());
+        assert!(gaps(&whole.hits).is_empty());
     }
 }

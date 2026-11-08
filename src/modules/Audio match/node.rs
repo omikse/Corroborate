@@ -101,6 +101,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                 ("clock drift", Data::Json(r.drift.clone())),
                 ("same recording", Data::Events(r.same.clone())),
                 ("speed change", Data::Events(r.speed.clone())),
+                ("gaps", Data::Events(r.gaps.clone())),
             ];
             s.outbox_rev += 1;
             s.status = format!("{}{note}", r.status);
@@ -133,6 +134,8 @@ struct Results {
     /// matched stretch; for each pair one of which plays at another speed, one on b's clock.
     same: Vec<Event>,
     speed: Vec<Event>,
+    /// Where a pair's offset jumps: an event on the recording that lacks the stretch.
+    gaps: Vec<Event>,
     status: String,
 }
 
@@ -145,7 +148,7 @@ fn span(hits: &[audio_match::Hit], a: bool) -> (f64, f64) {
 }
 
 fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors: &[String]) -> Results {
-    let (mut drifts, mut same, mut speed) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut drifts, mut same, mut speed, mut gaps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut links = Vec::new();
     let mut pairs = Vec::new();
     let (mut chunks, mut cands, mut weak, mut linked) = (0, 0, 0, 0);
@@ -181,7 +184,23 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
                 });
             }
         }
-        if let Some(d) = audio_match::drift(&p.hits) {
+        let found_gaps = audio_match::gaps(&p.hits);
+        for g in &found_gaps {
+            let (w, o) = if g.on_a { (wa, wb) } else { (wb, wa) };
+            gaps.push(Event {
+                clock: w.clock.clone(),
+                t_start: g.t0,
+                t_end: g.t1,
+                label: format!("{:.2} s missing against {}", g.len_s, o.label),
+                detail: format!(
+                    "somewhere between these moments {} lacks {:.3} ± {:.3} s that {} has: paused or cut here, or {} has an insert",
+                    w.label, g.len_s, g.error_s, o.label, o.label
+                ),
+                error_s: g.error_s,
+            });
+        }
+        // A jump bends a line through all the links: no drift for a pair with a gap.
+        if let Some(d) = audio_match::drift(&p.hits).filter(|_| found_gaps.is_empty()) {
             drifts.push(format!(
                 "{{\"a\":\"{}\",\"b\":\"{}\",\"ppm\":{:.1},\"error_ppm\":{:.1},\"span_s\":{:.1},\"links\":{}}}",
                 json_escape(&wa.label),
@@ -266,7 +285,10 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
     if !speed.is_empty() {
         status += &format!(", {} speed change", speed.len());
     }
-    Results { links: format!("[{}]", links.join(",")), quality, drift: format!("[{}]", drifts.join(",")), same, speed, status }
+    if !gaps.is_empty() {
+        status += &format!(", {} gap{}", gaps.len(), if gaps.len() == 1 { "" } else { "s" });
+    }
+    Results { links: format!("[{}]", links.join(",")), quality, drift: format!("[{}]", drifts.join(",")), same, speed, gaps, status }
 }
 
 /// The node's part of the result file: what it gave on each output.

@@ -89,8 +89,8 @@ min_quality = "good"
 [[output]]
 name = "gaps"
 kind = "event"
-status = "possible"
-about = "Parts missing from one recording that the others have."
+title = "gaps"
+about = "Where a pair's offset jumps by 0.1 s or more (and 5 sigma) between two links in a row: one recording lacks a stretch the other has (paused or cut there), or the other has an insert. An event on the one that lacks it, between its two links. Its links on either side then disagree in the clock solve; the cut detector is to split it there."
 needs = ["audio", "audio 2"]
-when = "overlapping recordings"
+when = "overlapping recordings, one paused or cut"
 min_quality = "weak"

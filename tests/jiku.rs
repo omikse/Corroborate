@@ -380,6 +380,9 @@ fn jiku_gt_090912_sync_from_audio() {
         pct(&mut score, 0.5),
         pct(&mut score, 1.0)
     );
+    let gapped: Vec<String> = found_pairs.iter().flat_map(|(a, b, p)| audio_match::gaps(&p.hits).into_iter().map(move |g| format!("{}-{}: {g:?}", a, b))).collect();
+    println!("{} gaps (none expected: phone recordings, unedited)", gapped.len());
+    assert!(gapped.is_empty(), "gaps in unedited recordings: {gapped:?}");
     let same: Vec<String> = found_pairs.iter().filter(|(_, _, p)| audio_match::same_recording(&p.hits)).map(|(a, b, _)| format!("{}-{}", recs[*a].name, recs[*b].name)).collect();
     assert!(same.is_empty(), "two phones called one recording: {same:?}");
     // The same recording twice: each video's own audio track (decoded from the .mp4) against
