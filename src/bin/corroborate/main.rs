@@ -791,6 +791,10 @@ impl App {
                 json_escape(&s.source_key),
                 json_escape(&s.status)
             );
+            // Inside a node group: which (its id in this file) and its name there.
+            if let Some(p) = n.parent {
+                body.push_str(&format!(",\"in_group\":{p},\"group_member\":\"{}\"", json_escape(&n.member)));
+            }
             let own = match &n.kind {
                 Kind::Planes => planes_node::json(&s),
                 Kind::AudioMatch => audio_match_node::json(&s),

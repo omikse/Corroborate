@@ -199,6 +199,10 @@ fn groups_survive_save_load_and_undo() {
     key(&mut d, Modifiers::COMMAND, Key::G);
     let text = d.app().project_text();
     assert!(text.contains("node|group|"), "{text}");
+    let g = group_of(d.app());
+    let all: Vec<NodeId> = (0..d.app().nodes.len()).collect();
+    let json = d.app().result_json(&all);
+    assert!(json.contains(&format!("\"in_group\":{g},\"group_member\":\"m1\"")), "the result file says which group a node is in: {json}");
     assert!(text.contains("|in=") && text.contains("|m=m1"), "{text}");
     let want = lines(d.app());
     let wires_before = wires(d.app());
