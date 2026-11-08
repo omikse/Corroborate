@@ -391,7 +391,7 @@ impl App {
         self.zoom = 1.0;
         let bounds = ids.iter().map(|&i| self.node_rect(Pos2::ZERO, i)).reduce(|a, b| a.union(b)).unwrap();
         let margin = 60.0;
-        self.zoom = ((area.width() - margin) / bounds.width()).min((area.height() - margin) / bounds.height()).clamp(0.4, 1.5);
+        self.zoom = ((area.width() - margin) / bounds.width()).min((area.height() - margin) / bounds.height()).clamp(MIN_ZOOM, 1.5);
         self.pan = area.center() - area.min - bounds.center().to_vec2() * self.zoom;
     }
 

@@ -71,6 +71,14 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                 f(&mut s);
             }
         };
+        // Stopped: no results, and it no longer counts as running.
+        let stopped = || {
+            let mut s = state.lock().unwrap();
+            if s.run_id == run {
+                s.running = false;
+                s.status = "stopped".into();
+            }
+        };
         // One decoder per core at a time: fifty at once (beside the sources' own) starve each
         // other.
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -86,7 +94,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             if stop2.load(Ordering::Relaxed) {
                                 break;
                             }
-                            done.push((k, decode(&w.path).map(Clip::new)));
+                            done.push((k, decode(&w.path, &stop2).map(Clip::new)));
                         }
                         done
                     })
@@ -100,7 +108,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         }
         let decoded = slots;
         if stop2.load(Ordering::Relaxed) {
-            return;
+            return stopped();
         }
         let mut clips = Vec::new();
         let mut used = Vec::new();
@@ -117,6 +125,9 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         set(&|s| s.status = format!("matching {} pairs…", clips.len() * clips.len().saturating_sub(1) / 2));
         let refs: Vec<&Clip> = clips.iter().collect();
         let found = audio_match::match_all(&refs);
+        if stop2.load(Ordering::Relaxed) {
+            return stopped();
+        }
         let r = results(&used, &found, &errors);
         set(&|s| {
             s.outbox = vec![
@@ -135,10 +146,17 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
     });
 }
 
-fn decode(path: &str) -> Result<Vec<f32>, String> {
+fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
+    // Its turn among every decoder of the project (the sources' too).
+    let Some(_turn) = corroborate::ingest::decode_turn(stop) else { return Err("stopped".into()) };
     let (mut child, rx) = corroborate::ingest::spawn_ffmpeg(path, audio_match::SR)?;
     let mut out = Vec::new();
     for c in rx {
+        if stop.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("stopped".into());
+        }
         out.extend(c);
     }
     let _ = child.wait();

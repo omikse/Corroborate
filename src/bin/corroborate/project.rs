@@ -307,6 +307,7 @@ impl App {
             Some((text, p)) => self.load_into(p, &text, true),
             None => {
                 if let Some(text) = self.project_file().and_then(|p| std::fs::read_to_string(p).ok()) {
+                    self.stopped = true;
                     self.load_project_text(&text);
                     self.resolve_recordings();
                     self.sync_recordings();
@@ -347,6 +348,9 @@ impl App {
         }
         remember(Some(&path));
         self.last_project_save = Instant::now();
+        // A project opens stopped: Run starts it.
+        self.stopped = true;
+        self.msg = format!("{} (stopped: Run starts it)", self.msg);
     }
 
     /// Project → Revert to saved: drops the unsaved changes and opens the project file again.

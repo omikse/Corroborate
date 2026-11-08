@@ -143,6 +143,16 @@ fn run(job: Job) {
         *anchor.lock().unwrap() = timebase::file_anchor(p);
     }
 
+    // A recording waits its turn: only so many decode at once (big projects).
+    let _turn = if live {
+        None
+    } else {
+        set_status(&format!("waiting: {} recordings decode at once", ingest::decoders_at_once()));
+        match ingest::decode_turn(&job.stop) {
+            Some(t) => Some(t),
+            None => return finish(&job, run_id, Ok(0.0)),
+        }
+    };
     let mut args = vec!["--source".to_string(), key.clone(), if live { "--live" } else { "--file" }.to_string(), "--clock".to_string(), job.clock.clone()];
     if let Some(a) = anchor.lock().unwrap().as_ref() {
         args.extend(["--utc0".to_string(), format!("{:.3}", a.utc0), "--utc-source".to_string(), a.source.clone(), "--utc-error".to_string(), format!("{:.3}", a.error_s)]);

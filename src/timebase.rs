@@ -27,7 +27,14 @@ impl Anchor {
     pub fn utc(&self, rel: f64) -> f64 {
         self.utc0 + rel
     }
+    /// From the file's creation time: a camera's clock someone may have set by hand, so it
+    /// anchors the clock only when the user wires the source's time output.
+    pub fn is_creation_time(&self) -> bool {
+        self.source.starts_with(CREATION_TIME)
+    }
 }
+
+const CREATION_TIME: &str = "file creation_time";
 
 pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -244,7 +251,7 @@ pub fn file_anchor(path: &str) -> Option<Anchor> {
         file_creation_time(path).map(|(t, len)| Anchor {
             utc0: t,
             error_s: len.unwrap_or(600.0).max(1.0),
-            source: "file creation_time (low confidence)".into(),
+            source: format!("{CREATION_TIME} (low confidence)"),
         })
     })
 }

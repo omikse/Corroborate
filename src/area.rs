@@ -50,7 +50,13 @@ impl WorldMask {
     /// Cells whose centre is within `radius_km` of a point; the cell holding the point always counts.
     pub fn circle(lat: f64, lon: f64, radius_km: f64) -> Self {
         let mut m = Self::none();
+        // Only rows within the radius of the centre's latitude can hold cells of it (a point,
+        // radius 0, is just its own cell: the location panel asks for some every frame).
+        let reach = radius_km / 111.0 + 1.0;
         for r in 0..ROWS {
+            if radius_km <= 0.0 || (centre(r, 0).0 - lat).abs() > reach {
+                continue;
+            }
             for c in 0..COLS {
                 let (a, b) = centre(r, c);
                 m.cells[r * COLS + c] = distance_km(lat, lon, a, b) <= radius_km;

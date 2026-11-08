@@ -5,7 +5,8 @@
 //!   (right-click on several selected sources) gave them one shared id. A node fed audio is on
 //!   the clock of that audio's source.
 //! - **Evidence**, gathered every frame and solved again when it changes:
-//!   - each source's own anchor (file metadata, stream times, this PC's clock);
+//!   - each source's own anchor (our recording's sidecar, stream times, this PC's clock; a file's
+//!     creation time only while the source's time output is wired);
 //!   - a time wired into an input that module.toml marks `anchors = "audio"`: the audio starts at
 //!     that time (an anchor when the time is UTC, a link when it is on another clock);
 //!   - every `anchor` and `link` output in the project, wired or not;
@@ -84,9 +85,12 @@ impl App {
             if n.hidden {
                 continue;
             }
-            // A source's own anchor: its time 0 is at utc0.
+            // A source's own anchor: its time 0 is at utc0. One from the file's creation time
+            // (a camera clock someone may have set by hand) counts only while the source's time
+            // output is wired: wiring it is the user's choice to trust it.
             if n.kind.is_source() {
                 let a = n.state.lock().unwrap().anchor.clone();
+                let a = a.filter(|a| !a.is_creation_time() || !self.graph.targets(i, "time").is_empty());
                 if let (Some(a), Some(c)) = (a, self.clock_of(i)) {
                     an.push(ClockAnchor { clock: c, t: 0.0, utc: a.utc0, error_s: a.error_s, from: n.uid.clone(), enabled: true });
                 }

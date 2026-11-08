@@ -669,7 +669,7 @@ fn make_jiku_project() {
     let mut sources = Vec::new();
     for (k, v) in videos.iter().enumerate() {
         let (c, r) = (k % cols, k / cols);
-        let s = app.add(Kind::Sourcer { input: v.to_string_lossy().into_owned() }, Pos2::new(30.0 + 470.0 * c as f32, 40.0 + 300.0 * r as f32));
+        let s = app.add(Kind::Sourcer { input: v.to_string_lossy().into_owned() }, Pos2::new(30.0 + 470.0 * c as f32, 40.0 + 460.0 * r as f32));
         // GT_090912_<phone>_<phone clock at the start, ms>.
         let stem = v.file_stem().unwrap().to_string_lossy().into_owned();
         let parts: Vec<&str> = stem.split('_').collect();
@@ -705,4 +705,89 @@ fn make_jiku_project() {
     let app = d.app();
     app.stop_all();
     assert!(st.contains("of 1225 pairs"), "all 50 matched: {st}");
+}
+
+/// A file's creation time (a camera clock perhaps set by hand) anchors its source's clock only
+/// while the source's time output is wired; other anchors count wired or not.
+#[test]
+fn creation_time_anchors_only_when_wired() {
+    let mut app = App::empty();
+    let s = source(&mut app, 40.0);
+    let p = app.add(Kind::Planes, Pos2::new(300.0, 40.0));
+    app.wire(s, "audio", p, "audio");
+    let stamp = Anchor { utc0: 1000.0, error_s: 60.0, source: "file creation_time (low confidence)".into() };
+    assert!(stamp.is_creation_time());
+    app.nodes[s].state.lock().unwrap().anchor = Some(stamp);
+    app.update_clocks();
+    assert!(app.ev.anchors.is_empty(), "unwired: not used {:?}", app.ev.anchors);
+    app.wire(s, "time", p, "time");
+    assert_eq!(app.graph.wires().len(), 2, "{}", app.msg);
+    app.update_clocks();
+    assert_eq!(app.ev.anchors.len(), 1, "wired: used");
+    assert_eq!(app.ev.anchors[0].utc, 1000.0);
+    // Our recorder's sidecar time counts unwired.
+    anchor(&app, s, 2000.0, 1.0);
+    app.graph.disconnect(p, "time");
+    app.update_clocks();
+    assert_eq!(app.ev.anchors.len(), 1, "a sidecar counts unwired");
+}
+
+/// Opens a copy of the Jiku project (made by make_jiku_project; the copy in target\drive, so
+/// the project itself is never written) as the app would: it opens stopped, fits
+/// on screen zoomed out, and after Run the frames stay quick while 50 videos decode: only
+/// still frames, read for the sources on screen. PNGs jiku_opened, jiku_running, jiku_close.
+/// Run: cargo test --profile fast --bin corroborate jiku_project_opens_stopped -- --ignored --nocapture
+#[test]
+#[ignore]
+fn jiku_project_opens_stopped() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let made = root.join("app").join("projects").join("Jiku GT_090912").join("Jiku GT_090912.txt");
+    assert!(made.is_file(), "make it first: make_jiku_project");
+    let dir = crate::drive::out_dir().join("Jiku copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Jiku copy.txt");
+    std::fs::copy(&made, &file).unwrap();
+    let mut d = crate::drive::Drive::new();
+    d.app().open_project(file);
+    d.frames(5);
+    assert_eq!(d.app().nodes.iter().filter(|n| !n.hidden).count(), 51);
+    assert!(d.app().stopped && !d.app().running(), "opens stopped");
+    d.wait(1.0);
+    assert!(!d.app().running(), "and stays stopped");
+    let area = Rect::from_min_size(d.app().canvas_origin, Vec2::new(1400.0, 800.0));
+    d.app().frame_nodes(area);
+    d.frames(3);
+    println!("zoom to see it all: {:.2}", d.app().zoom);
+    d.shot("jiku_opened");
+    d.click("▶ Run");
+    assert!(!d.app().stopped && d.app().running(), "Run starts it");
+    let (mut worst, mut sum, mut n) = (0.0f64, 0.0f64, 0);
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        let t = Instant::now();
+        d.h.step();
+        let dt = t.elapsed().as_secs_f64();
+        if dt > 0.3 {
+            println!("slow frame {n} at {:.1} s: {:.0} ms", 30.0 - (end - Instant::now()).as_secs_f64(), dt * 1000.0);
+        }
+        (worst, sum, n) = (worst.max(dt), sum + dt, n + 1);
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let asked = d.app().nodes.iter().filter(|n| n.state.lock().unwrap().source.frames_asked != sourcer_node::Asked::Nothing).count();
+    println!("frames while running: {n}, mean {:.1} ms, worst {:.0} ms; still frames asked by {asked} sources", sum / n as f64 * 1000.0, worst * 1000.0);
+    d.shot("jiku_running");
+    // Close up: a still frame.
+    d.app().zoom = 1.0;
+    // The bottom row: in this layout each row's video lies under the next row's nodes.
+    d.app().pan = Vec2::ZERO - d.app().nodes[46].pos.to_vec2() + Vec2::new(40.0, 0.0);
+    d.wait(5.0);
+    d.shot("jiku_close");
+    d.app().stop_run();
+    let t = Instant::now();
+    d.wait_until(10.0, |a| !a.running());
+    let running: Vec<String> = d.app().nodes.iter().filter(|n| n.state.lock().unwrap().running).map(|n| n.label.clone()).collect();
+    println!("stopped in {:.1} s", t.elapsed().as_secs_f64());
+    assert!(running.is_empty() && d.app().stopped, "Stop stops it: still running {running:?}");
+    assert!(worst < 2.0, "no frame takes seconds: worst {worst:.1} s");
 }

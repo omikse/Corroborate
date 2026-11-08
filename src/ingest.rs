@@ -131,6 +131,40 @@ pub fn read_wav(path: &str, sr_out: f64, mut f: impl FnMut(&[f32])) -> Result<()
     Ok(())
 }
 
+/// How many recordings are decoded at once, by the sources and the Audio match together: half
+/// the cores (at least two). Fifty at once leave the window no time to draw.
+pub fn decoders_at_once() -> usize {
+    (thread::available_parallelism().map_or(4, |n| n.get()) / 2).max(2)
+}
+
+static DECODING: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// A turn to decode a recording, given back when dropped.
+pub struct DecodeTurn(());
+
+impl Drop for DecodeTurn {
+    fn drop(&mut self) {
+        *DECODING.0.lock().unwrap() -= 1;
+        DECODING.1.notify_one();
+    }
+}
+
+/// Waits for a turn to decode a recording (`decoders_at_once`); None when `stop` is set first.
+/// Live sources do not wait: they cannot.
+pub fn decode_turn(stop: &std::sync::atomic::AtomicBool) -> Option<DecodeTurn> {
+    let mut n = DECODING.0.lock().unwrap();
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        if *n < decoders_at_once() {
+            *n += 1;
+            return Some(DecodeTurn(()));
+        }
+        n = DECODING.1.wait_timeout(n, std::time::Duration::from_millis(100)).unwrap().0;
+    }
+}
+
 /// Decode `input` (file path or URL) with ffmpeg to f32 mono at `sr` and deliver chunks of
 /// about 0.25 s over a bounded channel from a reader thread.
 pub fn spawn_ffmpeg(input: &str, sr: u32) -> Result<(Child, Receiver<Vec<f32>>), String> {

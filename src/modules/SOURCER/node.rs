@@ -1,6 +1,7 @@
 //! The SOURCER node in the workbench: on the canvas, a source box (file, web page or stream URL,
 //! with Browse) and a system streams box (microphones, virtual mics, capture cards), then what it
-//! gave so far, a waveform of the audio and, for sources with pictures, a video viewer. Its size
+//! gave so far, a waveform of the audio and, for sources with pictures, a video viewer: one still
+//! frame while it is shown expanded, the video read one frame a second after a click on it. Its size
 //! and which outputs show are its look.rhai: a new node is just the two boxes, outputs hidden. Web pages are
 //! resolved with yt-dlp. Compiled into the `corroborate` program.
 
@@ -226,10 +227,24 @@ pub struct SourceState {
     pub frame_step: f64,
     /// About the pictures: "no video stream", an ffmpeg error, or empty.
     pub video_note: String,
+    /// The pictures are read only when asked (a big project would otherwise decode every video
+    /// at once): what ffmpeg opens with the run's Stop, and what was asked so far.
+    pictures: Option<(String, Arc<AtomicBool>)>,
+    pub frames_asked: Asked,
     /// ffprobe's view of the source, plus what was opened: key, value.
     pub meta: Vec<(String, String)>,
     /// The audio itself (16 kHz), for sound at the playhead.
     pub audio: std::sync::Arc<std::sync::Mutex<Vec<i16>>>,
+}
+
+/// Which pictures of a source have been asked for: none yet, one still frame (the node is
+/// shown expanded), or one a second all through (a click on the video).
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum Asked {
+    #[default]
+    Nothing,
+    Still,
+    All,
 }
 
 impl SourceState {
@@ -273,8 +288,8 @@ impl SourceState {
     }
 }
 
-/// Metadata and pictures of a source, beside the audio: ffprobe once, then ffmpeg giving one
-/// small frame a second while the source has a video stream.
+/// Metadata of a source, beside the audio: ffprobe once. Its pictures come later, when the node
+/// asks (`ask_frames`): one still frame when it is shown expanded, all of them on a click.
 pub fn start_side(ff_input: String, typed: String, live: bool, st: Shared, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut meta = vec![("input".to_string(), typed), ("opened".to_string(), ff_input.clone()), ("live".to_string(), live.to_string())];
@@ -304,21 +319,67 @@ pub fn start_side(ff_input: String, typed: String, live: bool, st: Shared, stop:
         {
             let mut s = st.lock().unwrap();
             s.source.meta = meta;
-            if !video {
+            if video {
+                s.source.pictures = Some((ff_input, stop));
+            } else {
                 s.source.video_note = "no video stream".into();
-            }
-        }
-        if video && !stop.load(Ordering::Relaxed) {
-            if let Err(e) = frames(&ff_input, &st, &stop) {
-                st.lock().unwrap().source.video_note = e;
             }
         }
     });
 }
 
+/// Asks for a source's pictures (`Asked::Still` or `Asked::All`) once its metadata says it has
+/// some; asking again for the same, or for less, does nothing. All of them replace the still.
+pub fn ask_frames(st: &Shared, want: Asked) {
+    let (input, stop) = {
+        let mut s = st.lock().unwrap();
+        let had = s.source.frames_asked;
+        let Some((input, stop)) = s.source.pictures.clone() else { return };
+        if had == Asked::All || had == want || want == Asked::Nothing {
+            return;
+        }
+        s.source.frames_asked = want;
+        (input, stop)
+    };
+    let st = st.clone();
+    std::thread::spawn(move || {
+        let r = match want {
+            Asked::Still => still(&input, &st),
+            _ => frames(&input, &st, &stop),
+        };
+        if let Err(e) = r {
+            st.lock().unwrap().source.video_note = e;
+        }
+    });
+}
+
+/// The letterboxing filter: FW × FH whatever the video's shape.
+fn fit() -> String {
+    format!("scale={FW}:{FH}:force_original_aspect_ratio=decrease,pad={FW}:{FH}:(ow-iw)/2:(oh-ih)/2")
+}
+
+/// One frame a second in (the very first is often black), else the first.
+fn still(input: &str, st: &Shared) -> Result<(), String> {
+    for at in ["1", "0"] {
+        let o = corroborate::no_window(&mut std::process::Command::new("ffmpeg"))
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-ss", at, "-i", input, "-an", "-frames:v", "1", "-vf", &fit(), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .map_err(|e| format!("could not start ffmpeg for video: {e}"))?;
+        if o.stdout.len() >= FW * FH * 3 {
+            let mut s = st.lock().unwrap();
+            // A click may have started the whole video meanwhile.
+            if s.source.frames.is_empty() {
+                s.source.push_frame(at.parse().unwrap_or(0.0), o.stdout[..FW * FH * 3].to_vec());
+            }
+            return Ok(());
+        }
+    }
+    Err("ffmpeg gave no video frame".into())
+}
+
 /// Read one frame a second, FW × FH RGB (letterboxed), into the state until the end or Stop.
 fn frames(input: &str, st: &Shared, stop: &AtomicBool) -> Result<(), String> {
-    let vf = format!("fps=1,scale={FW}:{FH}:force_original_aspect_ratio=decrease,pad={FW}:{FH}:(ow-iw)/2:(oh-ih)/2");
+    let vf = format!("fps=1,{}", fit());
     let mut child = corroborate::no_window(&mut std::process::Command::new("ffmpeg"))
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i", input, "-an", "-vf", &vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
         .stdout(std::process::Stdio::piped())
@@ -332,7 +393,14 @@ fn frames(input: &str, st: &Shared, stop: &AtomicBool) -> Result<(), String> {
         if out.read_exact(&mut buf).is_err() || stop.load(Ordering::Relaxed) {
             break;
         }
-        st.lock().unwrap().source.push_frame(n as f64, buf);
+        let mut s = st.lock().unwrap();
+        if n == 0 {
+            // The still goes: these come in order from the start.
+            s.source.frames.clear();
+            s.source.frame_step = 0.0;
+        }
+        s.source.push_frame(n as f64, buf);
+        drop(s);
         n += 1;
     }
     let _ = child.kill();
@@ -575,18 +643,33 @@ fn waveform(ui: &mut egui::Ui, st: &Shared, z: f32, i: NodeId, ph: Option<(f64, 
 }
 
 /// The video frame at the waveform's pointer, or the newest one.
+/// Only a still frame is read at first, once the viewer is on screen; a click reads the video
+/// (one frame a second) so the waveform and the playhead can scrub it.
 fn video(app: &mut App, ui: &mut egui::Ui, i: NodeId, st: &Shared, cursor: Option<f64>, z: f32) {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, VIDEO_H * z), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, VIDEO_H * z), Sense::click());
+    if ui.is_rect_visible(rect) {
+        ask_frames(st, Asked::Still);
+    }
+    let asked = st.lock().unwrap().source.frames_asked;
+    let resp = if asked == Asked::All { resp } else { resp.on_hover_text("click to play the video: read it one frame a second, to scrub with the waveform") };
+    if resp.clicked() {
+        ask_frames(st, Asked::All);
+    }
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 3.0 * z, Color32::BLACK);
     let s = st.lock().unwrap();
     let pick = match cursor {
-        Some(t) => s.source.frame_at(t),
+        // Before the first frame (the still is a second in): the first.
+        Some(t) => s.source.frame_at(t).or_else(|| s.source.frames.first().map(|f| (0, f))),
         None => s.source.frames.len().checked_sub(1).map(|k| (k, &s.source.frames[k])),
     };
     let Some((k, f)) = pick else {
-        let note = if s.source.video_note.is_empty() { "video appears at Run" } else { s.source.video_note.as_str() };
+        let note = match (s.source.video_note.as_str(), s.source.frames_asked) {
+            ("", Asked::Nothing) => "video appears at Run",
+            ("", _) => "reading a frame…",
+            (n, _) => n,
+        };
         p.text(rect.center(), Align2::CENTER_CENTER, note, FontId::proportional(10.5 * z), DIM);
         return;
     };
@@ -607,6 +690,10 @@ fn video(app: &mut App, ui: &mut egui::Ui, i: NodeId, st: &Shared, cursor: Optio
     let fr = Rect::from_center_size(rect.center(), Vec2::new(fw, fw * FH as f32 / FW as f32));
     p.image(tex, fr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     p.text(rect.left_bottom() + Vec2::new(4.0, -2.0) * z, Align2::LEFT_BOTTOM, fmt_secs(f.t), FontId::monospace(9.5 * z), TEXT);
+    if s.source.frames_asked == Asked::Still {
+        p.text(rect.center(), Align2::CENTER_CENTER, "▶", FontId::proportional(28.0 * z), TEXT.gamma_multiply(0.8));
+        p.text(rect.right_top() + Vec2::new(-4.0, 2.0) * z, Align2::RIGHT_TOP, "still: click to play", FontId::proportional(9.5 * z), TEXT);
+    }
     if !s.source.video_note.is_empty() {
         p.text(rect.right_bottom() + Vec2::new(-4.0, -2.0) * z, Align2::RIGHT_BOTTOM, &s.source.video_note, FontId::proportional(9.5 * z), WARN);
     }

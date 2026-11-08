@@ -246,6 +246,9 @@ struct App {
     setting_errors: HashMap<(NodeId, String), String>,
     /// How many times the graph has (re)started.
     runs: u64,
+    /// Stopped: nothing runs until Run (a project opens stopped, so a big one does not start
+    /// decoding everything at once). Running, changes restart the graph by themselves.
+    stopped: bool,
     /// Module manifests by id (looks, ports), read again each second; and when.
     looks: HashMap<&'static str, Arc<corroborate::module_manifest::Manifest>>,
     looks_at: Instant,
@@ -281,6 +284,8 @@ struct App {
 }
 
 const NODE_W: f32 = 210.0;
+/// How far the canvas zooms out: far enough to see a project of 50 sources whole.
+const MIN_ZOOM: f32 = 0.05;
 const HEAD: f32 = 26.0;
 const ROW: f32 = 20.0;
 
@@ -318,6 +323,7 @@ impl App {
             drafts: HashMap::new(),
             setting_errors: HashMap::new(),
             runs: 0,
+            stopped: false,
             looks: HashMap::new(),
             looks_at: Instant::now(),
             scripts: Default::default(),
@@ -574,6 +580,7 @@ impl App {
     }
 
     fn run(&mut self) {
+        self.stopped = false;
         self.stop_all();
         self.save_project();
         self.runs += 1;
@@ -676,6 +683,9 @@ impl App {
 
     /// Start or restart the graph when what it runs from has changed.
     fn keep_running(&mut self) {
+        if self.stopped {
+            return;
+        }
         let sig = self.run_signature();
         if self.run_sig.as_ref() == Some(&sig) {
             return;
@@ -689,6 +699,14 @@ impl App {
         if self.run_sig.is_none() || self.sig_seen.1.elapsed() > Duration::from_millis(500) {
             self.run();
         }
+    }
+
+    /// Stop: every source and program stops, and nothing restarts until Run.
+    fn stop_run(&mut self) {
+        self.stop_all();
+        self.stopped = true;
+        self.run_sig = None;
+        self.msg = "stopped: Run starts it".into();
     }
 
     fn stop_all(&mut self) {
@@ -836,7 +854,7 @@ impl App {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 let world = (pointer - area.min - self.pan) / self.zoom;
-                self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(0.4, 2.5);
+                self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(MIN_ZOOM, 2.5);
                 self.pan = pointer - area.min - world * self.zoom;
             }
         }
@@ -1234,10 +1252,20 @@ impl App {
             ui.colored_label(DIM, option_env!("CORROBORATE_BUILD").unwrap_or("dev"));
             ui.separator();
             {
-                // The graph runs always: changes restart it. Recording is in the Result record node.
+                // Running, changes restart the graph by themselves; a project opens stopped.
+                // Recording is in the Result record node.
                 self.file_menu(ui);
-                if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
-                    self.run();
+                if self.stopped {
+                    if ui.button("▶ Run").on_hover_text("start every source; while it runs, changes restart it").clicked() {
+                        self.run();
+                    }
+                } else {
+                    if ui.button("■ Stop").on_hover_text("stop every source; nothing runs until Run").clicked() {
+                        self.stop_run();
+                    }
+                    if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
+                        self.run();
+                    }
                 }
                 ui.separator();
                 ui.menu_button("Add node", |ui| {
