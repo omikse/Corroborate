@@ -999,7 +999,7 @@ impl App {
                             let clock = if clock_view::err_text(e.err0 * sig) == clock_view::err_text(e.err1 * sig) {
                                 clock_view::err_text(e.err0 * sig)
                             } else {
-                                format!("{} → {}", clock_view::err_text(e.err0 * sig), clock_view::err_text(e.err1 * sig))
+                                format!("{} -> {}", clock_view::err_text(e.err0 * sig), clock_view::err_text(e.err1 * sig))
                             };
                             hover = Some(format!(
                                 "{}\n{}\n{when}\nclock ± {clock} · own ± {} · together ± {} ({})",

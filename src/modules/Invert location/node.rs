@@ -8,7 +8,7 @@ impl App {
     pub(crate) fn invert_area_out(&self, i: NodeId) -> Result<(Arc<Area>, String), String> {
         let (f, _) = self.graph.feeder(i, "location").ok_or("no location wired in")?;
         let (a, note) = self.area_from(f)?;
-        Ok((Arc::new(a.inverted()), format!("inverted ({}): {note}", if a.add { "adds → subtracts" } else { "subtracts → adds" })))
+        Ok((Arc::new(a.inverted()), format!("inverted ({}): {note}", if a.add { "adds -> subtracts" } else { "subtracts -> adds" })))
     }
 }
 

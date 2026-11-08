@@ -340,7 +340,7 @@ impl App {
                 self.sync_recordings();
                 self.saved_text = saved;
                 if self.dirty() {
-                    self.msg = format!("restored unsaved changes from {}: Save keeps them, Project → Revert to saved drops them", rec.display());
+                    self.msg = format!("restored unsaved changes from {}: Save keeps them, Project -> Revert to saved drops them", rec.display());
                 } else {
                     let _ = std::fs::remove_file(&rec);
                 }

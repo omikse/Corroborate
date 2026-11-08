@@ -355,7 +355,7 @@ impl App {
         let level = self.view;
         let fkind = self.graph.nodes()[from].spec.outputs[fk].kind;
         let label = |a: &App, i: NodeId| a.nodes[i].label.clone();
-        let said = format!("wired {}.{} → {}.{}", label(self, from), self.out_name(from, fk), label(self, to), self.in_name(to, tk));
+        let said = format!("wired {}.{} -> {}.{}", label(self, from), self.out_name(from, fk), label(self, to), self.in_name(to, tk));
         match (&self.nodes[from].kind, &self.nodes[to].kind) {
             (Kind::GroupInput, Kind::GroupOutput) => return Err("a group's input cannot go straight to its output".into()),
             (Kind::GroupInput, _) => {
@@ -426,7 +426,7 @@ impl App {
                 }
                 let tkind = self.graph.nodes()[to].spec.inputs[tk].kind;
                 if !NodeSpec::can_connect(&Port::opt("", fkind), &Port::opt("", tkind)) {
-                    return Err(format!("kinds differ: {fkind:?} → {tkind:?}"));
+                    return Err(format!("kinds differ: {fkind:?} -> {tkind:?}"));
                 }
                 for &(t, inp) in &targets {
                     let old = self.graph.feeder(t, inp);
