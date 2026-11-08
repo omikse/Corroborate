@@ -387,6 +387,38 @@ fn add_use_from_menu_and_make_single() {
     d.shot("groups_12_single");
 }
 
+/// A port renamed in the group's menu: renamed in every use, each keeping its wires outside.
+#[test]
+fn rename_a_port() {
+    let Scene { mut d, a, b, inv, comb, .. } = scene();
+    d.app().sel.picked = [inv, comb].into_iter().collect();
+    key(&mut d, Modifiers::COMMAND, Key::G);
+    let g1 = group_of(d.app());
+    d.app().pick_only(g1);
+    key(&mut d, Modifiers::COMMAND, Key::D);
+    let g2 = (0..d.app().nodes.len()).rfind(|&i| !d.app().nodes[i].hidden && matches!(d.app().nodes[i].kind, Kind::Group { .. })).unwrap();
+    let out_b = port(&mut d, b, 0, true);
+    let in1 = port(&mut d, g2, 0, false);
+    d.drag(out_b, in1);
+    let inv2 = d.app().inside(g2).into_iter().find(|&x| matches!(d.app().nodes[x].kind, Kind::InvertLocation)).unwrap();
+    assert_eq!(d.app().graph.feeder(inv2, "location").map(|f| f.0), Some(b));
+    // The menu lists the ports to rename.
+    let t = d.node_title(g1);
+    d.right_click_at(t.x, t.y);
+    assert!(d.dump().contains("PORTS IN"), "{}", d.dump());
+    d.shot("groups_13_port_names");
+    d.h.key_press(Key::Escape);
+    d.frames(2);
+    d.app().rename_port(g1, false, 0, "area to flip");
+    d.frames(3);
+    let app = d.app();
+    for g in [g1, g2] {
+        assert_eq!(app.graph.nodes()[g].spec.inputs[0].name, "area to flip");
+    }
+    assert_eq!(app.graph.feeder(inv2, "location").map(|f| f.0), Some(b), "the other use keeps its wire");
+    assert_eq!(app.graph.feeder(inv, "location").map(|f| f.0), Some(a));
+}
+
 /// Right-click on a Group Output port removes the port and its wires outside; on a group's
 /// input, the wire into it goes and the port stays.
 #[test]

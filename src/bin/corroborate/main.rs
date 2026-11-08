@@ -1024,6 +1024,20 @@ impl App {
             let can_group = !matches!(self.nodes[i].kind, Kind::GroupInput | Kind::GroupOutput);
             let mut group_act: Option<u8> = None;
             let uses = if is_group { self.group_uses(i) } else { 0 };
+            // The group's port names, to rename: on the group node both sides, inside on the
+            // Group Input its inputs, on the Group Output its outputs.
+            let port_group = match self.nodes[i].kind {
+                Kind::Group { .. } => Some((i, true, true)),
+                Kind::GroupInput => self.view.map(|g| (g, true, false)),
+                Kind::GroupOutput => self.view.map(|g| (g, false, true)),
+                _ => None,
+            };
+            let names_of = |a: &App, g: NodeId| {
+                let f = a.iface(g);
+                (f.inputs.iter().map(|p| p.name.clone()).collect::<Vec<_>>(), f.outputs.iter().map(|p| p.name.clone()).collect::<Vec<_>>())
+            };
+            let old_names = port_group.map(|(g, ..)| names_of(self, g));
+            let mut new_names = old_names.clone();
             if is_group && resp.double_clicked() {
                 group_act = Some(1);
             }
@@ -1044,6 +1058,17 @@ impl App {
                 if shared && ui.button("Separate clocks").on_hover_text("Each of these sources gets its own clock again").clicked() {
                     clock_act = Some(false);
                     ui.close();
+                }
+                if let (Some((_, ins, outs)), Some((names_in, names_out))) = (port_group, new_names.as_mut()) {
+                    for (show, names, side) in [(ins, names_in, "in"), (outs, names_out, "out")] {
+                        if !show || names.is_empty() {
+                            continue;
+                        }
+                        ui.label(egui::RichText::new(format!("PORTS {}", side.to_uppercase())).small().color(DIM));
+                        for n in names.iter_mut() {
+                            ui.text_edit_singleline(n);
+                        }
+                    }
                 }
                 if is_group && ui.button("Open group (Tab)").clicked() {
                     group_act = Some(1);
@@ -1066,6 +1091,15 @@ impl App {
                     ui.close();
                 }
             });
+            if let (Some((g, ..)), Some((oi, oo)), Some((ni, no))) = (port_group, &old_names, &new_names) {
+                for (out, old, new) in [(false, oi, ni), (true, oo, no)] {
+                    for k in 0..old.len().min(new.len()) {
+                        if old[k] != new[k] && !new[k].trim().is_empty() {
+                            self.rename_port(g, out, k, &new[k]);
+                        }
+                    }
+                }
+            }
             if let Some(act) = group_act {
                 if !self.is_picked(i) {
                     self.pick_only(i);

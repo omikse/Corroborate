@@ -876,13 +876,14 @@ impl App {
         }
         // B's wires outside, by port name.
         let bf = self.iface(b);
-        let feeds: Vec<(String, (NodeId, &'static str))> = (0..bf.inputs.len()).filter_map(|k| Some((bf.inputs[k].name.clone(), self.outside_feeder(b, k)?))).collect();
-        let mut sends: Vec<(String, Vec<(NodeId, &'static str)>)> = Vec::new();
-        for p in &bf.outputs {
+        let feeds: Vec<(usize, String, (NodeId, &'static str))> = (0..bf.inputs.len()).filter_map(|k| Some((k, bf.inputs[k].name.clone(), self.outside_feeder(b, k)?))).collect();
+        let mut sends: Vec<(usize, String, Vec<(NodeId, &'static str)>)> = Vec::new();
+        for (k, p) in bf.outputs.iter().enumerate() {
             if let Some((s, q)) = p.ends.first().and_then(|(u, q)| Some((self.by_uid(u)?, q.clone()))) {
-                sends.push((p.name.clone(), self.graph.targets(s, &q).into_iter().filter(|(t, _)| !self.is_inside(*t, b)).collect()));
+                sends.push((k, p.name.clone(), self.graph.targets(s, &q).into_iter().filter(|(t, _)| !self.is_inside(*t, b)).collect()));
             }
         }
+        let (old_ins, old_outs) = (bf.inputs.len(), bf.outputs.len());
         // Every wire with an end inside B goes; they are made again below.
         let into_b: Vec<(NodeId, &'static str)> = self
             .graph
@@ -956,9 +957,13 @@ impl App {
             let _ = self.graph.connect(map[&s], o, map[&t], i);
         }
         // B's wires outside, again.
+        // A port by its name, else (renamed) by its place when the ports are as many as before.
         let bf = self.iface(b);
-        for (name, (s, o)) in feeds {
-            if let Some(p) = bf.inputs.iter().find(|p| p.name == name) {
+        let find = |list: &[GPort], k: usize, name: &str, old: usize| -> Option<GPort> {
+            list.iter().find(|p| p.name == name).or_else(|| if list.len() == old { list.get(k) } else { None }).cloned()
+        };
+        for (k, name, (s, o)) in feeds {
+            if let Some(p) = find(&bf.inputs, k, &name, old_ins) {
                 for (u, q) in &p.ends {
                     if let Some(t) = self.by_uid(u) {
                         let _ = self.graph.connect(s, o, t, q);
@@ -966,14 +971,27 @@ impl App {
                 }
             }
         }
-        for (name, ts) in sends {
-            if let Some((s, q)) = bf.outputs.iter().find(|p| p.name == name).and_then(|p| p.ends.first()).and_then(|(u, q)| Some((self.by_uid(u)?, q.clone()))) {
+        for (k, name, ts) in sends {
+            if let Some((s, q)) = find(&bf.outputs, k, &name, old_outs).and_then(|p| p.ends.first().cloned()).and_then(|(u, q)| Some((self.by_uid(&u)?, q))) {
                 for (t, inp) in ts {
                     let _ = self.graph.connect(s, &q, t, inp);
                 }
             }
         }
         self.sync_many_ports();
+    }
+
+    /// Port `k` of group `g` (an output when `out`) renamed `name` (made unique among its side).
+    pub(crate) fn rename_port(&mut self, g: NodeId, out: bool, k: usize, name: &str) {
+        let mut f = self.iface(g);
+        let list = if out { &mut f.outputs } else { &mut f.inputs };
+        let name = name.trim().replace([';', ',', '@', '|'], " ");
+        if name.is_empty() || k >= list.len() || list[k].name == name {
+            return;
+        }
+        let taken: Vec<String> = list.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, p)| p.name.clone()).collect();
+        list[k].name = unique(&name, &taken);
+        self.set_iface(g, &f);
     }
 
     /// How many groups share group `g`'s definition (itself included).
