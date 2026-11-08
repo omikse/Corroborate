@@ -278,9 +278,13 @@ fn drop_match_finds_the_closest_pair() {
     let rows = build_rows(&clocks, &[ev("a", 10.0), ev("a", 20.0), ev("z", 3.0)], &|c| c.to_string());
     let off = |c: &str, s: f64| clocks.get(c).back(s);
     // z's event at 3 is drawn at 3 + shift: 1018 is 2 s short of a's event at 20 s (UTC 1020).
-    let m = drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0).unwrap();
+    let all = |_: &crate::timeline::Row| true;
+    let m = drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &all, (f64::MIN, f64::MAX)).unwrap();
     assert!(m.absolute && m.a == "z" && m.t_a == 3.0 && m.t_b == 1020.0 && (m.gap - 2.0).abs() < 1e-9, "{m:?}");
-    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 1.0).is_none());
+    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 1.0, &all, (f64::MIN, f64::MAX)).is_none());
+    // A row not on screen, or an event outside the time shown, is not matched.
+    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &|r| r.group.id == "z", (f64::MIN, f64::MAX)).is_none());
+    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &all, (-10.0, 0.0)).is_none());
 }
 
 /// Dragging a floating row so its event meets another floating row's event asks for the error;

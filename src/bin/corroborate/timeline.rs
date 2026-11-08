@@ -191,16 +191,19 @@ pub struct Pending {
 
 /// The closest pair of events, one on the dragged row `moving` and one on another row, less than
 /// `tol` seconds apart as drawn. `shift` gives each row's shift, `offset` each clock's offset.
-pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, back: &dyn Fn(&str, f64) -> f64, tol: f64) -> Option<Pending> {
+/// Only rows `seen` (on screen in the panel) and events starting inside `window` (the time
+/// shown) count: a link is proposed between two things the person can see.
+pub fn drop_match(rows: &[Row], moving: &str, shift: &dyn Fn(&Row) -> f64, back: &dyn Fn(&str, f64) -> f64, tol: f64, seen: &dyn Fn(&Row) -> bool, window: (f64, f64)) -> Option<Pending> {
     let m = rows.iter().find(|r| r.group.id == moving)?;
     let sm = shift(m);
+    let shown = |t: f64| t >= window.0 && t <= window.1;
     let mut best: Option<Pending> = None;
-    for o in rows.iter().filter(|r| r.group.id != moving) {
+    for o in rows.iter().filter(|r| r.group.id != moving && seen(r)) {
         let so = shift(o);
         for sa in &m.subs {
-            for ea in &sa.events {
+            for ea in sa.events.iter().filter(|e| shown(e.t0 + sm)) {
                 for sb in &o.subs {
-                    for eb in &sb.events {
+                    for eb in sb.events.iter().filter(|e| shown(e.t0 + so)) {
                         let gap = (eb.t0 + so) - (ea.t0 + sm);
                         if gap.abs() < tol && best.as_ref().is_none_or(|b| gap.abs() < b.gap.abs()) {
                             let absolute = o.group.kind == Ck::Absolute;
@@ -625,7 +628,17 @@ impl App {
                     let per_px = span / track.width() as f64;
                     let v0 = self.tl.0;
                     let clocks = &self.ev.clocks;
-                    let found = drop_match(&rows, &g, &|r| shift_of(&self.tls, r, v0), &|c, s| clocks.get(c).back(s), 8.0 * per_px);
+                    // The rows on screen now (the panel scrolls), and the time shown.
+                    let clip = ui.clip_rect();
+                    let seen: std::collections::HashSet<&str> = lines
+                        .iter()
+                        .zip(&tops)
+                        .filter(|(_, (t, rh))| area.top() + t < clip.bottom() && area.top() + t + rh + lane_h > clip.top())
+                        .map(|(l, _)| match l {
+                            Line::Group(r) | Line::Sub(r, _) => r.group.id.as_str(),
+                        })
+                        .collect();
+                    let found = drop_match(&rows, &g, &|r| shift_of(&self.tls, r, v0), &|c, s| clocks.get(c).back(s), 8.0 * per_px, &|r| seen.contains(r.group.id.as_str()), (v0, v0 + span));
                     if let Some(mut m) = found {
                         // Snap the row so the two events meet; the error starts at what a few
                         // pixels are worth at this zoom.
