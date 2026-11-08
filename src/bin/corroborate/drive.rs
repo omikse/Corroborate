@@ -120,6 +120,26 @@ impl Drive {
         self.frames(2);
     }
 
+    /// Drags with the left button from `from` to `to`, in steps, like a hand would.
+    pub fn drag(&mut self, from: Pos2, to: Pos2) {
+        self.h.hover_at(from);
+        self.h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        self.frames(1);
+        for k in 1..=8 {
+            self.h.hover_at(from + (to - from) * (k as f32 / 8.0));
+            self.frames(1);
+        }
+        self.h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        self.frames(2);
+    }
+
+    /// Turns the mouse wheel at `at` by `notches` (up is positive), letting smooth scrolling end.
+    pub fn scroll(&mut self, at: Pos2, notches: f32) {
+        self.h.hover_at(at);
+        self.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: Vec2::new(0.0, notches), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+        self.frames(20);
+    }
+
     /// Right-clicks at a point on screen (opens a context menu).
     pub fn right_click_at(&mut self, x: f32, y: f32) {
         let pos = Pos2::new(x, y);

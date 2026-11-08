@@ -219,10 +219,11 @@ fn timeline_rows_order_and_placement() {
     // The clock's error grows away from the anchor (unknown drift): a hair over 2 s at 30-31 s.
     assert!((a.err0 - 2.0).abs() < 1e-4 && a.err1 > a.err0, "{} {}", a.err0, a.err1);
     assert!((a.err() - a.err1.hypot(0.5)).abs() < 1e-9);
-    // b and c share a group; both placed on the reference clock (the smaller id, b).
+    // b and c share a group; both placed on the reference clock (the smaller id, b), the one
+    // that starts first first.
     assert_eq!(rows[1].subs.len(), 2);
-    let on_ref: Vec<f64> = rows[1].subs.iter().map(|s| s.events[0].t0).collect();
-    assert!((on_ref[0] - 4.0).abs() < 1e-6 && (on_ref[1] - -7.0).abs() < 1e-6, "{on_ref:?}");
+    let on_ref: Vec<(&str, f64)> = rows[1].subs.iter().map(|s| (s.clock.as_str(), s.events[0].t0)).collect();
+    assert!(on_ref[0].0 == "c" && (on_ref[0].1 - -7.0).abs() < 1e-6 && (on_ref[1].1 - 4.0).abs() < 1e-6, "{on_ref:?}");
     assert_eq!(rows[2].subs[0].events[0].t0, 5.0, "unanchored: as it is");
     // The floating row's first event starts under the first absolute one.
     let s = default_shift(&rows, &rows[2], 0.0);
@@ -674,6 +675,8 @@ fn make_jiku_project() {
         let stem = v.file_stem().unwrap().to_string_lossy().into_owned();
         let parts: Vec<&str> = stem.split('_').collect();
         app.nodes[s].label = format!("phone {} {}", parts[2], parts[3]);
+        // Collapsed: a big project starts small, and reads no pictures.
+        app.nodes[s].collapsed = true;
         sources.push(s);
     }
     let m = app.add(Kind::AudioMatch, Pos2::new(30.0 + 470.0 * cols as f32 + 80.0, 40.0));
@@ -682,6 +685,8 @@ fn make_jiku_project() {
     }
     assert_eq!(app.graph.wires().len(), 50, "every video wired in");
     let file = project::project_place(&root.join("app").join("projects").join("Jiku GT_090912"));
+    // A fresh project: no unsaved changes of an earlier one restored over it.
+    let _ = std::fs::remove_file(project::recovery_of(&file));
     app.save_project_as(file.clone());
     assert!(file.is_file(), "{}", file.display());
     project::push_recent(&root.join("app").join("settings"), &file);
@@ -790,4 +795,132 @@ fn jiku_project_opens_stopped() {
     println!("stopped in {:.1} s", t.elapsed().as_secs_f64());
     assert!(running.is_empty() && d.app().stopped, "Stop stops it: still running {running:?}");
     assert!(worst < 2.0, "no frame takes seconds: worst {worst:.1} s");
+}
+
+/// The timeline on a big project, handled like a user would (a copy of the Jiku project in
+/// target\drive): the panel dragged taller, each group of several recordings one summary bar,
+/// zoomed out with the wheel, panned by dragging empty space, a group opened by a click on its
+/// bar, the rows scrolled, a floating row dragged along, a bar hovered, the group closed by a
+/// click on its label. PNGs tl_1_closed … tl_7_closed_again.
+/// Run: cargo test --profile fast --bin corroborate timeline_on_a_big_project -- --ignored --nocapture
+#[test]
+#[ignore]
+fn timeline_on_a_big_project() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let made = root.join("app").join("projects").join("Jiku GT_090912").join("Jiku GT_090912.txt");
+    assert!(made.is_file(), "make it first: make_jiku_project");
+    let dir = crate::drive::out_dir().join("Jiku timeline");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Jiku timeline.txt");
+    std::fs::copy(&made, &file).unwrap();
+    let mut d = crate::drive::Drive::new();
+    d.app().open_project(file);
+    d.app().places.open = false;
+    d.frames(3);
+    assert!(d.app().nodes.iter().filter(|n| n.kind.is_source()).all(|n| n.collapsed), "the sources start collapsed");
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
+    d.click("▶ Run");
+    assert!(d.wait_until(180.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    d.wait(1.0);
+    let n_pics = d.app().nodes.iter().filter(|n| n.state.lock().unwrap().source.frames_asked != sourcer_node::Asked::Nothing).count();
+    assert_eq!(n_pics, 0, "collapsed sources read no pictures");
+
+    // The panel: drag its top edge up.
+    let (track, ..) = d.app().tls.geom.expect("timeline drawn");
+    let edge = track.top() - 30.0;
+    d.drag(Pos2::new(700.0, edge), Pos2::new(700.0, 260.0));
+    d.frames(3);
+    let (track, ..) = d.app().tls.geom.unwrap();
+    println!("timeline track {track:?}");
+    let bars = d.app().tls.bars.clone();
+    println!("{} summary bars, {} rows", bars.len(), d.app().tls.row_y.len());
+    assert!(!bars.is_empty(), "groups of several recordings are summary bars");
+    d.shot("tl_1_closed");
+
+    // Zoom out: wheel over the track.
+    let span0 = d.app().tl.1 - d.app().tl.0;
+    d.scroll(track.center(), -8.0);
+    let span1 = d.app().tl.1 - d.app().tl.0;
+    println!("span {span0:.0} s -> {span1:.0} s");
+    assert!(span1 > span0 * 1.5, "the wheel zooms out");
+    d.shot("tl_2_zoomed_out");
+
+    // Pan: drag empty space under the rows.
+    let (track, ..) = d.app().tls.geom.unwrap();
+    let below = d.app().tls.row_y.iter().map(|r| r.1).fold(track.top(), f32::max) + 40.0;
+    if below < track.bottom() - 10.0 {
+        let v0 = d.app().tl.0;
+        d.drag(Pos2::new(track.center().x, below), Pos2::new(track.center().x - 200.0, below));
+        println!("pan: view start {v0:.0} -> {:.0}", d.app().tl.0);
+        assert!(d.app().tl.0 > v0, "dragging empty space to the left moves the view later");
+        assert!(!d.app().follow);
+    } else {
+        println!("no empty space under the rows to pan on");
+    }
+
+    // Open the first group: a click on its bar.
+    let (g, bar) = d.app().tls.bars[0].clone();
+    d.click_at(bar.center().x, bar.center().y);
+    assert!(d.app().tls.expanded.contains(&g), "a click on the bar opens the group");
+    d.frames(3);
+    d.shot("tl_3_open");
+
+    // Scroll the rows: wheel over the labels.
+    let (track, ..) = d.app().tls.geom.unwrap();
+    // The track is the rows' whole scrolled content: aim inside the panel (the screen is 900 high).
+    let seen = |t: Rect| Rect::from_min_max(t.min, Pos2::new(t.right(), t.bottom().min(880.0)));
+    let track = seen(track);
+    let y_before = d.app().tls.row_y.last().map(|r| r.1);
+    d.scroll(Pos2::new(track.left() - 100.0, track.center().y), -6.0);
+    let y_after = d.app().tls.row_y.last().map(|r| r.1);
+    println!("last row y {y_before:?} -> {y_after:?}");
+    assert!(y_after < y_before, "the wheel over the labels scrolls the rows");
+    d.shot("tl_4_scrolled");
+    d.scroll(Pos2::new(track.left() - 100.0, track.center().y), 20.0);
+    let (track, ..) = d.app().tls.geom.unwrap();
+    let track = seen(track);
+
+    // Drag a floating group row along by 150 px (the open one, the only one in sight).
+    let (g2, y2) = d.app().tls.row_y.iter().find(|r| r.1 > track.top() + 20.0 && r.1 < track.bottom() - 10.0).cloned().expect("a group row in sight");
+    let before = d.app().tls.shift.get(&g2).copied();
+    let x = track.left() + 60.0;
+    d.drag(Pos2::new(x, y2), Pos2::new(x + 150.0, y2));
+    let (after, pending) = (d.app().tls.shift.get(&g2).copied(), d.app().tls.pending.is_some());
+    println!("row {g2}: shift {before:?} -> {after:?}, pending link: {pending}");
+    assert!(after != before, "the row moved");
+    d.shot("tl_5_dragged");
+    d.app().tls.pending = None;
+    d.frames(2);
+
+    // Hover a bar: what it holds.
+    if let Some((_, bar)) = d.app().tls.bars.iter().find(|b| b.1.center().y < 880.0).cloned() {
+        d.h.hover_at(bar.center() + Vec2::new(bar.width() * 0.2, 0.0));
+        d.frames(10);
+        d.shot("tl_6_hover");
+    }
+
+    // Close it again: a click on its label.
+    let y = d.app().tls.row_y.iter().find(|r| r.0 == g).unwrap().1;
+    d.click_at(track.left() - 120.0, y - 5.0);
+    assert!(!d.app().tls.expanded.contains(&g), "a click on the label closes it");
+    d.frames(3);
+    d.shot("tl_7_closed_again");
+    d.app().stop_run();
+}
+
+/// The timeline's rows scroll with the wheel over their labels when there are more than fit.
+#[test]
+fn timeline_rows_scroll() {
+    let mut app = App::empty();
+    app.places.open = false;
+    app.tls.extra = (0..40).map(|k| (0usize, corroborate::data::Event { clock: format!("c{k:02}"), t_start: 0.0, t_end: 60.0, label: "x".into(), ..Default::default() })).collect();
+    let mut d = crate::drive::Drive::with(app);
+    d.frames(3);
+    let (track, ..) = d.app().tls.geom.expect("drawn");
+    let first = d.app().tls.row_y[0].1;
+    d.scroll(Pos2::new(track.left() - 100.0, track.top() + 60.0), -5.0);
+    let after = d.app().tls.row_y[0].1;
+    d.shot("timeline_rows_scroll");
+    assert!(after < first - 20.0, "rows scrolled up: {first} -> {after}");
 }

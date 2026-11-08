@@ -314,3 +314,37 @@ fn old_files_without_ids_get_new_ones() {
     assert_eq!(uids, ["n1", "n2"]);
     assert!(a.project_text().contains("|id=n2"));
 }
+
+/// A node's collapse is remembered: collapsed from its menu and saved, it opens collapsed; collapsed
+/// without saving, the reopened project brings it back from the recovery file.
+#[test]
+fn collapse_is_remembered() {
+    let dir = out_dir().join("project_collapse");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut d = Drive::new();
+    let a = d.app();
+    let m = a.add(Kind::Map, Pos2::new(40.0, 60.0));
+    a.add(Kind::Sourcer { input: String::new() }, Pos2::new(500.0, 60.0));
+    d.frames(3);
+    d.app().save_project_as(dir.join("folded.txt"));
+    let file = dir.join("folded").join("folded.txt");
+    let p = d.node_title(m);
+    d.right_click_at(p.x, p.y);
+    d.click("Collapse");
+    assert!(d.app().nodes[m].collapsed);
+    assert!(d.app().save());
+    d.app().open_project(file.clone());
+    d.frames(3);
+    let (m, s) = (d.app().nodes.iter().position(|n| n.uid == "n1").unwrap(), d.app().nodes.iter().position(|n| n.uid == "n2").unwrap());
+    assert!(d.app().nodes[m].collapsed && !d.app().nodes[s].collapsed, "saved collapse comes back");
+    // Collapse the source, don't save: the recovery file keeps it.
+    let p = d.node_title(s);
+    d.right_click_at(p.x, p.y);
+    d.click("Collapse");
+    d.frames(3);
+    d.app().save_project();
+    d.app().open_project(file);
+    d.frames(3);
+    let s = d.app().nodes.iter().position(|n| n.uid == "n2").unwrap();
+    assert!(d.app().nodes[s].collapsed, "unsaved collapse comes back from the recovery file: {}", d.msg());
+}

@@ -4,7 +4,9 @@
 //!   UTC axis), then relative, then unanchored. Each lane has its own ruler in its own time: UTC,
 //!   time on the group's reference clock, or none for an unanchored group (no time scale); a click
 //!   on a lane's ruler moves that group's playhead. A row opens into one sub-row per source. Colours
-//!   and numbers (1°, 2°…) are the canvas outline's.
+//!   and numbers (1°, 2°…) are the canvas outline's. A closed row of several sources is one
+//!   summary bar over the group's span, shaded by how many recordings cover each moment, without
+//!   the links inside it; a click on it or its label opens it.
 //! - **Media** are square boxes the lane's height; the clock error is a see-through extension of
 //!   the box to each side, as high as it, with its ± written inside when it fits. Clocks drift,
 //!   so the error is smallest where the clock's evidence is and grows away from it: each side has
@@ -110,8 +112,11 @@ pub fn build_rows(clocks: &Clocks, events: &[(NodeId, Event)], name: &dyn Fn(&st
             detail: e.detail.clone(),
         });
     }
+    // A group's sources in the order they start, so an open group reads left to right as it
+    // goes down.
+    let start = |s: &SubRow| s.events.iter().map(|e| e.t0).fold(f64::INFINITY, f64::min);
     for r in &mut rows {
-        r.subs.sort_by(|a, b| a.clock.cmp(&b.clock));
+        r.subs.sort_by(|a, b| start(a).total_cmp(&start(b)).then_with(|| a.clock.cmp(&b.clock)));
     }
     rows
 }
@@ -142,6 +147,8 @@ pub struct TlState {
     /// Where the rows were last drawn: the track, the view start and span, each group row's centre y.
     pub geom: Option<(Rect, f64, f64)>,
     pub row_y: Vec<(String, f32)>,
+    /// Each summary bar of a group of several recordings, where it was last drawn.
+    pub bars: Vec<(String, Rect)>,
     /// Events tests put on the timeline.
     #[cfg(test)]
     pub extra: Vec<(NodeId, Event)>,
@@ -158,6 +165,7 @@ impl Default for TlState {
             pending: None,
             geom: None,
             row_y: Vec::new(),
+            bars: Vec::new(),
             #[cfg(test)]
             extra: Vec::new(),
         }
@@ -636,6 +644,7 @@ impl App {
             let (v0, span) = (self.tl.0, (self.tl.1 - self.tl.0).max(1e-3));
             let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
             self.tls.geom = Some((track, v0, span));
+            self.tls.bars.clear();
             self.tls.row_y = lines
                 .iter()
                 .enumerate()
@@ -745,7 +754,17 @@ impl App {
                         let who = if r.subs.len() == 1 { r.subs[0].name.clone() } else { format!("{} sources", r.subs.len()) };
                         (format!("{} {who}", if self.tls.expanded.contains(&r.group.id) { "v" } else { ">" }), kind)
                     }
-                    Some(s) => (format!("   {}", s.name), format!("   {} events", s.events.len())),
+                    Some(s) => {
+                        // How long its audio is, and what was found on it.
+                        let audio = s.events.iter().find(|e| e.detail == AUDIO_BAR).map(|e| format!("{} of audio", sourcer_node::fmt_secs(e.t1 - e.t0)));
+                        let found = s.events.iter().filter(|e| e.detail != AUDIO_BAR).count();
+                        let found = match found {
+                            0 => None,
+                            1 => Some("1 finding".to_string()),
+                            n => Some(format!("{n} findings")),
+                        };
+                        (format!("   {}", s.name), format!("   {}", [audio, found].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
+                    }
                 };
                 p.text(Pos2::new(area.left() + 10.0, top + 10.0), Align2::LEFT_CENTER, title, FontId::proportional(12.0), alpha(TEXT, faint));
                 let note_col = if sub.is_none() && disagree > 0 { Color32::from_rgb(235, 80, 80) } else { DIM };
@@ -759,8 +778,62 @@ impl App {
                     hover = Some(self.breakdown_lines(&r.group.id).join("\n"));
                 }
 
-                // Events: on the group row all of them, on a source's row its own.
                 let shift = shift_of(&self.tls, r, v0);
+                // A group of several recordings: one bar over its whole span, shaded by how many
+                // of them cover each moment. A click opens its rows: each recording with its
+                // findings, margins and links.
+                if sub.is_none() && r.subs.len() > 1 {
+                    let ends = |e: &TlEvent| (e.t0 + shift, e.t1 + shift);
+                    let audio: Vec<(f64, f64)> = r.events().filter(|e| e.detail == AUDIO_BAR).map(ends).collect();
+                    let findings = r.events().filter(|e| e.detail != AUDIO_BAR).count();
+                    let a = r.events().map(|e| ends(e).0).min_by(f64::total_cmp);
+                    let b = r.events().map(|e| ends(e).1).max_by(f64::total_cmp);
+                    let (Some(a), Some(b)) = (a, b) else { continue };
+                    let (xa, xb) = (tx(a).max(track.left()), tx(b).min(track.right()));
+                    if xb < track.left() || xa > track.right() {
+                        continue;
+                    }
+                    let (cy, half) = (top + lane_h * 0.5, lane_h * 0.5 - 4.0);
+                    let bar = Rect::from_min_max(Pos2::new(xa, cy - half), Pos2::new(xb.max(xa + 2.0), cy + half));
+                    // Recordings over each pixel column.
+                    let cols = (bar.width().ceil() as usize).max(1);
+                    let mut n = vec![0usize; cols];
+                    for &(t0, t1) in &audio {
+                        let c0 = (tx(t0) - bar.left()).floor().max(0.0) as usize;
+                        let c1 = ((tx(t1) - bar.left()).ceil().max(0.0) as usize).min(cols);
+                        for k in n.iter_mut().take(c1).skip(c0) {
+                            *k += 1;
+                        }
+                    }
+                    let most = n.iter().copied().max().unwrap_or(0).max(1);
+                    let mut c = 0;
+                    while c < cols {
+                        let mut e = c + 1;
+                        while e < cols && n[e] == n[c] {
+                            e += 1;
+                        }
+                        if n[c] > 0 {
+                            let run = Rect::from_min_max(Pos2::new(bar.left() + c as f32, bar.top()), Pos2::new((bar.left() + e as f32).min(bar.right()), bar.bottom()));
+                            p.rect_filled(run, 0.0, alpha(col, (0.12 + 0.55 * n[c] as f32 / most as f32) * faint));
+                        }
+                        c = e;
+                    }
+                    self.tls.bars.push((r.group.id.clone(), bar));
+                    p.rect_stroke(bar, 2.0, Stroke::new(1.0, alpha(col, 0.9 * faint)), egui::StrokeKind::Inside);
+                    let what = format!("{} recordings{}", r.subs.len(), if findings > 0 { format!(" · {findings} findings") } else { String::new() });
+                    if bar.width() > what.chars().count() as f32 * 6.0 + 10.0 {
+                        p.text(bar.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, &what, FontId::proportional(10.5), alpha(TEXT, 0.9 * faint));
+                    }
+                    if let Some(h) = resp.hover_pos().filter(|h| bar.contains(*h)) {
+                        let here = n.get(((h.x - bar.left()) as usize).min(cols - 1)).copied().unwrap_or(0);
+                        hover = Some(format!("{what}\n{here} of them here\nclick to open: one row per recording"));
+                        if resp.clicked_by(egui::PointerButton::Primary) {
+                            toggle = Some(r.group.id.clone());
+                        }
+                    }
+                    continue;
+                }
+                // Events: on a group row of one recording all of them, on a source's row its own.
                 let subs: Vec<&SubRow> = match sub {
                     Some(s) => vec![s],
                     None => r.subs.iter().collect(),
@@ -898,6 +971,10 @@ impl App {
                     continue;
                 }
                 let (Some(a), Some(b)) = (ea, eb) else { continue };
+                // Both ends on one line: inside a closed group (open it to see them).
+                if (a.1 - b.1).abs() < 0.5 {
+                    continue;
+                }
                 p.line_segment([Pos2::new(a.0, a.1), Pos2::new(b.0, b.1)], Stroke::new(1.5, alpha(c, 0.8)));
                 for (x, y) in [a, b] {
                     pin(&p, x, y, c);
