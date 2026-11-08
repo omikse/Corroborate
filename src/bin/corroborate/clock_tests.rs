@@ -6,6 +6,7 @@ use super::*;
 use corroborate::clock::Kind as Ck;
 use corroborate::data::Data;
 use corroborate::module_manifest as mm;
+use egui_kittest::kittest::Queryable;
 
 fn source(app: &mut App, y: f32) -> NodeId {
     app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, y))
@@ -264,6 +265,15 @@ fn sync_list_entries_share_and_contradictions() {
     let e = crate::timeline::sync_entries(&anchors, &[], &clocks, 2.0, &name, &who);
     assert!(e[0].contradiction.is_some() && e[1].contradiction.is_some());
     assert!(!e[2].enabled && e[2].share == 0.0 && e[2].contradiction.is_none());
+
+    // Lines: an anchor alone; the links of one pair together, whichever way round.
+    let anchors = vec![an(0.0, 1000.0, "n1", true)];
+    let l = |a: &str, b: &str, t: f64| Link { a: a.into(), t_a: t, b: b.into(), t_b: t + 2.0, error_s: 0.01, from: "m".into(), enabled: true };
+    let links = vec![l("a", "b", 1.0), l("b", "c", 1.0), l("b", "a", 9.0), l("a", "b", 20.0)];
+    let clocks = solve(&anchors, &links);
+    let e = crate::timeline::sync_entries(&anchors, &links, &clocks, 2.0, &name, &who);
+    let lines = crate::timeline::sync_lines(&e, &links);
+    assert_eq!(lines, vec![(None, vec![0]), (Some("a|b".into()), vec![1, 3, 4]), (Some("b|c".into()), vec![2])]);
 }
 
 /// A dragged row's event meets the closest event on another row within the tolerance; an absolute
@@ -919,6 +929,15 @@ fn timeline_on_a_big_project() {
     assert!(!d.app().tls.expanded.contains(&g), "a click on the label closes it");
     d.frames(3);
     d.shot("tl_7_closed_again");
+
+    // The Sync list: one line per pair of recordings; a click opens a pair's links.
+    let pairs = d.h.query_all_by_label_contains(" links: phone").count();
+    println!("{} links in {pairs} pair lines", d.app().ev.links.len());
+    assert!(pairs > 10 && pairs < d.app().ev.links.len() / 2, "links listed by pair: {pairs}");
+    d.click_contains(" links: phone");
+    assert_eq!(d.app().tls.sync_open.len(), 1, "a click opens the pair");
+    d.frames(3);
+    d.shot("tl_8_sync_pair_open");
     d.app().stop_run();
 }
 

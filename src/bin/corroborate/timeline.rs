@@ -149,6 +149,8 @@ pub struct TlState {
     pub row_y: Vec<(String, f32)>,
     /// Each summary bar of a group of several recordings, where it was last drawn.
     pub bars: Vec<(String, Rect)>,
+    /// The Sync list's pairs of recordings opened to their links (`pair_key`).
+    pub sync_open: BTreeSet<String>,
     /// Events tests put on the timeline.
     #[cfg(test)]
     pub extra: Vec<(NodeId, Event)>,
@@ -166,6 +168,7 @@ impl Default for TlState {
             geom: None,
             row_y: Vec::new(),
             bars: Vec::new(),
+            sync_open: BTreeSet::new(),
             #[cfg(test)]
             extra: Vec::new(),
         }
@@ -279,6 +282,30 @@ pub fn sync_entries(anchors: &[ClockAnchor], links: &[Link], clocks: &Clocks, si
             share: sh,
             from: l.from.clone(),
         });
+    }
+    out
+}
+
+/// The pair of clocks a link joins, the same either way round.
+pub fn pair_key(a: &str, b: &str) -> String {
+    if a <= b { format!("{a}|{b}") } else { format!("{b}|{a}") }
+}
+
+/// The Sync list's lines: each anchor alone, and the links of each pair of clocks together (in
+/// the order each pair first comes), as indexes into the entries.
+pub fn sync_lines(entries: &[SyncEntry], links: &[Link]) -> Vec<(Option<String>, Vec<usize>)> {
+    let mut out: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+    for (k, e) in entries.iter().enumerate() {
+        match e.ev {
+            Ev::Link(i) if i < links.len() => {
+                let key = pair_key(&links[i].a, &links[i].b);
+                match out.iter_mut().find(|(p, _)| p.as_deref() == Some(key.as_str())) {
+                    Some((_, v)) => v.push(k),
+                    None => out.push((Some(key), vec![k])),
+                }
+            }
+            _ => out.push((None, vec![k])),
+        }
     }
     out
 }
@@ -400,17 +427,70 @@ impl App {
                 ui.colored_label(Color32::from_rgb(235, 80, 80), format!("{bad} contradict"));
             }
         });
-        let mut toggle: Option<(String, bool)> = None;
+        let mut toggle: Vec<(String, bool)> = Vec::new();
         let mut pick: Option<String> = None;
+        let mut fold: Option<String> = None;
+        let lines = sync_lines(&entries, &self.ev.links);
+        let red = Color32::from_rgb(235, 80, 80);
         egui::ScrollArea::vertical().id_salt("sync-list").max_height((height - 20.0).max(50.0)).auto_shrink([false, true]).show(ui, |ui| {
             if entries.is_empty() {
                 ui.colored_label(DIM, "no anchors or links yet: a source's time, a time wired into Planes, ADS-B matches");
             }
-            for e in &entries {
+            for (pair, idx) in &lines {
+                // Several links between two recordings: one line for the pair, opened by a click.
+                if let (Some(key), true) = (pair, idx.len() > 1) {
+                    let es: Vec<&SyncEntry> = idx.iter().map(|&k| &entries[k]).collect();
+                    let on_n = es.iter().filter(|e| e.enabled).count();
+                    let bad_n = es.iter().filter(|e| e.contradiction.is_some()).count();
+                    let open = self.tls.sync_open.contains(key);
+                    let l = &self.ev.links[match es[0].ev {
+                        Ev::Link(i) => i,
+                        _ => 0,
+                    }];
+                    ui.horizontal(|ui| {
+                        let mut on = on_n > 0;
+                        let tip = if on_n == es.len() { "use these links" } else { "some of these links are off: a click switches all on or off" };
+                        if ui.checkbox(&mut on, "").on_hover_text(tip).changed() {
+                            toggle.extend(es.iter().map(|e| (e.key.clone(), on)));
+                        }
+                        let col = if bad_n > 0 { red } else if on_n > 0 { TEXT } else { DIM };
+                        ui.vertical(|ui| {
+                            let title = format!("{} links: {} and {}", es.len(), self.clock_name(&l.a), self.clock_name(&l.b));
+                            let title = format!("{} {title}", if open { "v" } else { ">" });
+                            let r = ui.add(egui::Label::new(egui::RichText::new(title).size(11.5).color(col)).sense(Sense::click()));
+                            // The middle offset of the pair's links, as each link line gives its own.
+                            let mut offs: Vec<f64> = es
+                                .iter()
+                                .filter_map(|e| match e.ev {
+                                    Ev::Link(i) => self.ev.links.get(i).map(|k| if k.a == l.a { k.t_b - k.t_a } else { k.t_a - k.t_b }),
+                                    _ => None,
+                                })
+                                .collect();
+                            offs.sort_by(f64::total_cmp);
+                            let mut detail = format!("{on_n} of {} on · offset {:+.2} s", es.len(), offs[offs.len() / 2]);
+                            if bad_n > 0 {
+                                detail.push_str(&format!(" · {bad_n} contradict the rest"));
+                            }
+                            ui.label(egui::RichText::new(detail).size(9.5).color(if bad_n > 0 { red } else { DIM }));
+                            if r.clicked() {
+                                fold = Some(key.clone());
+                            }
+                            r.on_hover_text("click to list them one by one");
+                        });
+                    });
+                    ui.separator();
+                    if !open {
+                        continue;
+                    }
+                }
+                for e in idx.iter().map(|&k| &entries[k]) {
                 ui.horizontal(|ui| {
+                    if pair.is_some() && idx.len() > 1 {
+                        ui.add_space(14.0);
+                    }
                     let mut on = e.enabled;
                     if ui.checkbox(&mut on, "").on_hover_text("use this piece of evidence").changed() {
-                        toggle = Some((e.key.clone(), on));
+                        toggle.push((e.key.clone(), on));
                     }
                     let col = if e.contradiction.is_some() { Color32::from_rgb(235, 80, 80) } else if e.enabled { TEXT } else { DIM };
                     ui.vertical(|ui| {
@@ -426,10 +506,16 @@ impl App {
                     });
                 });
                 ui.separator();
+                }
             }
         });
-        if let Some((k, on)) = toggle {
+        for (k, on) in toggle {
             self.set_evidence(&k, on);
+        }
+        if let Some(key) = fold {
+            if !self.tls.sync_open.remove(&key) {
+                self.tls.sync_open.insert(key);
+            }
         }
         if let Some(f) = pick {
             if let Some(i) = (0..self.nodes.len()).find(|&i| self.nodes[i].uid == f) {
