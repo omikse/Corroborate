@@ -30,9 +30,12 @@ mod look_tests;
 mod canvas_tests;
 #[cfg(test)]
 mod recordings_tests;
+#[cfg(test)]
+mod groups_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
+mod groups;
 mod clock_view;
 mod evidence;
 mod timeline;
@@ -190,6 +193,10 @@ struct NodeData {
     taps: result_record_node::Taps,
     /// Folded to its title and port names (right-click → Collapse); it keeps running and wired.
     collapsed: bool,
+    /// The group it is in (None: the top of the canvas), and its name there, the same in every
+    /// use of the group (groups.rs).
+    parent: Option<NodeId>,
+    member: String,
 }
 
 
@@ -281,6 +288,11 @@ struct App {
     close_now: bool,
     quitting: bool,
     title: String,
+    /// The group the canvas shows (None: the top), and the pan and zoom outside it, one per level.
+    view: Option<NodeId>,
+    view_stack: Vec<(Vec2, f32)>,
+    /// What each group definition holds, as last seen (groups.rs `sync_defs`).
+    group_defs: HashMap<String, String>,
 }
 
 const NODE_W: f32 = 210.0;
@@ -343,6 +355,9 @@ impl App {
             close_now: false,
             quitting: false,
             title: String::new(),
+            view: None,
+            view_stack: Vec::new(),
+            group_defs: HashMap::new(),
         }
     }
 
@@ -376,7 +391,7 @@ impl App {
         let id = self.graph.add(kind.default_label(), kind.spec());
         let uid = format!("n{}", self.next_uid);
         self.next_uid += 1;
-        self.nodes.push(NodeData { uid, label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default(), collapsed: false });
+        self.nodes.push(NodeData { uid, label: kind.default_label(), kind, pos, state: Default::default(), hidden: false, taps: Default::default(), collapsed: false, parent: self.view, member: String::new() });
         id
     }
 
@@ -410,14 +425,15 @@ impl App {
     /// project file, and what copy puts on the clipboard. Each node keeps its stable id
     /// (`id=`); `next|` is the number of the next new id.
     fn nodes_text(&self, keep: &[NodeId]) -> String {
-        let mut text = String::from("# corroborate project: node|kind|x|y|label|param|id=<id>[|collapsed], row|node|key|value, wire|from|out|to|in, next|<id number>\n");
+        let mut text = String::from("# corroborate project: node|kind|x|y|label|param|id=<id>[|collapsed][|in=<group id>|m=<name in it>], row|node|key|value, wire|from|out|to|in, next|<id number>\n");
         text.push_str(&format!("next|{}\n", self.next_uid));
         let new_id = |old: NodeId| keep.iter().position(|&k| k == old);
         for &i in keep {
             let n = &self.nodes[i];
             let (k, param) = (n.kind.spec().name, n.kind.saved_param());
             let folded = if n.collapsed { "|collapsed" } else { "" };
-            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}|id={}{folded}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param), n.uid));
+            let inside = n.parent.map_or(String::new(), |p| format!("|in={}|m={}", self.nodes[p].uid, clean(&n.member)));
+            text.push_str(&format!("node|{k}|{:.0}|{:.0}|{}|{}|id={}{folded}{inside}\n", n.pos.x, n.pos.y, clean(&n.label), clean(&param), n.uid));
         }
         for (ni, &i) in keep.iter().enumerate() {
             for (k, v) in self.nodes[i].kind.rows() {
@@ -446,6 +462,7 @@ impl App {
     fn append_text(&mut self, text: &str, keep_ids: bool) -> Vec<NodeId> {
         let base = self.nodes.len();
         let mut saved_ids: Vec<(NodeId, String)> = Vec::new();
+        let mut parents: Vec<(NodeId, String)> = Vec::new();
         let (counter, mut saved_next) = (self.next_uid, 0);
         let mut rows: Vec<(usize, String, String)> = Vec::new();
         let mut wires: Vec<(usize, String, usize, String)> = Vec::new();
@@ -453,7 +470,7 @@ impl App {
             let f: Vec<&str> = line.split('|').collect();
             match f.as_slice() {
                 ["next", n] => saved_next = n.trim().parse().unwrap_or(0),
-                ["node", k, x, y, label, param, rest @ ..] if rest.len() <= 2 => {
+                ["node", k, x, y, label, param, rest @ ..] if rest.len() <= 4 => {
                     let kind = Kind::from_saved(k, param.to_string());
                     let id = self.add(kind, Pos2::new(x.parse().unwrap_or(40.0), y.parse().unwrap_or(40.0)));
                     if !label.trim().is_empty() {
@@ -463,6 +480,10 @@ impl App {
                     if let Some(u) = rest.iter().find_map(|f| f.trim().strip_prefix("id=")).filter(|u| !u.is_empty()) {
                         saved_ids.push((id, u.to_string()));
                     }
+                    if let Some(g) = rest.iter().find_map(|f| f.trim().strip_prefix("in=")).filter(|u| !u.is_empty()) {
+                        parents.push((id, g.to_string()));
+                    }
+                    self.nodes[id].member = rest.iter().find_map(|f| f.trim().strip_prefix("m=")).unwrap_or("").to_string();
                 }
                 ["row", n, k, v] => rows.push((n.parse().unwrap_or(usize::MAX), k.to_string(), v.to_string())),
                 ["wire", a, o, b, i] => wires.push((a.parse().unwrap_or(usize::MAX), o.to_string(), b.parse().unwrap_or(usize::MAX), i.to_string())),
@@ -484,6 +505,7 @@ impl App {
         // node gets a fresh one.
         self.next_uid = counter;
         let mut fresh: Vec<NodeId> = new.clone();
+        let saved_of: Vec<(NodeId, String)> = saved_ids.clone();
         if keep_ids {
             self.next_uid = self.next_uid.max(saved_next);
             let mut taken: std::collections::HashSet<String> = self.nodes[..base].iter().map(|n| n.uid.clone()).collect();
@@ -501,6 +523,17 @@ impl App {
         for i in fresh {
             self.nodes[i].uid = format!("n{}", self.next_uid);
             self.next_uid += 1;
+        }
+        // Groups: a node's group by its saved id (one not in the text: the group shown now), and
+        // a group's ports naming the nodes inside by their new ids.
+        let new_uid: HashMap<String, NodeId> = saved_of.iter().map(|(i, u)| (u.clone(), *i)).collect();
+        for &i in &new {
+            self.nodes[i].parent = self.view;
+        }
+        for (i, g) in parents {
+            if let Some(&p) = new_uid.get(&g) {
+                self.nodes[i].parent = Some(p);
+            }
         }
         // Saved numbers count from the first new node.
         let len = self.nodes.len();
@@ -542,7 +575,19 @@ impl App {
                 }
             }
         }
+        // A group's ports name the nodes inside by id: their new ids (its rows are read by now).
+        for &i in &new {
+            if let Kind::Group { rows, .. } = &self.nodes[i].kind {
+                let f = groups::Iface::of(rows);
+                let nodes = &self.nodes;
+                let rows = f.rows_mapped(|u| new_uid.get(u).map(|&x| nodes[x].uid.clone()));
+                if let Kind::Group { rows: r, .. } = &mut self.nodes[i].kind {
+                    *r = rows;
+                }
+            }
+        }
         self.sync_many_ports();
+        self.sync_groups();
         new
     }
 
@@ -753,6 +798,8 @@ impl App {
                 Kind::Sourcer { .. } => sourcer_node::json(&s),
                 Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } => String::new(),
                 Kind::Missing { name, .. } => format!(",\"module_missing\":\"{}\"", json_escape(name)),
+                Kind::Group { def, .. } => format!(",\"group\":\"{}\"", json_escape(def)),
+                Kind::GroupInput | Kind::GroupOutput => String::new(),
                 Kind::Module { .. } => {
                     drop(s);
                     self.module_json(i)
@@ -835,6 +882,20 @@ impl App {
                 }
             }
         }
+        let defs = self.group_defs_list();
+        let mut use_of: Option<NodeId> = None;
+        if !defs.is_empty() {
+            ui.label(egui::RichText::new("GROUPS").small().color(DIM));
+            for (def, g) in defs {
+                if ui.button(def).clicked() {
+                    use_of = Some(g);
+                }
+            }
+        }
+        if let Some(g) = use_of {
+            self.add_group_use(g, at);
+            ui.close();
+        }
         if let Some(k) = pick {
             let id = self.add(k, at);
             self.pick_only(id);
@@ -891,19 +952,20 @@ impl App {
         self.run_scripts(origin, area, ui.input(|i| i.time));
 
         self.draw_glow(ui, &painter, origin);
-        let trail = self.selected.and_then(|s| self.graph.trail(s).ok()).unwrap_or_default();
+        let trail = self.lit_trail();
         // Wires out of a node fed by a running live stream pulse in the direction of flow.
         let live: Vec<bool> = self.nodes.iter().map(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false)).collect();
         let now = ui.input(|i| i.time);
-        for w in self.graph.wires() {
+        for w in self.shown_lines() {
             let kind = self.graph.nodes()[w.from].spec.outputs[w.from_port].kind;
             let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
             let (b, sb) = self.port_place(origin, w.to, w.to_port, false);
             let lit = trail.contains(&w.from) && trail.contains(&w.to);
+            let live_from = w.real_from.map_or(w.from, |r| r.0);
             let col = if self.selected.is_some() && !lit { alpha(kind_color(kind), 0.2) } else { kind_color(kind) };
             let pts = layout::wire_points(a, sa, b, sb);
             let width = if lit { 2.6 } else { 1.7 };
-            if live[w.from] {
+            if live[live_from] {
                 vein(&painter, pts, col, width * self.zoom, now, self.zoom);
             } else {
                 painter.add(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(width, col)));
@@ -916,11 +978,11 @@ impl App {
         let mut delete = None;
         let mut drop_on: Option<(NodeId, usize)> = None;
         let mut drop_out: Option<(NodeId, usize)> = None;
-        let mut unwire: Option<(NodeId, &'static str)> = None;
+        let mut unwire: Option<(NodeId, usize)> = None;
         let pointer = ui.ctx().pointer_latest_pos();
         let released = ui.input(|i| i.pointer.any_released());
         for i in 0..self.nodes.len() {
-            if self.nodes[i].hidden {
+            if !self.on_canvas(i) {
                 continue;
             }
             let nl = look::of(&self.nodes[i].kind);
@@ -953,6 +1015,13 @@ impl App {
             let srcs: Vec<NodeId> = if self.is_picked(i) { self.picked() } else { vec![i] }.into_iter().filter(|&j| self.nodes[j].kind.is_source()).collect();
             let (can_share, shared) = (srcs.len() >= 2, srcs.iter().any(|&j| self.shares_clock(j)));
             let mut clock_act: Option<bool> = None;
+            // Groups: this node's (or the selection's) group actions.
+            let is_group = matches!(self.nodes[i].kind, Kind::Group { .. });
+            let can_group = !matches!(self.nodes[i].kind, Kind::GroupInput | Kind::GroupOutput);
+            let mut group_act: Option<u8> = None;
+            if is_group && resp.double_clicked() {
+                group_act = Some(1);
+            }
             let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
                 ui.horizontal(|ui| {
@@ -971,11 +1040,39 @@ impl App {
                     clock_act = Some(false);
                     ui.close();
                 }
+                if is_group && ui.button("Open group (Tab)").clicked() {
+                    group_act = Some(1);
+                    ui.close();
+                }
+                if is_group && ui.button("Ungroup (Alt+G)").clicked() {
+                    group_act = Some(2);
+                    ui.close();
+                }
+                if can_group && ui.button("Group (Ctrl+G)").on_hover_text("These nodes (the selected ones, or this one) into one group node").clicked() {
+                    group_act = Some(3);
+                    ui.close();
+                }
                 if ui.button("Delete node").clicked() {
                     delete = Some(i);
                     ui.close();
                 }
             });
+            if let Some(act) = group_act {
+                if !self.is_picked(i) {
+                    self.pick_only(i);
+                }
+                match act {
+                    1 => self.enter_group(i, area),
+                    2 => {
+                        self.pick_only(i);
+                        self.ungroup_selected();
+                    }
+                    _ => {
+                        self.group_selected();
+                    }
+                }
+                break;
+            }
             match clock_act {
                 Some(true) => self.same_clock(&srcs),
                 Some(false) => self.separate_clocks(&srcs),
@@ -1070,7 +1167,7 @@ impl App {
                     self.wiring_in = Some((i, k));
                 }
                 if pr.secondary_clicked() {
-                    unwire = Some((i, p.name));
+                    unwire = Some((i, k));
                 }
                 if self.wiring.is_some() && released && pointer.is_some_and(|q| q.distance(c) < 12.0 * self.zoom) {
                     drop_on = Some((i, k));
@@ -1101,7 +1198,7 @@ impl App {
         }
 
         // Let go on empty canvas: the menu of nodes to add there and wire.
-        let empty_at = pointer.filter(|q| area.contains(*q) && !(0..self.nodes.len()).any(|i| !self.nodes[i].hidden && self.node_rect(origin, i).contains(*q)));
+        let empty_at = pointer.filter(|q| area.contains(*q) && !(0..self.nodes.len()).any(|i| self.on_canvas(i) && self.node_rect(origin, i).contains(*q)));
         let (pan, zoom) = (self.pan, self.zoom);
         let menu_at = move |end: drop_menu::End, q: Pos2| drop_menu::DropMenu { end, screen: q, world: ((q - origin - pan) / zoom).to_pos2() };
         // Wire being dragged from an input, towards an output.
@@ -1118,16 +1215,13 @@ impl App {
             }
             if released {
                 if let Some((f, fo)) = drop_out {
-                    let out = self.graph.nodes()[f].spec.outputs[fo].name;
-                    let inp = self.graph.nodes()[n].spec.inputs[k].name;
-                    self.graph.disconnect(n, inp);
-                    match self.graph.connect(f, out, n, inp) {
-                        Ok(()) => {
-                            self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[f].label, self.nodes[n].label);
+                    match self.connect_shown(f, fo, n, k) {
+                        Ok(said) => {
+                            self.msg = said;
                             self.sync_many_ports();
                             self.save_project();
                         }
-                        Err(e) => self.msg = describe(&e),
+                        Err(e) => self.msg = e,
                     }
                 } else if let Some(q) = empty_at {
                     self.drop_menu = Some(menu_at(drop_menu::End::In(n, k), q));
@@ -1149,15 +1243,13 @@ impl App {
             }
             if released {
                 if let Some((t, ti)) = drop_on {
-                    let out = self.graph.nodes()[n].spec.outputs[k].name;
-                    let inp = self.graph.nodes()[t].spec.inputs[ti].name;
-                    match self.graph.connect(n, out, t, inp) {
-                        Ok(()) => {
-                            self.msg = format!("wired {}.{out} → {}.{inp}", self.nodes[n].label, self.nodes[t].label);
+                    match self.connect_shown(n, k, t, ti) {
+                        Ok(said) => {
+                            self.msg = said;
                             self.sync_many_ports();
                             self.save_project();
                         }
-                        Err(e) => self.msg = describe(&e),
+                        Err(e) => self.msg = e,
                     }
                 } else if let Some(q) = empty_at {
                     self.drop_menu = Some(menu_at(drop_menu::End::Out(n, k), q));
@@ -1165,8 +1257,9 @@ impl App {
                 self.wiring = None;
             }
         }
-        if let Some((i, name)) = unwire {
-            if self.graph.disconnect(i, name) {
+        if let Some((i, k)) = unwire {
+            let name = self.graph.nodes()[i].spec.inputs[k].name;
+            if self.unwire_shown(i, k) {
                 self.msg = format!("unwired {}.{name}", self.nodes[i].label);
                 self.sync_many_ports();
                 self.save_project();
@@ -1187,13 +1280,14 @@ impl App {
                 self.pick_only(i);
             }
         }
+        self.group_path(ui, area);
         self.drop_menu_ui(&ui.ctx().clone());
         let at = (ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p)).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         self.canvas_keys(&ui.ctx().clone(), area, at.to_pos2());
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
-            "scroll: zoom · drag node: move · drag empty canvas: box select · middle-drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
+            "scroll: zoom · Ctrl+G: group · Tab: open group · drag node: move · drag empty canvas: box select · middle-drag: pan · Shift/Ctrl-click: add · Del · Ctrl+C/X/V/D · Ctrl+Z/Y · F: frame · drag a dot to a dot: wire, to empty canvas: add a node · right-click: menus",
             FontId::proportional(11.0),
             DIM,
         );
@@ -1385,6 +1479,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             self.graph_view(ui);
         });
+        self.sync_groups();
         let ctx = ui.ctx().clone();
         self.ask_ui(&ctx);
         self.sync_recordings();

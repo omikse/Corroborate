@@ -46,6 +46,8 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::InvertLocation => &invert_location_node::Look,
         Kind::Module { .. } => &bus::Look,
         Kind::Missing { .. } => &Missing,
+        Kind::Group { .. } => &groups::GroupLook,
+        Kind::GroupInput | Kind::GroupOutput => &groups::PortsLook,
     }
 }
 

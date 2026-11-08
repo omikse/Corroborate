@@ -8,6 +8,8 @@
 //! - copy, cut, paste, duplicate: Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+D. The clipboard holds project
 //!   text (the same lines as the project file), so nodes paste into another Corroborate too and
 //!   can be read in any text editor;
+//! - group: Ctrl+G groups the selected nodes, Tab opens and closes a group, Alt+G ungroups
+//!   (groups.rs);
 //! - undo, redo: Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z. Anything that changes the project is one step:
 //!   moves, wires, settings, names, collapsing, adding, deleting. Undoing a setting is logged
 //!   in the result file like any other setting change.
@@ -24,6 +26,8 @@ pub struct NodeSnap {
     label: String,
     pos: Pos2,
     collapsed: bool,
+    parent: Option<NodeId>,
+    member: String,
 }
 
 /// The project at one moment: nodes by id (`None`: deleted) and wires by port name.
@@ -72,7 +76,19 @@ impl App {
         self.sel.picked.contains(&i)
     }
 
+    /// Selects node `i` alone. A node inside another group (picked on the timeline, in the
+    /// recordings list) brings the canvas to that group.
     pub(crate) fn pick_only(&mut self, i: NodeId) {
+        if i < self.nodes.len() && !self.nodes[i].hidden && self.nodes[i].parent != self.view {
+            self.view = self.nodes[i].parent;
+            let mut depth = 0;
+            let mut c = self.view;
+            while let Some(g) = c {
+                depth += 1;
+                c = self.nodes[g].parent;
+            }
+            self.view_stack = vec![(self.pan, self.zoom); depth];
+        }
         self.sel.picked = BTreeSet::from([i]);
         self.selected = Some(i);
     }
@@ -92,21 +108,25 @@ impl App {
     }
 
     pub(crate) fn pick_all(&mut self) {
-        self.sel.picked = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
+        self.sel.picked = (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect();
         self.selected = self.sel.picked.iter().next_back().copied();
     }
 
     /// Selected nodes still on the canvas, in id order.
     pub(crate) fn picked(&self) -> Vec<NodeId> {
-        self.sel.picked.iter().copied().filter(|&i| i < self.nodes.len() && !self.nodes[i].hidden).collect()
+        self.sel.picked.iter().copied().filter(|&i| i < self.nodes.len() && self.on_canvas(i)).collect()
     }
 
     /// Deletes nodes: their wires go, recordings into them end; ids stay (undo brings them back).
     pub(crate) fn delete_nodes(&mut self, ids: &[NodeId]) {
+        // A group goes with what is inside it; a group's Group Input and Output stay.
+        let ids: Vec<NodeId> = ids.iter().copied().filter(|&i| !matches!(self.nodes[i].kind, Kind::GroupInput | Kind::GroupOutput)).collect();
         if ids.is_empty() {
             return;
         }
-        for &i in ids {
+        let shown = ids.len();
+        let ids = self.with_inside(&ids);
+        for &i in &ids {
             if self.recordings.contains_key(&i) {
                 self.record_end(i);
             }
@@ -115,7 +135,7 @@ impl App {
         }
         self.sync_many_ports();
         self.pick_none();
-        self.msg = format!("deleted {} node(s)", ids.len());
+        self.msg = format!("deleted {shown} node(s)");
         self.save_project();
     }
 
@@ -126,7 +146,7 @@ impl App {
         if ids.is_empty() {
             return 0;
         }
-        let text = self.nodes_text(&ids);
+        let text = self.nodes_text(&self.with_inside(&ids));
         ctx.copy_text(text.clone());
         self.sel.clip = text;
         self.msg = format!("copied {} node(s)", ids.len());
@@ -141,10 +161,13 @@ impl App {
         if new.is_empty() {
             return new;
         }
-        let min = new.iter().map(|&i| self.nodes[i].pos).fold(Pos2::new(f32::MAX, f32::MAX), |a, p| a.min(p));
-        for &i in &new {
+        // Moved are the nodes pasted at this level; what is inside a pasted group keeps its place there.
+        let top: Vec<NodeId> = new.iter().copied().filter(|&i| self.nodes[i].parent == self.view).collect();
+        let min = top.iter().map(|&i| self.nodes[i].pos).fold(Pos2::new(f32::MAX, f32::MAX), |a, p| a.min(p));
+        for &i in &top {
             self.nodes[i].pos += at - min;
         }
+        let new = top;
         self.sel.picked = new.iter().copied().collect();
         self.selected = new.last().copied();
         self.msg = format!("pasted {} node(s)", new.len());
@@ -159,7 +182,7 @@ impl App {
             return ids;
         }
         let min = ids.iter().map(|&i| self.nodes[i].pos).fold(Pos2::new(f32::MAX, f32::MAX), |a, p| a.min(p));
-        let text = self.nodes_text(&ids);
+        let text = self.nodes_text(&self.with_inside(&ids));
         self.paste(&text, min + Vec2::splat(30.0))
     }
 
@@ -173,7 +196,7 @@ impl App {
                 continue;
             }
             let name = self.graph.nodes()[i].spec.name;
-            k.push_str(&format!("{i}|{name}|{}|{:?}|{}|{}|{}|{}\n", n.kind.saved_param(), n.kind.rows(), n.label, n.pos.x, n.pos.y, n.collapsed));
+            k.push_str(&format!("{i}|{name}|{}|{:?}|{}|{}|{}|{}|{:?}|{}\n", n.kind.saved_param(), n.kind.rows(), n.label, n.pos.x, n.pos.y, n.collapsed, n.parent, n.member));
         }
         let mut w: Vec<String> = self
             .graph
@@ -195,7 +218,7 @@ impl App {
         let nodes = self
             .nodes
             .iter()
-            .map(|n| (!n.hidden).then(|| NodeSnap { kind: n.kind.clone(), label: n.label.clone(), pos: n.pos, collapsed: n.collapsed }))
+            .map(|n| (!n.hidden).then(|| NodeSnap { kind: n.kind.clone(), label: n.label.clone(), pos: n.pos, collapsed: n.collapsed, parent: n.parent, member: n.member.clone() }))
             .collect();
         let wires = self
             .graph
@@ -293,6 +316,8 @@ impl App {
                     d.label = n.label;
                     d.pos = n.pos;
                     d.collapsed = n.collapsed;
+                    d.parent = n.parent;
+                    d.member = n.member;
                     d.hidden = false;
                 }
                 None if !self.nodes[i].hidden => {
@@ -310,13 +335,22 @@ impl App {
             if *a < self.nodes.len() && *b < self.nodes.len() {
                 if matches!(self.nodes[*b].kind, Kind::ResultRecord { .. }) {
                     self.wire_many(*a, o, *b);
-                } else {
+                } else if let Err(GraphError::NoInput { .. }) = self.graph.connect(*a, o, *b, inp) {
+                    // A growing input (Combine's "location 2") has its next port once the one
+                    // before is wired.
+                    self.sync_many_ports();
                     let _ = self.graph.connect(*a, o, *b, inp);
                 }
             }
         }
         self.sync_many_ports();
         self.sel.picked.retain(|&i| !self.nodes[i].hidden);
+        // Inside a group the step does not have: back to the top.
+        if self.view.is_some_and(|g| self.nodes[g].hidden) {
+            self.view = None;
+            self.view_stack.clear();
+        }
+        self.sync_groups();
         if self.selected.is_some_and(|i| self.nodes[i].hidden) {
             self.selected = None;
         }
@@ -373,6 +407,13 @@ impl App {
                         self.sel.boxing = None;
                     }
                     egui::Key::F | egui::Key::Home if !m.any() => self.frame_nodes(area),
+                    egui::Key::G if m.command => {
+                        self.group_selected();
+                    }
+                    egui::Key::G if m.alt => {
+                        self.ungroup_selected();
+                    }
+                    egui::Key::Tab if !m.any() => self.tab(area),
                     _ => {}
                 },
                 _ => {}
@@ -382,7 +423,7 @@ impl App {
 
     /// Pans and zooms so the selected nodes (else all) fill the canvas.
     pub(crate) fn frame_nodes(&mut self, area: Rect) {
-        let ids = if self.sel.picked.is_empty() { (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect() } else { self.picked() };
+        let ids = if self.picked().is_empty() { (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect() } else { self.picked() };
         if ids.is_empty() {
             return;
         }
@@ -421,7 +462,7 @@ impl App {
         let mut picked = if toggle { self.sel.box_base.clone() } else { BTreeSet::new() };
         let mut last = None;
         for i in 0..self.nodes.len() {
-            if !self.nodes[i].hidden && self.node_rect(origin, i).intersects(r) {
+            if self.on_canvas(i) && self.node_rect(origin, i).intersects(r) {
                 if toggle && self.sel.box_base.contains(&i) {
                     picked.remove(&i);
                 } else {

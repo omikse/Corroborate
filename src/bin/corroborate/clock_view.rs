@@ -344,8 +344,9 @@ impl App {
         // The outline round each group (as sketched): its shapes a little larger in the group's
         // colour, then the same shapes in the canvas colour, so only the rim shows where they
         // join. Wires and nodes of one group merge into one shape.
+        let here = |i: NodeId| self.on_canvas(i);
         for (pad, outline) in [(1.5, true), (0.0, false)] {
-            for w in self.graph.wires() {
+            for w in self.graph.wires().iter().filter(|w| here(w.from) && here(w.to)) {
                 let Some(&g) = cg.of_node[w.from].iter().find(|g| cg.of_node[w.to].contains(g)) else { continue };
                 let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
                 let (b, sb) = self.port_place(origin, w.to, w.to_port, false);
@@ -354,7 +355,7 @@ impl App {
             }
             for i in 0..self.nodes.len() {
                 let gs = &cg.of_node[i];
-                if self.nodes[i].hidden || gs.is_empty() {
+                if !here(i) || gs.is_empty() {
                     continue;
                 }
                 let col = if outline { alpha(cg.groups[gs[0]].color, outline_alpha(cg.groups[gs[0]].kind)) } else { BG };
@@ -364,14 +365,14 @@ impl App {
         // The group's number (1°, 2°…) above its top-left node, as on the timeline.
         for (g, grp) in cg.groups.iter().enumerate() {
             let first = (0..self.nodes.len())
-                .filter(|&i| !self.nodes[i].hidden && cg.of_node[i].contains(&g))
+                .filter(|&i| here(i) && cg.of_node[i].contains(&g))
                 .map(|i| self.node_rect(origin, i))
                 .min_by(|a, b| (a.top() + a.left()).total_cmp(&(b.top() + b.left())));
             if let Some(r) = first {
                 painter.text(r.left_top() + Vec2::new(2.0, -12.0) * z, Align2::LEFT_BOTTOM, group_label(cg.nums[g]), FontId::proportional(15.0 * z), alpha(grp.color, 0.95));
             }
         }
-        for w in self.graph.wires() {
+        for w in self.graph.wires().iter().filter(|w| here(w.from) && here(w.to)) {
             let Some(&g) = cg.of_node[w.from].iter().find(|g| cg.of_node[w.to].contains(g)) else { continue };
             let grp = &cg.groups[g];
             let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
@@ -387,7 +388,7 @@ impl App {
         }
         for i in 0..self.nodes.len() {
             let gs = &cg.of_node[i];
-            if self.nodes[i].hidden || gs.is_empty() {
+            if !here(i) || gs.is_empty() {
                 continue;
             }
             let rect = self.node_rect(origin, i).expand(10.0 * z);
@@ -433,12 +434,14 @@ impl App {
         let mut focus = None;
         let cg = self.canvas_groups();
         let name = |c: &str| self.clock_name(c);
-        for (wi, w) in self.graph.wires().iter().enumerate() {
-            let out = &self.graph.nodes()[w.from].spec.outputs[w.from_port];
+        for (wi, w) in self.shown_lines().iter().enumerate() {
+            // The value on it is the real output's (through a group, the node inside).
+            let Some((rf, rp)) = w.real_from else { continue };
+            let out = &self.graph.nodes()[rf].spec.outputs[rp];
             if !timey(out.kind) {
                 continue;
             }
-            let Ok(data) = self.value_from(w.from, out.name) else { continue };
+            let Ok(data) = self.value_from(rf, out.name) else { continue };
             let Some(t) = wire_text(&self.ev.clocks, &data, self.ev.conf, self.ev.max_error, &name) else { continue };
             let (a, sa) = self.port_place(origin, w.from, w.from_port, true);
             let (b, sb) = self.port_place(origin, w.to, w.to_port, false);

@@ -40,6 +40,14 @@ pub enum Kind {
     /// A module this project uses that this tool does not have. Kept as it was saved (name,
     /// setting, rows, wires) so saving the project loses nothing; its ports come from the saved wires.
     Missing { name: String, param: String, rows: Vec<(String, String)> },
+    /// A node group (Ctrl+G, groups.rs): the nodes inside it are ordinary nodes whose parent is
+    /// this one. Every group of definition `def` holds the same nodes. `rows`: its ports, as
+    /// `in` and `out` rows.
+    Group { def: String, rows: Vec<(String, String)> },
+    /// Inside a group: its inputs, as outputs to wire into the nodes inside.
+    GroupInput,
+    /// Inside a group: its outputs, as inputs to wire the nodes inside into.
+    GroupOutput,
 }
 
 
@@ -85,6 +93,9 @@ impl Kind {
             Kind::InvertLocation => label(invert_location::manifest()),
             Kind::Module { m, .. } => m.label.clone(),
             Kind::Missing { name, .. } => format!("{name} (module missing)"),
+            Kind::Group { def, .. } => def.clone(),
+            Kind::GroupInput => "Group Input".into(),
+            Kind::GroupOutput => "Group Output".into(),
         }
     }
 
@@ -114,6 +125,13 @@ impl Kind {
             Kind::Map => map::spec(),
             Kind::Module { m, .. } => m.spec(),
             Kind::Missing { name, .. } => NodeSpec { name: mm::intern(name), role: Role::View, inputs: vec![], outputs: vec![] },
+            Kind::Group { rows, .. } => {
+                let f = crate::groups::Iface::of(rows);
+                NodeSpec { name: crate::groups::GROUP, role: Role::Transform, inputs: f.ports(&f.inputs), outputs: f.ports(&f.outputs) }
+            }
+            // Their ports follow the group's (groups.rs `sync_ports`).
+            Kind::GroupInput => NodeSpec { name: crate::groups::GROUP_INPUT, role: Role::Transform, inputs: vec![], outputs: vec![] },
+            Kind::GroupOutput => NodeSpec { name: crate::groups::GROUP_OUTPUT, role: Role::Transform, inputs: vec![], outputs: vec![] },
         }
     }
 
@@ -125,16 +143,21 @@ impl Kind {
             Kind::Sourcer { input } => input.clone(),
             Kind::CombineLocations { any } => combine_locations::mode(*any).into(),
             Kind::Missing { param, .. } => param.clone(),
+            Kind::Group { def, .. } => def.clone(),
             Kind::Value { ty, .. } => ty.clone(),
-            Kind::Planes | Kind::AudioMatch | Kind::Map | Kind::InvertLocation | Kind::Module { .. } => String::new(),
+            Kind::Planes | Kind::AudioMatch | Kind::Map | Kind::InvertLocation | Kind::Module { .. } | Kind::GroupInput | Kind::GroupOutput => String::new(),
         }
     }
 
     /// A node read back from a project file: its saved name (an id, or a name older files used)
     /// and setting. A name no module has gives a `Missing` node that keeps what was saved.
     pub fn from_saved(name: &str, param: String) -> Kind {
-        if name == "mic" {
-            return Kind::Sourcer { input: format!("mic:{param}") };
+        match name {
+            "mic" => return Kind::Sourcer { input: format!("mic:{param}") },
+            crate::groups::GROUP => return Kind::Group { def: param, rows: Vec::new() },
+            crate::groups::GROUP_INPUT => return Kind::GroupInput,
+            crate::groups::GROUP_OUTPUT => return Kind::GroupOutput,
+            _ => {}
         }
         let id = corroborate::modules::builtin().into_iter().find(|m| m.id == name || m.aliases.iter().any(|a| a == name)).map(|m| m.id);
         match id {
@@ -163,7 +186,7 @@ impl Kind {
     /// Lines a project file keeps under the node: a Value's fields, a module's settings.
     pub fn rows(&self) -> &[(String, String)] {
         match self {
-            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } => rows,
+            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } => rows,
             _ => &[],
         }
     }
@@ -176,6 +199,8 @@ impl Kind {
             Kind::Sourcer { input } => vec![("source".into(), input.clone())],
             Kind::Value { ty, rows } => std::iter::once(("type".to_string(), ty.clone())).chain(rows.iter().cloned()).collect(),
             Kind::CombineLocations { any } => vec![("mode".into(), combine_locations::mode(*any).into())],
+            // A group's ports are not settings.
+            Kind::Group { .. } => Vec::new(),
             _ => self.rows().to_vec(),
         }
     }
@@ -201,7 +226,7 @@ impl Kind {
     /// keeps the default), a missing module's row as it was.
     pub fn add_row(&mut self, k: String, v: String) {
         match self {
-            Kind::Value { rows, .. } | Kind::Missing { rows, .. } => rows.push((k, v)),
+            Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } => rows.push((k, v)),
             Kind::Module { m, settings } => {
                 if let Some(Ok(v)) = m.setting(&k).map(|s| s.check(&v)) {
                     if let Some(slot) = settings.iter_mut().find(|(n, _)| *n == k) {

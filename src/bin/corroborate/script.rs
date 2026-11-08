@@ -315,7 +315,7 @@ impl App {
             return;
         }
         for i in 0..self.nodes.len() {
-            if self.nodes[i].hidden {
+            if !self.on_canvas(i) {
                 continue;
             }
             let id = self.graph.nodes()[i].spec.name;
