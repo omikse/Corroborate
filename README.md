@@ -174,7 +174,7 @@ To change one node, edit only its folder:
 | [Result record](<src/modules/Result record/README.md>) | `result-record` | the result JSON, evidence trail and agreed location |
 | [Combine locations](<src/modules/Combine locations/README.md>) | `combine-locations` | several locations into one (all or any) |
 | [Invert location](<src/modules/Invert location/README.md>) | `invert-location` | flips what a location adds and subtracts |
-| [Map](<src/modules/Map/README.md>) | `map` | a location on a world map |
+| [Map](<src/modules/Map/README.md>) | `map` | locations on a map you can move and zoom, as many as you wire |
 
 Time types: a **time** is `{"clock", "t", "utc"?, "error_s", "source"}`: moment `t` seconds on a
 clock, with `utc` (Unix seconds) only when that clock is tied to UTC; `{"utc": …}` alone is UTC. An
@@ -249,8 +249,8 @@ Every location signal either **adds** its cells (the place is here: green) or **
 (the place is not here: red). Location nodes:
 - **Combine locations**: what several locations still allow, all of them (AND) or any (OR).
 - **Invert location**: flips adds and subtracts on the same cells.
-- **Map**: draws a location over the Earth in the Robinson projection, in the node and in its
-  window. Image: NASA Blue Marble (public domain, 2048 × 1024, stored as `earth.idx`, a 256-colour
+- **Map**: everything wired into it on one map you can move and zoom, in the node (pins, tinted
+  areas; any number of inputs). See Maps below. World image: NASA Blue Marble (public domain, 2048 × 1024, stored as `earth.idx`, a 256-colour
   palette and one byte per pixel); coastlines: Natural Earth 1:110m (public domain).
 
 ### Maps (offline)
