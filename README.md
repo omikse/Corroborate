@@ -276,6 +276,17 @@ Each zoom level roughly doubles the size: a city to zoom 15 is tens to a few hun
 whole world to zoom 6 a few tens of MB. The download itself names the area to the server, so do
 it before the investigation, or for a wider box than the place of interest.
 
+### Google maps (online)
+
+The list above the map switches to Google's satellite photos, satellite with names, or road map.
+It is the one online part of the panel, so it starts on **Offline maps** every time and says
+**ONLINE** while on: Google sees which part of the world you look at. It needs your own API key
+from [Google Cloud](https://console.cloud.google.com/) with the Map Tiles API enabled, kept in
+`settings\google_maps_key.txt` next to the program and never in a project. The panel counts the
+tiles it requested since the program started; Google's free allowance is per month. Tiles are
+only held in memory, and Google's terms allow viewing them only: no image analysis, no
+extracting data, no offline use.
+
 ## Other code
 
 - `src/`: `core` (values with error and source), `graph` (typed wires),

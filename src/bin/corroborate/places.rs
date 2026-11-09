@@ -5,7 +5,8 @@
 //! - **Map**: walkers (Web Mercator, scroll to zoom, drag to pan). Detail comes from `.pmtiles`
 //!   files in `maps\` next to the program (offline vector tiles, e.g. a Protomaps extract of a
 //!   region; README "Maps"): nothing is fetched while working. Without them the built-in Blue
-//!   Marble image is drawn instead, in the same projection.
+//!   Marble image is drawn instead, in the same projection. Google's satellite and road maps can
+//!   be switched on (google_maps.rs): online, so offline at every start and marked while on.
 //! - **Points** (a site: typed latitude and longitude, or a file's GPS) are pins in their clock
 //!   group's colour; **areas** are their 1° cells, green where they add and red where they
 //!   subtract.
@@ -42,11 +43,13 @@ pub struct PlacesState {
     framed: Vec<(i64, i64)>,
     /// Row under the pointer (its pin is drawn larger).
     hover: Option<usize>,
+    /// Google's map tiles, when switched on (google_maps.rs).
+    pub google: google_maps::Google,
 }
 
 impl Default for PlacesState {
     fn default() -> Self {
-        PlacesState { open: true, memory: MapMemory::default(), tiles: None, framed: Vec::new(), hover: None }
+        PlacesState { open: true, memory: MapMemory::default(), tiles: None, framed: Vec::new(), hover: None, google: Default::default() }
     }
 }
 
@@ -93,6 +96,59 @@ impl App {
         out
     }
 
+    /// The line choosing what the map shows; with Google on, what that means.
+    fn map_source_bar(&mut self, ui: &mut egui::Ui) {
+        use google_maps::MapSource;
+        let g = &mut self.places.google;
+        let mut pick = g.source;
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            egui::ComboBox::from_id_salt("map-source").selected_text(pick.label()).show_ui(ui, |ui| {
+                for s in MapSource::ALL {
+                    ui.selectable_value(&mut pick, s, s.label());
+                }
+            });
+            if g.live() {
+                let n = g.fetched.load(Ordering::Relaxed);
+                ui.colored_label(WARN, format!("ONLINE · {n} tiles")).on_hover_text(
+                    "Google sees which part of the world you look at.\nThe tiles are counted since the program started; Google's free allowance is per month.\nFor viewing only: its terms forbid image analysis, extracting data and offline use.",
+                );
+                if ui.small_button("key").on_hover_text("forget the saved API key").clicked() {
+                    g.forget_key();
+                }
+            } else if g.connecting() {
+                ui.colored_label(DIM, "connecting to Google…");
+            }
+        });
+        g.set_source(pick);
+        if g.source == MapSource::Offline {
+            return;
+        }
+        if g.key.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.colored_label(DIM, "API key");
+                ui.add(egui::TextEdit::singleline(&mut g.draft).password(true).desired_width(170.0)).on_hover_text("your own key from console.cloud.google.com, with the Map Tiles API enabled; kept in settings\\ next to the program");
+                if ui.small_button("Use").clicked() {
+                    let typed = g.draft.clone();
+                    g.use_key(&typed);
+                }
+            });
+        }
+        if !g.error.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                if ui.small_button("Try again").clicked() {
+                    g.again();
+                }
+                if !g.key.is_empty() && ui.small_button("Change key").clicked() {
+                    g.forget_key();
+                }
+                ui.add(egui::Label::new(egui::RichText::new(g.error.clone()).size(10.5).color(Color32::from_rgb(235, 80, 80))).truncate()).on_hover_text(g.error.clone());
+            });
+        }
+    }
+
     /// The panel's contents.
     pub(crate) fn places_view(&mut self, ui: &mut egui::Ui) {
         let places = self.places();
@@ -124,7 +180,13 @@ impl App {
             let pts = places.iter().filter(|p| p.site.is_some()).count();
             ui.colored_label(DIM, format!("{pts} points, {} areas", places.len() - pts));
             ui.separator();
-            let maps = if n_maps == 0 { "world image only".to_string() } else { format!("{n_maps} map file{}", if n_maps == 1 { "" } else { "s" }) };
+            let maps = if self.places.google.live() {
+                "Google".to_string()
+            } else if n_maps == 0 {
+                "world image only".to_string()
+            } else {
+                format!("{n_maps} map file{}", if n_maps == 1 { "" } else { "s" })
+            };
             ui.colored_label(DIM, maps).on_hover_text(format!(
                 "offline map files (.pmtiles) are read from {}\nnothing is fetched from the internet; see README, Maps",
                 maps_dir().display()
@@ -137,6 +199,10 @@ impl App {
         if !self.places.open {
             return;
         }
+        let ctx = ui.ctx().clone();
+        self.places.google.tick(&ctx);
+        self.map_source_bar(ui);
+        let online = self.places.google.live();
 
         // Frame new points (a point arriving, or more of them).
         let pts: Vec<(f64, f64)> = places.iter().filter_map(|p| p.site.map(|s| (s.lat, s.lon))).collect();
@@ -148,7 +214,7 @@ impl App {
                 hi = (hi.0.max(a), hi.1.max(b));
             }
             self.places.memory.center_at(lat_lon((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0));
-            let _ = self.places.memory.set_zoom(frame_zoom((hi.0 - lo.0).max(hi.1 - lo.1), n_maps > 0));
+            let _ = self.places.memory.set_zoom(frame_zoom((hi.0 - lo.0).max(hi.1 - lo.1), n_maps > 0 || online));
             self.places.framed = key;
         }
 
@@ -157,14 +223,19 @@ impl App {
         let earth = self.earth.as_ref().map(|t| t.id());
         let hover = self.places.hover;
         let mut clicked_pin: Option<NodeId> = None;
+        let credit = self.places.google.credit();
+        // The view on screen: north, south, east, west.
+        let mut seen: Option<(f64, f64, f64, f64)> = None;
         ui.allocate_ui(Vec2::new(ui.available_width(), map_h), |ui| {
-            let tiles = self.places.tiles.as_mut().expect("read above");
-            let (base, layers): (Option<&mut dyn Tiles>, &mut [(PathBuf, PmTiles)]) = match tiles.split_first_mut() {
-                Some((first, rest)) => (Some(&mut first.1 as &mut dyn Tiles), rest),
-                None => (None, &mut []),
+            let PlacesState { tiles, google, memory, .. } = &mut self.places;
+            let tiles = tiles.as_mut().expect("read above");
+            let (base, layers): (Option<&mut dyn Tiles>, &mut [(PathBuf, PmTiles)]) = match (google.tiles_mut(), tiles.split_first_mut()) {
+                (Some(g), _) => (Some(g as &mut dyn Tiles), &mut []),
+                (None, Some((first, rest))) => (Some(&mut first.1 as &mut dyn Tiles), rest),
+                (None, None) => (None, &mut []),
             };
             let detail = base.is_some();
-            let mut map = walkers::Map::new(base, &mut self.places.memory, lat_lon(20.0, 0.0));
+            let mut map = walkers::Map::new(base, memory, lat_lon(20.0, 0.0));
             for l in layers.iter_mut() {
                 map = map.with_layer(&mut l.1, 1.0);
             }
@@ -202,8 +273,25 @@ impl App {
                     let g = proj.unproject(h.to_vec2());
                     p.text(resp.rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, site_text(&Site { lat: g.y(), lon: g.x(), elevation: None }), FontId::monospace(10.5), TEXT);
                 }
+                let (nw, se) = (proj.unproject(resp.rect.left_top().to_vec2()), proj.unproject(resp.rect.right_bottom().to_vec2()));
+                seen = Some((nw.y(), se.y(), se.x(), nw.x()));
+                // Google's terms: its name and the copyright text, on the map, in full.
+                if let Some(c) = &credit {
+                    let text = p.layout(c.clone(), FontId::proportional(10.5), Color32::WHITE, resp.rect.width() - 12.0);
+                    let at = resp.rect.right_bottom() - text.size() - Vec2::splat(6.0);
+                    p.rect_filled(Rect::from_min_size(at, text.size()).expand(3.0), 2.0, Color32::from_black_alpha(170));
+                    p.galley(at, text, Color32::WHITE);
+                }
             });
         });
+        if let (true, Some((n, s, e, w))) = (online, seen) {
+            let g = &mut self.places.google;
+            g.ask_view(self.places.memory.zoom(), n, s, e, w, &ctx);
+            // No closer than the imagery here goes (past it the tiles are blank).
+            if let Some(most) = g.max_zoom_at((n + s) / 2.0, (e + w) / 2.0).filter(|m| self.places.memory.zoom() > *m) {
+                let _ = self.places.memory.set_zoom(most);
+            }
+        }
 
         // The list: one line per location.
         let mut pick: Option<(NodeId, Option<Site>)> = clicked_pin.map(|n| (n, None));

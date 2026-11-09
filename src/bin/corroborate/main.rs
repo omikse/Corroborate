@@ -35,6 +35,7 @@ mod groups_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
+mod google_maps;
 mod groups;
 mod clock_view;
 mod evidence;
