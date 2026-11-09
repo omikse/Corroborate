@@ -177,11 +177,12 @@ impl App {
                 self.area_from(from).map(|(area, note)| Data::Location { area, note, site: None })
             }
             (_, Kind::Enf { .. }) => crate::enf_node::value(&s, out, &clock),
-            (PortKind::Time, _) => s
-                .anchor
-                .as_ref()
-                .map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(self.start_utc(from, a)), error_s: a.error_s, source: a.source.clone() })
-                .ok_or("no time yet".into()),
+            (PortKind::Time, Kind::Sourcer { .. }) if self.source_file(from).is_some() => self.file_time(from, &clock),
+            (PortKind::Custom("length"), Kind::Sourcer { .. }) => {
+                drop(s);
+                self.length_out(from)
+            }
+            (PortKind::Time, _) => s.anchor.as_ref().map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() }).ok_or("no time yet".into()),
             (PortKind::Event, Kind::Plugin { .. }) => Ok(Data::Events(
                 s.plugin.findings.iter().map(|f| Event { clock: clock.clone(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: f.error_s }).collect(),
             )),

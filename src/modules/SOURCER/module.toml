@@ -24,6 +24,13 @@ name = "time"
 kind = "time"
 required = true
 
+# How long the recording is: wired into a Time node's row, it turns a stamp that marks the end of
+# the recording into its start.
+[[output]]
+name = "length"
+kind = "length"
+required = true
+
 [[output]]
 name = "metadata"
 kind = "json"

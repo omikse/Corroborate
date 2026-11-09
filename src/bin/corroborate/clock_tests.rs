@@ -653,33 +653,7 @@ fn audio_match_links_two_recordings() {
     assert_eq!(rows.iter().filter(|r| r.teal.is_some()).count(), 3, "{:?}", rows.iter().map(|r| r.note.clone()).collect::<Vec<_>>());
     assert!(rows.iter().all(|r| r.amber.is_none() && r.note == "no stamp"));
     assert_eq!(note, "time: not wired");
-    // One recording's time wired in: every recording linked to it has real time.
-    d.app().nodes[a].state.lock().unwrap().anchor = Some(Anchor { utc0: 1000.0, error_s: 60.0, source: "file creation_time (low confidence)".into() });
-    d.app().update_clocks();
-    let ub = uid(d.app(), b);
-    assert_ne!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "not wired, not trusted");
-    d.app().wire(a, "time", m, "time");
-    d.app().update_clocks();
-    assert_eq!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "wired: the linked recording has real time");
-    let (rows, real, note, _) = d.app().match_rows(m, &ctx);
-    assert!(real && note.starts_with("time: "), "{note}");
-    assert!((rows[0].teal.unwrap().0 - 1000.0).abs() < 0.01, "{:?}", rows[0].teal);
-    // Read as the end of the recording, the wired time moves its start back by the length, and
-    // the reading is saved with the project.
-    let ua = uid(d.app(), a);
-    d.app().set_stamp_end(std::slice::from_ref(&ua), true);
-    d.app().update_clocks();
-    let (rows, ..) = d.app().match_rows(m, &ctx);
-    assert!((rows[0].teal.unwrap().0 - 940.0).abs() < 0.01, "{:?}", rows[0].teal);
-    assert!(d.app().project_text().contains(&format!("stamp-end|{ua}\n")));
-    let mut other = App::empty();
-    assert!(other.evidence_line(&["stamp-end", &ua]) && other.ev.stamp_end.contains(&ua));
-    d.app().set_stamp_end(std::slice::from_ref(&ua), false);
-    assert!(!d.app().project_text().contains("stamp-end|"));
     assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
-    d.app().graph.disconnect(m, "time");
-    d.app().nodes[a].state.lock().unwrap().anchor = None;
-    d.app().update_clocks();
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
     let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") else { panic!("no quality: {st}") };
@@ -768,29 +742,35 @@ fn make_jiku_project() {
     assert!(st.contains("of 1225 pairs"), "all 50 matched: {st}");
 }
 
-/// A file's creation time (a camera clock perhaps set by hand) anchors its source's clock only
-/// while the source's time output is wired; other anchors count wired or not.
+/// The time written in a file never anchors its clock, wired or not; a live source's own time
+/// does. The file's time is on the output from before any Run, raw, with an error of 0, and a Run
+/// does not clear it; so is the file's length.
 #[test]
-fn creation_time_anchors_only_when_wired() {
+fn a_file_stamp_is_a_claim_only() {
+    use corroborate::timebase::FileFacts;
     let mut app = App::empty();
-    let s = source(&mut app, 40.0);
+    let s = app.add(Kind::Sourcer { input: "clip.mp4".into() }, Pos2::new(30.0, 40.0));
     let p = app.add(Kind::Planes, Pos2::new(300.0, 40.0));
     app.wire(s, "audio", p, "audio");
-    let stamp = Anchor { utc0: 1000.0, error_s: 60.0, source: "file creation_time (low confidence)".into() };
-    assert!(stamp.is_creation_time());
-    app.nodes[s].state.lock().unwrap().anchor = Some(stamp);
+    assert_eq!(app.value_from(s, "time"), Err("still reading the file".to_string()));
+    app.facts.put("clip.mp4", FileFacts { stamp: Some(1000.0), len: Some(60.0), source: "the file's creation_time".into() });
+    let c = app.clock_of(s).unwrap();
+    assert_eq!(app.value_from(s, "time"), Ok(Data::Time { clock: c, t: 0.0, utc: Some(1000.0), error_s: 0.0, source: "the file's creation_time".into() }));
+    assert_eq!(app.value_from(s, "length"), Ok(Data::Custom { kind: "length", json: "{\"seconds\":60}".into() }));
+    app.nodes[s].state.lock().unwrap().anchor = Some(Anchor { utc0: 1000.0, error_s: 60.0, source: "file".into() });
     app.update_clocks();
     assert!(app.ev.anchors.is_empty(), "unwired: not used {:?}", app.ev.anchors);
     app.wire(s, "time", p, "time");
     assert_eq!(app.graph.wires().len(), 2, "{}", app.msg);
     app.update_clocks();
-    assert_eq!(app.ev.anchors.len(), 1, "wired: used");
-    assert_eq!(app.ev.anchors[0].utc, 1000.0);
-    // Our recorder's sidecar time counts unwired.
-    anchor(&app, s, 2000.0, 1.0);
-    app.graph.disconnect(p, "time");
+    assert!(app.ev.anchors.is_empty(), "wired: still only a claim {:?}", app.ev.anchors);
+    app.nodes[s].state.lock().unwrap().reset();
+    assert!(app.value_from(s, "time").is_ok(), "a Run clears the state, not what the file says");
+    // Not a file: its own time counts.
+    let live = source(&mut app, 300.0);
+    anchor(&app, live, 2000.0, 1.0);
     app.update_clocks();
-    assert_eq!(app.ev.anchors.len(), 1, "a sidecar counts unwired");
+    assert_eq!(app.ev.anchors.len(), 1);
 }
 
 /// Opens a copy of the Jiku project (made by make_jiku_project; the copy in target\drive, so

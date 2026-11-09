@@ -27,14 +27,19 @@ impl Anchor {
     pub fn utc(&self, rel: f64) -> f64 {
         self.utc0 + rel
     }
-    /// From the file's creation time: a camera's clock someone may have set by hand, so it
-    /// anchors the clock only when the user wires the source's time output.
-    pub fn is_creation_time(&self) -> bool {
-        self.source.starts_with(CREATION_TIME)
-    }
 }
 
-const CREATION_TIME: &str = "file creation_time";
+/// What a file says about itself, read once before any Run.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileFacts {
+    /// The time written in it (Unix seconds), raw: the whole project reads it as the start of the
+    /// recording, and a person corrects a file that means something else.
+    pub stamp: Option<f64>,
+    /// The media's length, seconds.
+    pub len: Option<f64>,
+    /// Where `stamp` comes from, in words.
+    pub source: String,
+}
 
 pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -220,17 +225,28 @@ pub fn received_anchor(rel: f64) -> Anchor {
     Anchor { utc0: now_unix() - rel, error_s: 1.0, source: "PC clock at reception (late by the stream's delay)".into() }
 }
 
-/// `creation_time` from container metadata (ffprobe), if any, and the media's length in
-/// seconds when known.
-pub fn file_creation_time(path: &str) -> Option<(f64, Option<f64>)> {
-    let out = crate::no_window(&mut Command::new("ffprobe"))
-        .args(["-v", "error", "-show_entries", "format=duration:format_tags=creation_time", "-of", "default=nw=1", path])
-        .output()
-        .ok()?;
+/// `creation_time` from container metadata (ffprobe), and the media's length in seconds, each
+/// when the file has it.
+fn file_probe(path: &str) -> (Option<f64>, Option<f64>) {
+    let Ok(out) = crate::no_window(&mut Command::new("ffprobe")).args(["-v", "error", "-show_entries", "format=duration:format_tags=creation_time", "-of", "default=nw=1", path]).output() else {
+        return (None, None);
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
-    let t = parse_iso8601(field("TAG:creation_time=")?)?;
-    Some((t, field("duration=").and_then(|d| d.parse().ok())))
+    (field("TAG:creation_time=").and_then(parse_iso8601), field("duration=").and_then(|d| d.parse().ok()))
+}
+
+/// The time written in the file at `path` and its length. Our recorder's sidecar is a time like
+/// any other; else the container's creation_time.
+pub fn file_facts(path: &str) -> FileFacts {
+    if !std::path::Path::new(path).exists() {
+        return FileFacts::default();
+    }
+    let (made, len) = file_probe(path);
+    match sidecar_anchor(path) {
+        Some(a) => FileFacts { stamp: Some(a.utc0), len, source: a.source },
+        None => FileFacts { stamp: made, len, source: made.map_or(String::new(), |_| "the file's creation_time".to_string()) },
+    }
 }
 
 /// Sidecar written by our recorder: `<file without extension>.json` with `"utc_start"`.
@@ -248,11 +264,8 @@ pub fn sidecar_anchor(path: &str) -> Option<Anchor> {
 pub fn file_anchor(path: &str) -> Option<Anchor> {
     sidecar_anchor(path).or_else(|| {
         // Phones may stamp the end of the recording, so the error is about the media's length.
-        file_creation_time(path).map(|(t, len)| Anchor {
-            utc0: t,
-            error_s: len.unwrap_or(600.0).max(1.0),
-            source: format!("{CREATION_TIME} (low confidence)"),
-        })
+        let (made, len) = file_probe(path);
+        made.map(|t| Anchor { utc0: t, error_s: len.unwrap_or(600.0).max(1.0), source: "file creation_time (low confidence)".to_string() })
     })
 }
 

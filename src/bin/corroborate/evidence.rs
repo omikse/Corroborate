@@ -5,8 +5,8 @@
 //!   (right-click on several selected sources) gave them one shared id. A node fed audio is on
 //!   the clock of that audio's source.
 //! - **Evidence**, gathered every frame and solved again when it changes:
-//!   - each source's own anchor (our recording's sidecar, stream times, this PC's clock; a file's
-//!     creation time only while the source's time output is wired);
+//!   - each live source's own anchor (stream times, this PC's clock); a time written in a file is
+//!     never evidence by itself;
 //!   - a time wired into an input that module.toml marks `anchors = "audio"`: the audio starts at
 //!     that time (an anchor when the time is UTC, a link when it is on another clock);
 //!   - every `anchor` and `link` output in the project, wired or not;
@@ -87,14 +87,12 @@ impl App {
             if n.hidden {
                 continue;
             }
-            // A source's own anchor: its time 0 is at utc0. One from the file's creation time
-            // (a camera clock someone may have set by hand) counts only while the source's time
-            // output is wired: wiring it is the user's choice to trust it.
-            if n.kind.is_source() {
+            // A source's own anchor: its time 0 is at utc0. A time written in a file is only a
+            // claim until a person picks it as an anchor, wired or not.
+            if n.kind.is_source() && self.source_file(i).is_none() {
                 let a = n.state.lock().unwrap().anchor.clone();
-                let a = a.filter(|a| !a.is_creation_time() || !self.graph.targets(i, "time").is_empty());
                 if let (Some(a), Some(c)) = (a, self.clock_of(i)) {
-                    an.push(ClockAnchor { clock: c, t: 0.0, utc: self.start_utc(i, &a), error_s: a.error_s, from: n.uid.clone(), enabled: true });
+                    an.push(ClockAnchor { clock: c, t: 0.0, utc: a.utc0, error_s: a.error_s, from: n.uid.clone(), enabled: true });
                 }
             }
             // A time wired into an anchoring input: the audio starts at that time.
@@ -184,30 +182,6 @@ impl App {
 
     /// Switches a piece of evidence on or off (by its key); kept in the project and logged in the
     /// result file's setting changes.
-    /// When source `i`'s recording started in real time, by anchor `a`: a file's creation time the
-    /// person reads as the end is earlier by the recording's length (the anchor's error is that
-    /// length).
-    pub(crate) fn start_utc(&self, i: NodeId, a: &Anchor) -> f64 {
-        if a.is_creation_time() && self.ev.stamp_end.contains(&self.nodes[i].uid) {
-            a.utc0 - a.error_s
-        } else {
-            a.utc0
-        }
-    }
-
-    /// The person's reading of these sources' file stamps: the recording's end, or its start.
-    pub(crate) fn set_stamp_end(&mut self, uids: &[String], end: bool) {
-        for u in uids {
-            let changed = if end { self.ev.stamp_end.insert(u.clone()) } else { self.ev.stamp_end.remove(u) };
-            if changed {
-                let label = self.nodes.iter().find(|n| n.uid == *u).map_or(u.clone(), |n| n.label.clone());
-                let [old, new] = if end { ["start", "end"] } else { ["end", "start"] }.map(String::from);
-                self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: u.clone(), label, name: "time stamp marks".into(), old, new });
-            }
-        }
-        self.save_project();
-    }
-
     pub(crate) fn set_evidence(&mut self, key: &str, on: bool) {
         let was = !self.ev.off.contains(key);
         if was == on {

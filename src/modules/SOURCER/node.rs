@@ -7,6 +7,7 @@
 
 use super::*;
 use corroborate::modules::sourcer::has_video;
+use corroborate::timebase::FileFacts;
 use std::io::Read;
 
 /// Direct media URLs ffmpeg opens itself; every other http(s) link is a page for yt-dlp.
@@ -31,6 +32,102 @@ pub fn input(text: &str) -> Option<Input> {
         Some(Input::Url(t.to_string()))
     } else {
         Some(Input::File(t.to_string()))
+    }
+}
+
+#[derive(Default)]
+struct FactsInner {
+    read: HashMap<String, FileFacts>,
+    queue: std::collections::VecDeque<String>,
+    busy: bool,
+}
+
+/// What each file says about itself, by path, read one file at a time on a thread of their own,
+/// once each. Kept in the app, so a Run does not clear it.
+#[derive(Clone, Default)]
+pub struct Facts(Arc<std::sync::Mutex<FactsInner>>);
+
+impl Facts {
+    /// What is known of `path` so far: None while it has not been read.
+    pub fn known(&self, path: &str) -> Option<FileFacts> {
+        self.0.lock().unwrap().read.get(path).cloned()
+    }
+
+    /// Has `path` read, if it has not been yet.
+    fn ask(&self, path: &str, ctx: &egui::Context) {
+        let mut s = self.0.lock().unwrap();
+        if s.read.contains_key(path) || s.queue.iter().any(|p| p == path) {
+            return;
+        }
+        s.queue.push_back(path.to_string());
+        if !s.busy {
+            s.busy = true;
+            let (me, ctx) = (self.0.clone(), ctx.clone());
+            std::thread::spawn(move || loop {
+                let Some(p) = me.lock().unwrap().queue.pop_front() else {
+                    me.lock().unwrap().busy = false;
+                    return;
+                };
+                let r = corroborate::timebase::file_facts(&p);
+                me.lock().unwrap().read.insert(p, r);
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// A file's facts set by hand (tests).
+    #[cfg(test)]
+    pub fn put(&self, path: &str, f: FileFacts) {
+        self.0.lock().unwrap().read.insert(path.to_string(), f);
+    }
+}
+
+impl App {
+    /// The file source `i` opens, when it is a file.
+    pub(crate) fn source_file(&self, i: NodeId) -> Option<String> {
+        let Kind::Sourcer { input: text } = &self.nodes[i].kind else { return None };
+        match input(text) {
+            Some(Input::File(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Every file source's time and length are read as soon as it is chosen, before any Run.
+    pub(crate) fn ask_file_facts(&self, ctx: &egui::Context) {
+        for i in (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden) {
+            if let Some(p) = self.source_file(i) {
+                self.facts.ask(&p, ctx);
+            }
+        }
+    }
+
+    /// What file source `i` says about itself, once read.
+    pub(crate) fn facts_of(&self, i: NodeId) -> Option<FileFacts> {
+        self.facts.known(&self.source_file(i)?)
+    }
+
+    /// The media's length: a file's, or what was decoded once a source that is not live has ended.
+    pub(crate) fn source_length(&self, i: NodeId) -> Option<f64> {
+        if let Some(f) = self.facts_of(i) {
+            if let Some(l) = f.len.filter(|l| *l > 0.0) {
+                return Some(l);
+            }
+        }
+        let s = self.nodes[i].state.lock().unwrap();
+        (s.done && !s.live && s.audio_s > 0.0).then_some(s.audio_s)
+    }
+
+    /// SOURCER's time output for a file: what the file says, raw, with no error of its own.
+    pub(crate) fn file_time(&self, i: NodeId, clock: &str) -> Result<corroborate::data::Data, String> {
+        let f = self.facts_of(i).ok_or("still reading the file")?;
+        let utc = f.stamp.ok_or("no time in the file's metadata")?;
+        Ok(corroborate::data::Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(utc), error_s: 0.0, source: f.source })
+    }
+
+    /// SOURCER's length output.
+    pub(crate) fn length_out(&self, i: NodeId) -> Result<corroborate::data::Data, String> {
+        let l = self.source_length(i).ok_or("length not known yet")?;
+        Ok(corroborate::data::Data::Custom { kind: "length", json: format!("{{\"seconds\":{l}}}") })
     }
 }
 
@@ -511,7 +608,7 @@ impl crate::look::NodeLook for Look {
                 (Some(f), Some(_)) => crate::look::line(ui, format!("text from {}", app.nodes[f].label), DIM),
                 _ => crate::look::line(ui, kind_of(&input), DIM),
             }
-            source_info(ui, &st);
+            source_info(ui, &st, app.source_file(i).is_some().then(|| app.facts_of(i)));
             if !input.trim().is_empty() {
                 ui.add_space(4.0 * z);
                 play = play_row(ui, &st, ph, app.ph.playing && app.is_active_clock(&clock));

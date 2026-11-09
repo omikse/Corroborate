@@ -20,9 +20,8 @@
 use super::*;
 use corroborate::audio_match::{self, Clip, Placed, STAMP_CAP_S};
 use corroborate::data::{Data, Event};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::Mutex;
 use std::thread;
 
 /// How far one wired recording has got in a run.
@@ -79,7 +78,8 @@ impl App {
                 file_k += 1;
                 stages.get(file_k - 1).cloned()
             });
-            let stamp = path.as_ref().and_then(|p| self.match_ui.stamps.ask(p, ctx)).flatten();
+            let _ = ctx;
+            let stamp = self.facts_of(f).and_then(|x| x.stamp.map(|t| FileStamp { t, len: x.len, sidecar: x.source.starts_with("recording sidecar") }));
             let audio_s = self.nodes[f].state.lock().unwrap().audio_s;
             let info = self.clock_of(f).map(|c| self.ev.clocks.get(&c));
             raw.push(Raw {
@@ -102,7 +102,7 @@ impl App {
                 }
             }
         }
-        let as_end = |r: &Raw| r.stamp.as_ref().is_some_and(|s| !s.sidecar) && self.ev.stamp_end.contains(&r.uid);
+        let as_end = |_: &Raw| false;
         // Per row, once placed: where audio puts it, its stamp's difference, whether real time.
         let mut placed: Vec<Option<(f64, Option<f64>, bool)>> = vec![None; raw.len()];
         let mut spreads: Option<(usize, f64, f64)> = None;
@@ -575,56 +575,9 @@ pub struct FileStamp {
     pub sidecar: bool,
 }
 
-fn read_stamp(path: &str) -> Option<FileStamp> {
-    if let Some(a) = timebase::sidecar_anchor(path) {
-        return Some(FileStamp { t: a.utc0, len: None, sidecar: true });
-    }
-    let (t, len) = timebase::file_creation_time(path)?;
-    Some(FileStamp { t, len, sidecar: false })
-}
-
-#[derive(Default)]
-struct StampsInner {
-    read: HashMap<String, Option<FileStamp>>,
-    queue: VecDeque<String>,
-    busy: bool,
-}
-
-/// File stamps by path, read one file at a time on a thread of their own, once each.
-#[derive(Clone, Default)]
-pub struct Stamps(Arc<Mutex<StampsInner>>);
-
-impl Stamps {
-    /// What is known of `path`: None while it is being read, then the stamp or that it has none.
-    fn ask(&self, path: &str, ctx: &egui::Context) -> Option<Option<FileStamp>> {
-        let mut s = self.0.lock().unwrap();
-        if let Some(r) = s.read.get(path) {
-            return Some(r.clone());
-        }
-        if !s.queue.iter().any(|p| p == path) {
-            s.queue.push_back(path.to_string());
-        }
-        if !s.busy {
-            s.busy = true;
-            let (me, ctx) = (self.0.clone(), ctx.clone());
-            thread::spawn(move || loop {
-                let Some(p) = me.lock().unwrap().queue.pop_front() else {
-                    me.lock().unwrap().busy = false;
-                    return;
-                };
-                let r = read_stamp(&p);
-                me.lock().unwrap().read.insert(p, r);
-                ctx.request_repaint();
-            });
-        }
-        None
-    }
-}
-
 /// What the timelines keep between frames.
 #[derive(Default)]
 pub struct MatchUi {
-    stamps: Stamps,
     /// Axes moved by hand, by node (else fitted to the bars).
     pub views: HashMap<NodeId, (f64, f64)>,
     /// The tracks on screen: the wheel over one is not the canvas's.
@@ -784,9 +737,7 @@ impl crate::look::NodeLook for Look {
                 p.text(Pos2::new(track.left() + 6.0 * z, y), Align2::LEFT_CENTER, format!("stamps disagree by about {s:.1} s if all mark the start, {e:.1} s if all mark the end"), font(10.5), TEXT);
             }
         }
-        for (uids, end) in read {
-            app.set_stamp_end(&uids, end);
-        }
+        let _ = read;
         // The track: wheel zooms around the pointer, a drag pans, a double-click fits it again.
         app.match_ui.tracks.push(track);
         let resp = ui.interact(track, egui::Id::new(("match-track", i)), Sense::click_and_drag());

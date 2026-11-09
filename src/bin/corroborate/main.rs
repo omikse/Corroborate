@@ -280,8 +280,10 @@ struct App {
     sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
-    /// Audio match nodes' timelines: file stamps read, axes moved by hand, where the tracks are.
+    /// Audio match nodes' timelines: axes moved by hand, where the tracks are.
     match_ui: audio_match_node::MatchUi,
+    /// What each file source says about itself (time, length), read once, before any Run.
+    facts: sourcer_node::Facts,
     /// The project's recordings (recordings.rs), and relative paths read but not resolved yet.
     library: recordings::Library,
     rel_pending: Vec<(String, String)>,
@@ -335,6 +337,7 @@ impl App {
             canvas_origin: Pos2::ZERO,
             canvas_rect: Rect::NOTHING,
             match_ui: Default::default(),
+            facts: Default::default(),
             programs: HashMap::new(),
             bus_sent: Instant::now(),
             changes: Vec::new(),
@@ -1485,19 +1488,28 @@ fn vein(painter: &egui::Painter, pts: [Pos2; 4], col: Color32, width: f32, now: 
     }
 }
 
-/// What a source node shows under its controls: status, audio so far, and its UTC clock.
-fn source_info(ui: &mut egui::Ui, st: &Shared) {
+/// What a source node shows under its controls: status, audio so far, and its time. `file`: what
+/// a file says about itself (None inside: not read yet); None for anything but a file.
+fn source_info(ui: &mut egui::Ui, st: &Shared, file: Option<Option<timebase::FileFacts>>) {
     let s = st.lock().unwrap();
     look::line(ui, if s.status.is_empty() { "not run".to_string() } else { s.status.clone() }, if s.running { LIVE } else { TEXT });
     if s.audio_s > 0.0 {
         look::line(ui, format!("audio: {:.0} s{}", s.audio_s, if s.live { " (live)" } else { "" }), TEXT);
     }
-    match &s.anchor {
-        Some(a) => {
+    match (file, &s.anchor) {
+        (Some(None), _) => look::line(ui, "reading the file…", DIM),
+        (Some(Some(f)), _) => match f.stamp {
+            Some(t) => {
+                look::line(ui, format!("time in the file: {} UTC", timebase::fmt_utc(t)), TEXT);
+                look::line(ui, format!("from {}", f.source), DIM);
+            }
+            None => look::line(ui, "no time in the file's metadata", DIM),
+        },
+        (None, Some(a)) => {
             look::line(ui, format!("time 0 = {} UTC", timebase::fmt_utc(a.utc0)), TEXT);
             look::line(ui, format!("± {:.0} s · from {}", a.error_s, a.source), DIM);
         }
-        None => look::line(ui, "no UTC anchor yet", DIM),
+        (None, None) => look::line(ui, "no UTC anchor yet", DIM),
     }
 }
 
@@ -1534,6 +1546,7 @@ impl App {
         });
         self.sync_groups();
         let ctx = ui.ctx().clone();
+        self.ask_file_facts(&ctx);
         self.ask_ui(&ctx);
         self.sync_recordings();
         self.window_tick(&ctx);

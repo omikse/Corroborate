@@ -244,7 +244,7 @@ fn sourcer() {
     d.type_into(0, &wav.to_string_lossy());
     let ok = d.wait_until(30.0, |app| app.nodes[s].state.lock().map(|st| st.audio_s > 2.0).unwrap_or(false));
     d.shot("sourcer_file");
-    assert_eq!(shown(d.app()), ["audio", "time", "metadata"], "outputs appear with a source");
+    assert_eq!(shown(d.app()), ["audio", "time", "length", "metadata"], "outputs appear with a source");
     assert!(ok, "the file decoded");
 }
 

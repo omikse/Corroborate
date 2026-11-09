@@ -1,0 +1,14 @@
+# How long something lasts: the length of a recording, or any other duration to do arithmetic on a time with.
+id = "length"
+label = "Length"
+color = "#d98c8c"
+flow = "value"
+description = "A duration in seconds, such as how long a recording is. Wired into a Time node's row it adds to a time or takes away from it."
+
+[[field]]
+name = "seconds"
+required = true
+type = "number"
+label = "seconds"
+unit = "s"
+min = 0
