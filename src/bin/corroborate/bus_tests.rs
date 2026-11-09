@@ -96,7 +96,7 @@ fn program_on_the_bus() {
     let map = app.add(Kind::Map, Pos2::new(600.0, 40.0));
     let rec = app.add(Kind::ResultRecord { folder: String::new() }, Pos2::new(600.0, 300.0));
     app.wire(man, "value", echo, "place");
-    app.wire(echo, "place", map, "location");
+    app.wire(echo, "place", map, "location 1");
     app.wire_many(echo, "seen", rec);
     assert_eq!(app.graph.wires().len(), 3, "the module's declared ports take wires");
     assert!(app.set_setting(echo, "label", "place seen").is_ok());

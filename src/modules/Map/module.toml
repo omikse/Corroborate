@@ -6,4 +6,4 @@ role = "view"
 [[input]]
 name = "location"
 kind = "location"
-required = true
+many = true

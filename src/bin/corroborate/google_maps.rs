@@ -1,6 +1,6 @@
-//! Google's map tiles as a source of the location panel (Map Tiles API, 2D tiles): satellite
+//! Google's map tiles as a source of the Map nodes (Map Tiles API, 2D tiles): satellite
 //! photos, with or without road and place names, or the road map. Online, so it is a choice made
-//! each time: the panel starts offline at every start of the program, and nothing is sent to
+//! each time: the maps start offline at every start of the program, and nothing is sent to
 //! Google until it is switched on. While on, Google sees which part of the world is looked at.
 //!
 //! - The API key is the user's own, kept in `settings\google_maps_key.txt` next to the program,
@@ -25,7 +25,7 @@ const ENDPOINT: &str = "https://tile.googleapis.com";
 /// How long a view has to stay put before its copyright text is asked for.
 const SETTLE: Duration = Duration::from_millis(600);
 
-/// What the location panel's map shows.
+/// What the Map nodes show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapSource {
     Offline,
@@ -110,7 +110,17 @@ struct View {
 
 type Reply = Arc<Mutex<Option<(MapSource, Result<(String, f64), String>)>>>;
 
-/// The panel's Google state.
+/// One Map node's view: its copyright text and zoom limits, asked for once it has settled.
+#[derive(Default)]
+pub struct ViewAsk {
+    /// The session these answers belong to.
+    session: String,
+    view: Arc<Mutex<View>>,
+    seen: (String, Option<Instant>),
+    asked: String,
+}
+
+/// What the Map nodes share of Google.
 pub struct Google {
     pub source: MapSource,
     /// The key being typed.
@@ -127,9 +137,6 @@ pub struct Google {
     asking: bool,
     failed: bool,
     reply: Reply,
-    view: Arc<Mutex<View>>,
-    view_seen: (String, Instant),
-    view_asked: String,
 }
 
 impl Default for Google {
@@ -146,9 +153,6 @@ impl Default for Google {
             asking: false,
             failed: false,
             reply: Default::default(),
-            view: Default::default(),
-            view_seen: (String::new(), Instant::now()),
-            view_asked: String::new(),
         }
     }
 }
@@ -232,8 +236,6 @@ impl Google {
         self.source = s;
         self.again();
         self.live = None;
-        *self.view.lock().unwrap() = View::default();
-        self.view_asked.clear();
     }
 
     /// Clear a failure so the session is tried again.
@@ -319,30 +321,32 @@ impl Google {
         }
     }
 
-    /// The map's view (degrees): once it has settled, asks for its copyright text and zoom limits.
-    pub fn ask_view(&mut self, zoom: f64, north: f64, south: f64, east: f64, west: f64, ctx: &egui::Context) {
+    /// A map's view (degrees): once it has settled, asks for its copyright text and zoom limits.
+    pub fn ask_view(&mut self, ask: &mut ViewAsk, zoom: f64, north: f64, south: f64, east: f64, west: f64, ctx: &egui::Context) {
         let Some(live) = &self.live else { return };
+        if ask.session != live.session {
+            *ask = ViewAsk { session: live.session.clone(), ..Default::default() };
+        }
         let (north, south) = (north.clamp(-85.0, 85.0), south.clamp(-85.0, 85.0));
         let wrap = |x: f64| (x + 180.0).rem_euclid(360.0) - 180.0;
         let (east, west) = if east - west >= 360.0 { (180.0, -180.0) } else { (wrap(east), wrap(west)) };
         let zoom = zoom.round().clamp(0.0, 22.0) as u32;
         let view = format!("zoom={zoom}&north={north:.4}&south={south:.4}&east={east:.4}&west={west:.4}");
-        if view != self.view_seen.0 {
-            self.view_seen = (view, Instant::now());
+        if view != ask.seen.0 {
+            ask.seen = (view, Some(Instant::now()));
             ctx.request_repaint_after(SETTLE);
             return;
         }
-        if view == self.view_asked {
+        if view == ask.asked {
             return;
         }
-        if self.view_seen.1.elapsed() < SETTLE {
+        if ask.seen.1.is_some_and(|t| t.elapsed() < SETTLE) {
             ctx.request_repaint_after(SETTLE);
             return;
         }
-        let session = live.session.clone();
-        self.view_asked = view.clone();
-        let url = format!("{}/tile/v1/viewport?session={session}&key={}&{view}", self.base, self.key);
-        let (out, ctx) = (self.view.clone(), ctx.clone());
+        ask.asked = view.clone();
+        let url = format!("{}/tile/v1/viewport?session={}&key={}&{view}", self.base, live.session, self.key);
+        let (out, ctx) = (ask.view.clone(), ctx.clone());
         std::thread::spawn(move || {
             if let Ok(v) = call(&url, None).and_then(|t| parse_view(&t)) {
                 *out.lock().unwrap() = v;
@@ -351,16 +355,16 @@ impl Google {
         });
     }
 
-    /// What has to be written on the map while Google's tiles are on it.
-    pub fn credit(&self) -> Option<String> {
-        self.live.as_ref()?;
-        let c = self.view.lock().unwrap().copyright.clone();
+    /// What has to be written on a map while Google's tiles are on it.
+    pub fn credit(&self, ask: &ViewAsk) -> Option<String> {
+        let live = self.live.as_ref()?;
+        let c = if ask.session == live.session { ask.view.lock().unwrap().copyright.clone() } else { String::new() };
         Some(if c.is_empty() { "Google Maps".to_string() } else { format!("Google Maps  ·  {c}") })
     }
 
     /// How far the imagery at a place goes (the area holding it with the most detail).
-    pub fn max_zoom_at(&self, lat: f64, lon: f64) -> Option<f64> {
-        self.view.lock().unwrap().rects.iter().filter(|r| r.holds(lat, lon)).map(|r| r.max_zoom).max_by(f64::total_cmp)
+    pub fn max_zoom_at(&self, ask: &ViewAsk, lat: f64, lon: f64) -> Option<f64> {
+        ask.view.lock().unwrap().rects.iter().filter(|r| r.holds(lat, lon)).map(|r| r.max_zoom).max_by(f64::total_cmp)
     }
 }
 
@@ -432,35 +436,47 @@ mod tests {
         d.frames(3);
     }
 
-    fn on_panel(d: &mut Drive, addr: &str) {
-        d.app().places.open = true;
-        d.app().places.google.base = addr.to_string();
-        d.app().add(drive::place(48.85, 2.35, 0.0), Pos2::new(40.0, 40.0));
+    /// A place wired into a Map node, served by `addr`; the node's stable id.
+    fn on_map(d: &mut Drive, addr: &str) -> String {
+        d.app().maps.google.base = addr.to_string();
+        let v = d.app().add(drive::place(48.85, 2.35, 0.0), Pos2::new(40.0, 40.0));
+        let m = d.app().add(Kind::Map, Pos2::new(420.0, 40.0));
+        d.app().wire_many(v, "value", m);
         d.frames(3);
+        d.app().nodes[m].uid.clone()
+    }
+
+    fn credit(d: &mut Drive, uid: &str) -> Option<String> {
+        let m = &d.app().maps;
+        m.google.credit(&m.views[uid].ask)
+    }
+
+    fn memory<'a>(d: &'a mut Drive, uid: &str) -> &'a mut walkers::MapMemory {
+        &mut d.app().maps.views.get_mut(uid).unwrap().memory
     }
 
     /// Offline sends nothing. Switched on through the list: a session, tiles naming it and the
     /// key, the copyright on the map, the zoom stopped where the imagery ends. Back to offline
     /// and the requests stop.
     #[test]
-    fn google_on_the_panel() {
+    fn google_on_a_map_node() {
         let (addr, log) = fake_google();
         let mut d = Drive::new();
-        on_panel(&mut d, &addr);
-        d.app().places.google.key = KEY.into();
+        let uid = on_map(&mut d, &addr);
+        d.app().maps.google.key = KEY.into();
         d.wait(0.3);
         assert!(log.lock().unwrap().is_empty(), "offline sends nothing, key or no key");
-        assert_eq!(d.app().places.google.source, MapSource::Offline, "offline at the start");
+        assert_eq!(d.app().maps.google.source, MapSource::Offline, "offline at the start");
         d.shot("google_1_offline");
 
         open_list(&mut d, "Offline maps");
         d.click("Google satellite");
-        assert_eq!(d.app().places.google.source, MapSource::Satellite);
-        assert!(d.wait_until(10.0, |a| a.places.google.live()), "a session: {}", d.app().places.google.error);
-        let _ = d.app().places.memory.set_zoom(14.0);
+        assert_eq!(d.app().maps.google.source, MapSource::Satellite);
+        assert!(d.wait_until(10.0, |a| a.maps.google.live()), "a session: {}", d.app().maps.google.error);
+        let _ = memory(&mut d, &uid).set_zoom(14.0);
         let got = |log: &Arc<Mutex<Vec<String>>>, part: &str| log.lock().unwrap().iter().any(|l| l.contains(part));
         let end = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < end && !(got(&log, "/v1/2dtiles/") && got(&log, "/tile/v1/viewport") && d.app().places.google.credit().is_some_and(|c| c.contains("Test Sat"))) {
+        while Instant::now() < end && !(got(&log, "/v1/2dtiles/") && got(&log, "/tile/v1/viewport") && credit(&mut d, &uid).is_some_and(|c| c.contains("Test Sat"))) {
             d.h.step();
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -471,54 +487,55 @@ mod tests {
         let tile = l.iter().find(|x| x.contains("/v1/2dtiles/")).expect("a tile was asked for");
         assert!(tile.contains("session=SESSION1") && tile.contains("key=TEST-key_123"), "{tile}");
         assert!(l.iter().any(|x| x.contains("/tile/v1/viewport?session=SESSION1") && x.contains("zoom=")), "{l:?}");
-        assert_eq!(d.app().places.google.credit().unwrap(), "Google Maps  ·  Imagery 2026 Test Sat");
-        assert!(d.app().places.google.fetched.load(Ordering::Relaxed) > 0);
-        assert!(d.app().places.memory.zoom() <= 9.0, "stops where the imagery ends: {}", d.app().places.memory.zoom());
+        assert_eq!(credit(&mut d, &uid).unwrap(), "Google Maps  ·  Imagery 2026 Test Sat");
+        assert!(d.app().maps.google.fetched.load(Ordering::Relaxed) > 0);
+        let z = memory(&mut d, &uid).zoom();
+        assert!(z <= 9.0, "stops where the imagery ends: {z}");
         d.shot("google_2_satellite");
 
         open_list(&mut d, "Google satellite");
         d.click("Offline maps");
-        assert!(!d.app().places.google.live());
+        assert!(!d.app().maps.google.live());
         d.wait(0.5);
         let n = log.lock().unwrap().len();
-        d.app().places.memory.center_at(walkers::lat_lon(10.0, 10.0));
+        memory(&mut d, &uid).center_at(walkers::lat_lon(10.0, 10.0));
         d.wait(1.0);
         assert_eq!(log.lock().unwrap().len(), n, "back offline, nothing more is asked");
-        assert!(d.app().places.google.credit().is_none());
+        assert!(credit(&mut d, &uid).is_none());
         d.shot("google_3_offline_again");
     }
 
-    /// With no key the panel asks for one and sends nothing; a refused key shows the reason
+    /// With no key the node asks for one and sends nothing; a refused key shows the reason
     /// without the key, and is not tried over and over.
     #[test]
     fn google_keys() {
         let (addr, log) = fake_google();
         let mut d = Drive::new();
-        on_panel(&mut d, &addr);
-        d.app().places.google.set_source(MapSource::Road);
+        on_map(&mut d, &addr);
+        d.app().maps.google.set_source(MapSource::Road);
         d.wait(0.3);
         assert!(log.lock().unwrap().is_empty(), "no key, no request");
-        assert!(d.h.query_by_label("API key").is_some(), "the panel asks for a key");
+        assert!(d.h.query_by_label("API key").is_some(), "the node asks for a key");
         d.shot("google_4_key_field");
 
-        assert!(!d.app().places.google.use_key("not a key"));
-        assert!(!d.app().places.google.error.is_empty());
-        assert!(d.app().places.google.use_key("  BAD\n"), "spaces around a pasted key go");
-        assert!(d.wait_until(10.0, |a| !a.places.google.error.is_empty()), "refused");
+        assert!(!d.app().maps.google.use_key("not a key"));
+        assert!(!d.app().maps.google.error.is_empty());
+        assert!(d.app().maps.google.use_key("  BAD\n"), "spaces around a pasted key go");
+        assert!(d.wait_until(10.0, |a| !a.maps.google.error.is_empty()), "refused");
         d.wait(1.0);
-        let e = d.app().places.google.error.clone();
+        let e = d.app().maps.google.error.clone();
         assert_eq!(e, "API key not valid ((key))", "the reason, without the key");
         assert!(log.lock().unwrap()[0].contains(r#""mapType":"roadmap""#));
         assert_eq!(log.lock().unwrap().len(), 1, "not tried over and over");
-        assert!(!d.app().places.google.live());
+        assert!(!d.app().maps.google.live());
         d.shot("google_5_refused");
-        d.app().places.google.again();
+        d.app().maps.google.again();
         d.wait(1.0);
         assert_eq!(log.lock().unwrap().len(), 2, "Try again asks once more");
-        assert!(d.wait_until(5.0, |a| !a.places.google.error.is_empty()), "refused again");
+        assert!(d.wait_until(5.0, |a| !a.maps.google.error.is_empty()), "refused again");
         d.frames(2);
         d.click("Change key");
-        assert!(d.app().places.google.key.is_empty() && d.app().places.google.error.is_empty());
+        assert!(d.app().maps.google.key.is_empty() && d.app().maps.google.error.is_empty());
         assert!(d.h.query_by_label("API key").is_some(), "the field is back");
     }
 

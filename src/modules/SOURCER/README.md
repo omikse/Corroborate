@@ -30,7 +30,7 @@ Ports:
   `look.rhai` hides them until a source is chosen, `video` unless it has pictures (video files, web
   pages, video streams), and `location` until the file's metadata gives coordinates (ISO 6709 in
   `location`, `location-eng` or `com.apple.quicktime.location.ISO6709`: the exact point, shown on
-  the location panel). A wired output is always shown, so emptying the source box keeps wires as
+  a Map node wired to it). A wired output is always shown, so emptying the source box keeps wires as
   they are.
 - setting `source`: the path, URL or `mic:<device>` in the first box.
 

@@ -40,7 +40,6 @@ mod groups;
 mod clock_view;
 mod evidence;
 mod timeline;
-mod places;
 mod playhead;
 mod sound;
 mod project;
@@ -276,7 +275,7 @@ struct App {
     /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
     tls: timeline::TlState,
     /// The location panel (right).
-    places: places::PlacesState,
+    maps: map_node::Maps,
     ph: playhead::Playheads,
     sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
@@ -352,7 +351,7 @@ impl App {
             next_uid: 1,
             ev: Default::default(),
             tls: Default::default(),
-            places: Default::default(),
+            maps: Default::default(),
             ph: Default::default(),
             sound: Default::default(),
             library: Default::default(),
@@ -924,8 +923,10 @@ impl App {
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, BG);
+        // Over a Map node the wheel is the map's (where the maps were last frame).
+        let map_over = std::mem::take(&mut self.maps.over);
         // Scale around the pointer, keeping the item under it in place while scrolling.
-        if let Some(pointer) = bg.hover_pos() {
+        if let Some(pointer) = bg.hover_pos().filter(|p| !map_over.iter().any(|r| r.contains(*p))) {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             // Over an Audio match timeline the wheel is the timeline's.
             if scroll != 0.0 && !self.match_ui.tracks.iter().any(|r| r.contains(pointer)) {
@@ -1528,16 +1529,6 @@ impl App {
             .show(ui, |ui| {
             self.timeline_view(ui);
         });
-        // Location on the right, as time is below.
-        let open = self.places.open;
-        egui::Panel::right(if open { "places" } else { "places-closed" })
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(0, 4)))
-            .resizable(open)
-            .default_size(380.0)
-            .size_range(if open { 220.0..=900.0 } else { 0.0..=f32::INFINITY })
-            .show(ui, |ui| {
-                self.places_view(ui);
-            });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             self.graph_view(ui);
         });
@@ -1604,7 +1595,7 @@ mod canvas_timing {
         app.wire_many(man, "value", rec);
         for (k, from, out) in [(0, man, "value"), (1, inv, "location"), (2, rec, "location")] {
             let m = app.add(Kind::Map, Pos2::new(480.0 + k as f32 * 340.0, 420.0));
-            app.wire(from, out, m, "location");
+            app.wire(from, out, m, "location 1");
         }
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 780.0))),

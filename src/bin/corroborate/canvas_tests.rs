@@ -14,7 +14,7 @@ fn three() -> (Drive, NodeId, NodeId, NodeId) {
     let comb = d.app().add(Kind::CombineLocations { any: false }, Pos2::new(40.0, 330.0));
     let map = d.app().add(Kind::Map, Pos2::new(700.0, 60.0));
     d.app().wire(inv, "location", comb, "location 1");
-    d.app().wire(comb, "location", map, "location");
+    d.app().wire(comb, "location", map, "location 1");
     d.frames(3);
     (d, inv, comb, map)
 }
@@ -311,7 +311,7 @@ fn value_nodes() {
     let mut d = Drive::new();
     let place = d.app().add(crate::drive::place(48.85, 2.35, 800.0), Pos2::new(30.0, 40.0));
     let map = d.app().add(Kind::Map, Pos2::new(420.0, 40.0));
-    d.app().wire(place, "value", map, "location");
+    d.app().wire(place, "value", map, "location 1");
     let mut time = Kind::Value { ty: "time".into(), rows: corroborate::modules::value::defaults("time") };
     if let Kind::Value { rows, .. } = &mut time {
         rows[0].1 = "2026-11-04 20:06:39".into();
@@ -343,7 +343,7 @@ fn value_nodes() {
     // The place becomes a text: its fields start again and the wire to the map goes.
     d.app().set_value_type(place, "text");
     assert!(matches!(&d.app().nodes[place].kind, Kind::Value { ty, rows } if ty == "text" && rows == &[("value".to_string(), String::new())]));
-    assert_eq!(d.app().graph.feeder(map, "location"), None, "a text does not fit the map");
+    assert_eq!(d.app().graph.feeder(map, "location 1"), None, "a text does not fit the map");
     let uid = d.app().nodes[place].uid.clone();
     assert!(d.app().changes.iter().any(|c| c.node == uid && c.name == "type" && c.old == "location" && c.new == "text"), "logged");
 }
@@ -365,7 +365,7 @@ fn drag_from_a_dot_to_empty_canvas() {
     d.click("Value (Location)");
     let v = d.app().nodes.len() - 1;
     assert!(matches!(&d.app().nodes[v].kind, Kind::Value { ty, .. } if ty == "location"));
-    assert_eq!(d.app().graph.feeder(map, "location"), Some((v, "value")), "the new Value feeds the map");
+    assert_eq!(d.app().graph.feeder(map, "location 1"), Some((v, "value")), "the new Value feeds the map");
     assert!(d.app().nodes[v].pos.x < d.app().nodes[map].pos.x, "it sits left of the map");
 
     // From the Value's output onto empty canvas: Invert location takes a location.
@@ -382,7 +382,7 @@ fn drag_from_a_dot_to_empty_canvas() {
     d.frames(3);
     let (a, b) = { let x = d.app(); (x.port_place(x.canvas_origin, map, 0, false).0, x.port_place(x.canvas_origin, inv, 0, true).0) };
     drag(&mut d, a, b, PointerButton::Primary, Modifiers::NONE);
-    assert_eq!(d.app().graph.feeder(map, "location"), Some((inv, "location")), "{}", d.msg());
+    assert_eq!(d.app().graph.feeder(map, "location 1"), Some((inv, "location")), "{}", d.msg());
     d.shot("drop_menu_wired");
 }
 

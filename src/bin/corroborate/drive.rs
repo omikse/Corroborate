@@ -36,10 +36,7 @@ impl Drive {
         Self::with(App::empty())
     }
 
-    /// The location panel starts closed here: its title and list would share labels with the
-    /// canvas (Location, node names) that tests click. `places_from_metadata` opens it.
-    pub fn with(mut app: App) -> Self {
-        app.places.open = false;
+    pub fn with(app: App) -> Self {
         let gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
         let h = Harness::builder().with_size(Vec2::new(1800.0, 900.0)).wgpu().build_ui_state(
             |ui, app: &mut App| {
@@ -452,23 +449,42 @@ pub fn gps_clip() -> PathBuf {
 
 /// The location panel: a file with GPS in its metadata puts a pin at its place with nothing
 /// wired, framed by itself; an area (a typed place with a radius, through Combine) is tinted.
+/// A Map node takes everything wired into it: a file's GPS as a pin, a typed place, a combined
+/// area, and grows a port for each. The wheel over it zooms the map, not the canvas.
 #[test]
-fn places_from_metadata() {
+fn map_from_metadata() {
     let mut d = Drive::new();
-    d.app().places.open = true;
     let s = d.app().add(Kind::Sourcer { input: gps_clip().to_string_lossy().into_owned() }, Pos2::new(40.0, 40.0));
     let v = d.app().add(Kind::Value { ty: "location".into(), rows: vec![("lat".into(), "48.85".into()), ("lon".into(), "2.35".into()), ("radius_km".into(), "300".into())] }, Pos2::new(40.0, 520.0));
     let comb = d.app().add(Kind::CombineLocations { any: true }, Pos2::new(420.0, 520.0));
     d.app().wire(v, "value", comb, "location 1");
+    let map = d.app().add(Kind::Map, Pos2::new(900.0, 40.0));
+    assert_eq!(d.app().map_status(map), "no location wired");
+    d.app().wire_many(s, "location", map);
     d.frames(3);
-    assert!(d.wait_until(30.0, |app| app.places().iter().any(|p| p.node == s && p.site.is_some())), "the clip's GPS reached the panel");
-    let app = d.app();
-    let pl = app.places();
-    let p = pl.iter().find(|p| p.node == s).unwrap();
-    let site = p.site.unwrap();
+    d.app().wire_many(comb, "location", map);
+    d.frames(3);
+    assert!(d.app().graph.nodes()[map].spec.inputs.len() >= 3, "a free port is left");
+    assert_eq!(d.app().graph.feeder(map, "location 2"), Some((comb, "location")));
+    assert!(d.wait_until(30.0, |app| app.map_inputs(map).0.iter().any(|p| p.node == s && p.site.is_some())), "the clip's GPS reached the map: {}", d.app().map_status(map));
+    let (pl, errors) = d.app().map_inputs(map);
+    assert!(errors.is_empty(), "{errors:?}");
+    let site = pl[0].site.unwrap();
     assert!((site.lat - 51.5074).abs() < 1e-6 && (site.lon + 0.1278).abs() < 1e-6 && site.elevation == Some(10.0), "{site:?}");
-    assert!(pl.iter().any(|p| p.node == comb && p.site.is_none()), "the combined area is on the panel");
-    assert!(app.gives(s, "location"), "the location output shows");
+    assert!(pl[0].point && pl[1].node == comb && !pl[1].point, "the combined area is on it");
+    assert_eq!(d.app().map_status(map), "1 point, 1 area");
     d.frames(4);
-    d.shot("places");
+    d.shot("map_node");
+
+    let uid = d.app().nodes[map].uid.clone();
+    let (canvas, before) = (d.app().zoom, d.app().maps.views[&uid].memory.zoom());
+    let over = d.app().maps.over[0].center();
+    d.h.input_mut().events.push(egui::Event::PointerMoved(over));
+    d.frames(2);
+    for _ in 0..4 {
+        d.h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, 60.0), phase: egui::TouchPhase::Move, modifiers: Default::default() });
+        d.frames(2);
+    }
+    assert_eq!(d.app().zoom, canvas, "the canvas stays");
+    assert!(d.app().maps.views[&uid].memory.zoom() > before, "the map zooms");
 }

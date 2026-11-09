@@ -379,7 +379,9 @@ impl App {
 
     /// What node `i`'s script says about port `name`.
     pub(crate) fn script_port(&self, i: NodeId, name: &str) -> Option<PortLook> {
-        self.scripts.by_node.get(&i)?.ports.iter().find(|(n, _)| n == name).map(|(_, l)| l.clone())
+        // A `many` input's ports ("in 3") look like the input declared ("in").
+        let base = name.rsplit_once(' ').filter(|(_, k)| k.parse::<u32>().is_ok()).map(|(b, _)| b);
+        self.scripts.by_node.get(&i)?.ports.iter().find(|(n, _)| n == name || Some(n.as_str()) == base).map(|(_, l)| l.clone())
     }
 
     /// Draw node `i`'s body from its script. False when it has no draw() (the Rust look draws).

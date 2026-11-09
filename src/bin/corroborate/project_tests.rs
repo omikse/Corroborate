@@ -66,7 +66,7 @@ fn full_project() -> App {
     a.wire(vid, "time", plug, "time");
     a.wire(man, "value", plug, "place");
     a.wire(enf, "location", inv, "location");
-    a.wire(inv, "location", map, "location");
+    a.wire(inv, "location", map, "location 1");
     // Combine grows past its old four inputs.
     for from in [man, enf, inv, man, enf] {
         a.wire_many(from, if from == man { "value" } else { "location" }, comb);
@@ -252,13 +252,13 @@ fn new_open_save_as() {
     let mut d = Drive::new();
     let inv = d.app().add(Kind::InvertLocation, Pos2::new(40.0, 60.0));
     let map = d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
-    d.app().wire(inv, "location", map, "location");
+    d.app().wire(inv, "location", map, "location 1");
     d.frames(3);
     assert_eq!(d.app().project_name(), "untitled");
     let before = describe_project(d.app());
     d.app().save_project_as(dir.join("case one.txt"));
     assert_eq!(d.app().project_name(), "case one");
-    assert!(std::fs::read_to_string(&file).unwrap().contains("wire|0|location|1|location"));
+    assert!(std::fs::read_to_string(&file).unwrap().contains("wire|0|location|1|location 1"));
     d.app().new_project();
     d.frames(3);
     assert!(d.app().nodes.is_empty(), "New empties the canvas");

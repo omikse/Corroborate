@@ -1,33 +1,39 @@
-//! The Map node in the workbench: the world map (Robinson projection over NASA Blue Marble, with
-//! Natural Earth coastlines) drawn on the canvas (hover it for the cell under the pointer). Other nodes that show an
-//! area (Result record, ENF) draw it with `paint`. Compiled into the `corroborate` program.
+//! The Map node: everything wired into it on one map you can move and zoom, on the canvas.
+//! Wire a location in at any step of a chain to see that step; it has as many inputs as you wire.
+//!
+//! - **Map**: walkers (Web Mercator, wheel to zoom, drag to move, each node its own view). Detail
+//!   comes from `.pmtiles` files in `maps\` next to the program (offline vector tiles, README
+//!   "Maps"); without them the built-in Blue Marble image is drawn in the same projection. Google's
+//!   satellite and road maps can be switched on (google_maps.rs): one choice for all Map nodes,
+//!   online, so offline at every start and marked while on.
+//! - **Points** (a typed latitude and longitude, a file's GPS) are pins in their clock group's
+//!   colour; a click selects the node they come from. **Areas** are their 1° cells, green where
+//!   they add and red where they subtract. New inputs are framed by themselves.
+//!
+//! `paint` is the small fixed world map (Robinson over NASA Blue Marble, Natural Earth coastlines)
+//! that other nodes showing an area (Result record, ENF) draw.
 
 use super::*;
+use corroborate::data::{Data, Site};
+use walkers::{lat_lon, MapMemory, PmTiles, Projector, Tiles};
 
-/// Width of the Map node on the canvas; its map is drawn below its port.
-const NODE_W: f32 = 320.0;
+/// The map's size in the node.
+const NODE_W: f32 = 360.0;
+const MAP_H: f32 = 240.0;
 
 const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
 const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
 
-/// The Map node on the canvas: wider, with the map drawn inside it, below its port.
+/// The Map node on the canvas: wider, with the map in it.
 pub struct Look;
 
 impl crate::look::NodeLook for Look {
     fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
-        Vec2::new(NODE_W, standard.y + NODE_W / ROBINSON_ASPECT as f32 + 8.0)
+        Vec2::new(NODE_W, standard.y + MAP_H)
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
-        let r = ui.max_rect();
-        let map = Rect::from_min_size(r.min, Vec2::new(r.width(), r.width() / ROBINSON_ASPECT as f32));
-        let area = app.map_input(i).and_then(|r| r.ok()).map(|(a, _)| a);
-        let p = ui.painter().with_clip_rect(map);
-        paint(&p, map, app.earth.as_ref().map(|t| t.id()), area.as_deref());
-        // Hover: the cell under the pointer.
-        if let Some(h) = ui.ctx().pointer_hover_pos().filter(|h| map.contains(*h)) {
-            p.text(map.left_top() + Vec2::new(6.0, 4.0) * app.zoom, Align2::LEFT_TOP, cell_under(map, h), FontId::proportional(11.0 * app.zoom), TEXT);
-        }
+        app.map_body(ui, i);
     }
 }
 
@@ -39,25 +45,6 @@ pub fn area_status(a: &Area) -> String {
     } else {
         format!("{} · {:.1} % of Earth possible", if a.add { "adds" } else { "subtracts" }, al.fraction() * 100.0)
     }
-}
-
-/// The 1° cell centre nearest to `h` on a map drawn in `rect`, as "lat°, lon°".
-fn cell_under(rect: Rect, h: Pos2) -> String {
-    let at = |lat: f64, lon: f64| {
-        let (x, y) = robinson(lat, lon);
-        Pos2::new(rect.left() + x as f32 * rect.width(), rect.top() + y as f32 * rect.height())
-    };
-    let mut best = (f32::MAX, 0.0, 0.0);
-    for r in 0..ROWS {
-        for c in (0..COLS).step_by(2) {
-            let (lat, lon) = (89.5 - r as f64, c as f64 - 179.5);
-            let d = at(lat, lon).distance_sq(h);
-            if d < best.0 {
-                best = (d, lat, lon);
-            }
-        }
-    }
-    format!("{:.1}°, {:.1}°", best.1, best.2)
 }
 
 /// Natural Earth 1:110m coastlines, built into the program: lines of (lat, lon).
@@ -234,17 +221,380 @@ pub fn load_earth(ctx: &egui::Context) -> TextureHandle {
     ctx.load_texture("earth", ColorImage::from_rgba_unmultiplied([EARTH_W, EARTH_H], &px), opts)
 }
 
+/// Where map files are read from: `maps\` next to the program.
+pub fn maps_dir() -> PathBuf {
+    corroborate::home().join("maps")
+}
+
+/// One location wired into a Map node.
+pub struct Place {
+    pub node: NodeId,
+    pub name: String,
+    pub site: Option<Site>,
+    pub area: Arc<Area>,
+    /// Just a point: its area is only the 1° cell it is in, which says nothing about how sure it
+    /// is. A place typed with a radius has a site and an area, and shows both.
+    pub point: bool,
+}
+
+/// What the Map nodes share: the map files and Google, and each node's own view.
+#[derive(Default)]
+pub struct Maps {
+    /// Map files found in `maps\` (path, tiles); read once, again on ↻.
+    tiles: Option<Vec<(PathBuf, PmTiles)>>,
+    /// Google's map tiles, when switched on (google_maps.rs).
+    pub google: google_maps::Google,
+    /// By the node's stable id.
+    pub views: HashMap<String, NodeMap>,
+    /// Where the maps are on screen: the canvas leaves the wheel to them.
+    pub over: Vec<Rect>,
+}
+
+/// One Map node's view.
+#[derive(Default)]
+pub struct NodeMap {
+    pub memory: MapMemory,
+    /// What was last framed: new inputs frame again.
+    framed: Vec<[i64; 4]>,
+    pub ask: google_maps::ViewAsk,
+}
+
+/// `51.50740° N, 0.12780° W`.
+pub fn site_text(s: &Site) -> String {
+    let mut t = format!("{:.5}° {}, {:.5}° {}", s.lat.abs(), if s.lat >= 0.0 { "N" } else { "S" }, s.lon.abs(), if s.lon >= 0.0 { "E" } else { "W" });
+    if let Some(e) = s.elevation {
+        t.push_str(&format!(", {e:.0} m"));
+    }
+    t
+}
+
+/// The zoom that shows `span` degrees across; one point gets street level when there is detail to
+/// see, else as close as the world image is still sharp (4.5).
+fn frame_zoom(span_deg: f64, detail: bool) -> f64 {
+    if span_deg < 1e-4 {
+        return if detail { 15.0 } else { 4.5 };
+    }
+    (360.0 / (span_deg * 1.6)).log2().clamp(0.0, if detail { 16.0 } else { 4.5 })
+}
+
+/// South, west, north and east of what a location puts on the map, in degrees. An area that only
+/// subtracts, or the whole world (no evidence yet), has nothing to frame.
+fn extent(p: &Place) -> Option<[f64; 4]> {
+    if let (true, Some(s)) = (p.point, p.site) {
+        return Some([s.lat, s.lon, s.lat, s.lon]);
+    }
+    if !p.area.add || p.area.cells.fraction() > 0.999 {
+        return None;
+    }
+    let mut b: Option<[f64; 4]> = None;
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            if p.area.cells.get(r, c) {
+                let (top, left) = (90.0 - r as f64, c as f64 - 180.0);
+                let e = b.get_or_insert([top - 1.0, left, top, left + 1.0]);
+                *e = [e[0].min(top - 1.0), e[1].min(left), e[2].max(top), e[3].max(left + 1.0)];
+            }
+        }
+    }
+    b
+}
+
+/// At most one cell of the map.
+fn one_cell(a: &Area) -> bool {
+    (0..ROWS).flat_map(|r| (0..COLS).map(move |c| (r, c))).filter(|&(r, c)| a.cells.get(r, c)).nth(1).is_none()
+}
+
+fn plural(n: usize, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
+}
+
 impl App {
-    /// The area wired into a Map node, with how it was reached.
-    fn map_input(&self, i: NodeId) -> Option<Result<(Arc<Area>, String), String>> {
-        self.graph.feeder(i, "location").map(|(f, _)| self.area_from(f))
+    /// The locations wired into a Map node, and why those without one have none.
+    pub(crate) fn map_inputs(&self, i: NodeId) -> (Vec<Place>, Vec<String>) {
+        let (mut places, mut errors) = (Vec::new(), Vec::new());
+        for p in &self.graph.nodes()[i].spec.inputs {
+            let Some((f, out)) = self.graph.feeder(i, p.name) else { continue };
+            match self.value_from(f, out) {
+                Ok(Data::Location { area, site, .. }) => places.push(Place { node: f, name: self.node_name(f), point: site.is_some() && one_cell(&area), site, area }),
+                Ok(_) => errors.push(format!("{} gives no location", self.node_name(f))),
+                Err(e) => errors.push(e),
+            }
+        }
+        (places, errors)
     }
 
     pub(crate) fn map_status(&self, i: NodeId) -> String {
-        match self.map_input(i) {
-            Some(Ok((a, _))) => area_status(&a),
-            Some(Err(e)) => e,
-            None => "no location wired".into(),
+        let (places, errors) = self.map_inputs(i);
+        match (places.as_slice(), errors.first()) {
+            ([], None) => "no location wired".into(),
+            ([], Some(e)) => e.clone(),
+            ([p], None) => p.site.filter(|_| p.point).map_or_else(|| area_status(&p.area), |s| site_text(&s)),
+            _ => {
+                let pts = places.iter().filter(|p| p.point).count();
+                let mut t = format!("{}, {}", plural(pts, "point"), plural(places.len() - pts, "area"));
+                if !errors.is_empty() {
+                    t.push_str(&format!(" · {} without a value", errors.len()));
+                }
+                t
+            }
         }
+    }
+
+    /// Reads `maps\` the first time a map is drawn.
+    fn read_map_files(&mut self, ctx: &egui::Context) {
+        if self.maps.tiles.is_some() {
+            return;
+        }
+        let mut found = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(maps_dir()) {
+            let mut paths: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pmtiles"))).collect();
+            paths.sort();
+            for p in paths {
+                let tiles = PmTiles::with_style(&p, walkers::Style::protomaps_dark(), ctx.clone());
+                found.push((p, tiles));
+            }
+        }
+        self.maps.tiles = Some(found);
+    }
+
+    /// The line choosing what the maps show; with Google on, what that means.
+    fn map_source_bar(&mut self, ui: &mut egui::Ui, i: NodeId) {
+        use google_maps::MapSource;
+        let gap = 6.0 * self.zoom;
+        let n_maps = self.maps.tiles.as_ref().map_or(0, |t| t.len());
+        let mut rescan = false;
+        let g = &mut self.maps.google;
+        let mut pick = g.source;
+        ui.horizontal(|ui| {
+            ui.add_space(gap);
+            egui::ComboBox::from_id_salt(("map-source", i)).selected_text(pick.label()).show_ui(ui, |ui| {
+                for s in MapSource::ALL {
+                    ui.selectable_value(&mut pick, s, s.label());
+                }
+            });
+            if g.live() {
+                let n = g.fetched.load(Ordering::Relaxed);
+                ui.colored_label(WARN, format!("ONLINE · {n} tiles")).on_hover_text(
+                    "Google sees which part of the world you look at.\nThe tiles are counted since the program started; Google's free allowance is per month.\nFor viewing only: its terms forbid image analysis, extracting data and offline use.",
+                );
+                if ui.small_button("key").on_hover_text("forget the saved API key").clicked() {
+                    g.forget_key();
+                }
+            } else if g.connecting() {
+                ui.colored_label(DIM, "connecting to Google…");
+            } else if g.source == MapSource::Offline {
+                ui.colored_label(DIM, if n_maps == 0 { "world image".to_string() } else { plural(n_maps, "map file") })
+                    .on_hover_text(format!("offline map files (.pmtiles) are read from {}\nnothing is fetched from the internet; see README, Maps", maps_dir().display()));
+                rescan = ui.small_button("↻").on_hover_text("read the maps folder again").clicked();
+            }
+        });
+        g.set_source(pick);
+        if g.source != MapSource::Offline && g.key.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(gap);
+                ui.colored_label(DIM, "API key");
+                ui.add(egui::TextEdit::singleline(&mut g.draft).password(true).desired_width(170.0)).on_hover_text("your own key from console.cloud.google.com, with the Map Tiles API enabled; kept in settings\\ next to the program, asked once");
+                if ui.small_button("Use").clicked() {
+                    let typed = g.draft.clone();
+                    g.use_key(&typed);
+                }
+            });
+        }
+        if g.source != MapSource::Offline && !g.error.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(gap);
+                if ui.small_button("Try again").clicked() {
+                    g.again();
+                }
+                if !g.key.is_empty() && ui.small_button("Change key").clicked() {
+                    g.forget_key();
+                }
+                ui.add(egui::Label::new(egui::RichText::new(g.error.clone()).color(Color32::from_rgb(235, 80, 80))).truncate()).on_hover_text(g.error.clone());
+            });
+        }
+        if rescan {
+            self.maps.tiles = None;
+        }
+    }
+
+    /// The node's contents: the line choosing the map, then the map.
+    pub(crate) fn map_body(&mut self, ui: &mut egui::Ui, i: NodeId) {
+        let ctx = ui.ctx().clone();
+        self.read_map_files(&ctx);
+        self.maps.google.tick(&ctx);
+        self.map_source_bar(ui, i);
+        self.read_map_files(&ctx);
+        let (places, _) = self.map_inputs(i);
+        let colours: Vec<(Color32, String)> = {
+            let cg = self.canvas_groups();
+            places
+                .iter()
+                .map(|p| match cg.of_node[p.node].first() {
+                    Some(&g) => (cg.groups[g].color, clock_view::group_label(cg.nums[g])),
+                    None => (TEXT, String::new()),
+                })
+                .collect()
+        };
+        let online = self.maps.google.live();
+        let n_maps = self.maps.tiles.as_ref().map_or(0, |t| t.len());
+        let uid = self.nodes[i].uid.clone();
+        let earth = self.earth.as_ref().map(|t| t.id());
+        let z = self.zoom;
+        let rest = ui.available_rect_before_wrap();
+        self.maps.over.push(rest.intersect(ui.clip_rect()));
+        let Maps { tiles, google, views, .. } = &mut self.maps;
+        let view = views.entry(uid).or_default();
+
+        // Frame new inputs (one arriving, or changing).
+        let boxes: Vec<[f64; 4]> = places.iter().filter_map(extent).collect();
+        let key: Vec<[i64; 4]> = boxes.iter().map(|b| b.map(|x| (x * 1e5) as i64)).collect();
+        if !boxes.is_empty() && key != view.framed {
+            let [s, w, n, e] = boxes.iter().fold([90.0f64, 180.0, -90.0, -180.0], |a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]);
+            view.memory.center_at(lat_lon((s + n) / 2.0, (w + e) / 2.0));
+            let _ = view.memory.set_zoom(frame_zoom((n - s).max(e - w), n_maps > 0 || online));
+            view.framed = key;
+        }
+
+        let mut clicked_pin: Option<NodeId> = None;
+        let credit = google.credit(&view.ask);
+        // The view on screen: north, south, east, west.
+        let mut seen: Option<(f64, f64, f64, f64)> = None;
+        let tiles = tiles.as_mut().expect("read above");
+        let (base, layers): (Option<&mut dyn Tiles>, &mut [(PathBuf, PmTiles)]) = match (google.tiles_mut(), tiles.split_first_mut()) {
+            (Some(g), _) => (Some(g as &mut dyn Tiles), &mut []),
+            (None, Some((first, rest))) => (Some(&mut first.1 as &mut dyn Tiles), rest),
+            (None, None) => (None, &mut []),
+        };
+        let detail = base.is_some();
+        ui.allocate_ui(rest.size(), |ui| {
+            let mut map = walkers::Map::new(base, &mut view.memory, lat_lon(20.0, 0.0)).zoom_with_ctrl(false);
+            for l in layers.iter_mut() {
+                map = map.with_layer(&mut l.1, 1.0);
+            }
+            map.show(ui, |ui, resp, proj, _mem| {
+                let p = ui.painter().with_clip_rect(resp.rect.intersect(ui.clip_rect()));
+                if !detail {
+                    p.rect_filled(resp.rect, 0.0, BG);
+                    if let Some(tex) = earth {
+                        paint_earth(&p, proj, tex);
+                    }
+                }
+                for pl in places.iter().filter(|pl| !pl.point) {
+                    paint_area(&p, proj, &pl.area);
+                }
+                for (pl, (color, group)) in places.iter().zip(&colours) {
+                    let Some(s) = pl.site else { continue };
+                    let at = proj.project(lat_lon(s.lat, s.lon)).to_pos2();
+                    p.circle_filled(at, 6.0 * z, *color);
+                    p.circle_stroke(at, 6.0 * z, Stroke::new(1.5 * z, Color32::WHITE));
+                    p.text(at + Vec2::new(10.0 * z, 0.0), Align2::LEFT_CENTER, format!("{group} {}", pl.name).trim(), FontId::proportional(11.5 * z), Color32::WHITE);
+                    if resp.clicked() && resp.interact_pointer_pos().is_some_and(|h| h.distance(at) < 10.0 * z) {
+                        clicked_pin = Some(pl.node);
+                    }
+                }
+                if places.is_empty() {
+                    p.text(resp.rect.center(), Align2::CENTER_CENTER, "wire in a location", FontId::proportional(11.5 * z), TEXT);
+                }
+                if let Some(h) = resp.hover_pos() {
+                    let g = proj.unproject(h.to_vec2());
+                    p.text(resp.rect.left_top() + Vec2::new(6.0, 4.0) * z, Align2::LEFT_TOP, site_text(&Site { lat: g.y(), lon: g.x(), elevation: None }), FontId::monospace(10.5 * z), TEXT);
+                }
+                let (nw, se) = (proj.unproject(resp.rect.left_top().to_vec2()), proj.unproject(resp.rect.right_bottom().to_vec2()));
+                seen = Some((nw.y(), se.y(), se.x(), nw.x()));
+                // Google's terms: its name and the copyright text, on the map, in full.
+                if let Some(c) = &credit {
+                    let text = p.layout(c.clone(), FontId::proportional(10.5 * z), Color32::WHITE, resp.rect.width() - 12.0 * z);
+                    let at = resp.rect.right_bottom() - text.size() - Vec2::splat(6.0 * z);
+                    p.rect_filled(Rect::from_min_size(at, text.size()).expand(3.0 * z), 2.0, Color32::from_black_alpha(170));
+                    p.galley(at, text, Color32::WHITE);
+                }
+            });
+        });
+        if let (true, Some((n, s, e, w))) = (online, seen) {
+            google.ask_view(&mut view.ask, view.memory.zoom(), n, s, e, w, &ctx);
+            // No closer than the imagery here goes (past it the tiles are blank).
+            if let Some(most) = google.max_zoom_at(&view.ask, (n + s) / 2.0, (e + w) / 2.0).filter(|m| view.memory.zoom() > *m) {
+                let _ = view.memory.set_zoom(most);
+            }
+        }
+        if let Some(n) = clicked_pin {
+            self.pick_only(n);
+        }
+    }
+}
+
+/// Clamp to where Web Mercator ends.
+fn merc_lat(lat: f64) -> f64 {
+    lat.clamp(-85.05, 85.05)
+}
+
+/// The Blue Marble image (plate carrée) warped onto the map's projection in 3° patches.
+fn paint_earth(p: &egui::Painter, proj: &Projector, tex: egui::TextureId) {
+    const STEP: f64 = 3.0;
+    let (rows, cols) = ((170.0 / STEP) as usize, (360.0 / STEP) as usize);
+    let mut mesh = egui::epaint::Mesh::with_texture(tex);
+    for r in 0..=rows {
+        let lat = merc_lat(85.0 - r as f64 * STEP);
+        for c in 0..=cols {
+            let lon = -180.0 + c as f64 * STEP;
+            let pos = proj.project(lat_lon(lat, lon)).to_pos2();
+            let uv = Pos2::new(((lon + 180.0) / 360.0) as f32, ((90.0 - lat) / 180.0) as f32);
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
+        }
+    }
+    let at = |r: usize, c: usize| (r * (cols + 1) + c) as u32;
+    for r in 0..rows {
+        for c in 0..cols {
+            mesh.add_triangle(at(r, c), at(r, c + 1), at(r + 1, c + 1));
+            mesh.add_triangle(at(r, c), at(r + 1, c + 1), at(r + 1, c));
+        }
+    }
+    p.add(egui::Shape::mesh(mesh));
+}
+
+/// An area's 1° cells, merged into runs per row: green where it adds, red where it subtracts.
+/// A whole-world area (no evidence yet) is not drawn: it says nothing.
+fn paint_area(p: &egui::Painter, proj: &Projector, area: &Area) {
+    if area.add && area.cells.fraction() > 0.999 {
+        return;
+    }
+    let tint = if area.add { Color32::from_rgba_unmultiplied(60, 200, 90, 70) } else { Color32::from_rgba_unmultiplied(220, 60, 60, 70) };
+    let mut mesh = egui::epaint::Mesh::default();
+    for r in 0..ROWS {
+        let (top, bot) = (merc_lat(90.0 - r as f64), merc_lat(89.0 - r as f64));
+        if top <= bot {
+            continue;
+        }
+        let mut c = 0;
+        while c < COLS {
+            if !area.cells.get(r, c) {
+                c += 1;
+                continue;
+            }
+            let a = c;
+            while c + 1 < COLS && area.cells.get(r, c + 1) {
+                c += 1;
+            }
+            let (l, rt) = (a as f64 - 180.0, c as f64 - 179.0);
+            let tl = proj.project(lat_lon(top, l)).to_pos2();
+            let br = proj.project(lat_lon(bot, rt)).to_pos2();
+            mesh.add_colored_rect(Rect::from_two_pos(tl, br), tint);
+            c += 1;
+        }
+    }
+    p.add(egui::Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_lines() {
+        assert_eq!(site_text(&Site { lat: 51.5074, lon: -0.1278, elevation: Some(10.0) }), "51.50740° N, 0.12780° W, 10 m");
+        assert_eq!(site_text(&Site { lat: -33.8688, lon: 151.2093, elevation: None }), "33.86880° S, 151.20930° E");
+        assert_eq!(frame_zoom(0.0, true), 15.0);
+        assert_eq!(frame_zoom(0.0, false), 4.5);
+        assert!(frame_zoom(10.0, true) < 6.0);
     }
 }

@@ -29,7 +29,7 @@ fn scene() -> Scene {
     d.app().sync_many_ports();
     d.app().wire(b, "value", comb, "location 2");
     d.app().sync_many_ports();
-    d.app().wire(comb, "location", map, "location");
+    d.app().wire(comb, "location", map, "location 1");
     d.frames(3);
     Scene { d, a, b, inv, comb, map }
 }
@@ -86,7 +86,7 @@ fn group_open_wire_and_ungroup() {
     let names = |ps: &[corroborate::core::Port]| ps.iter().map(|p| p.name).collect::<Vec<_>>();
     assert_eq!(names(&spec.inputs), ["location", "location 2"], "one input per wire coming in");
     assert_eq!(names(&spec.outputs), ["location"], "one output per wire going out");
-    assert_eq!(lines(app), ["Group.location > Map.location", "Value.value > Group.location", "Value.value > Group.location 2"]);
+    assert_eq!(lines(app), ["Group.location > Map.location 1", "Value.value > Group.location", "Value.value > Group.location 2"]);
     assert!(app.on_canvas(g) && !app.on_canvas(inv), "outside, the group stands for its nodes");
     d.shot("groups_2_grouped");
 
@@ -259,7 +259,7 @@ fn nested_groups() {
     d.shot("groups_10_two_deep");
     d.click("Top");
     assert_eq!(d.app().view, None);
-    assert_eq!(lines(d.app()), ["Group.location > Map.location", "Value.value > Group.location", "Value.value > Group.location 2"]);
+    assert_eq!(lines(d.app()), ["Group.location > Map.location 1", "Value.value > Group.location", "Value.value > Group.location 2"]);
     // Saved and opened again, the same.
     let text = d.app().project_text();
     let mut e = Drive::new();
@@ -310,7 +310,6 @@ fn groups_on_a_big_project() {
     std::fs::copy(&made, &file).unwrap();
     let mut d = Drive::new();
     d.app().open_project(file.clone());
-    d.app().places.open = false;
     d.frames(3);
     let before = wires(d.app());
     key(&mut d, Modifiers::COMMAND, Key::A);

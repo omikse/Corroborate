@@ -105,6 +105,7 @@ impl Kind {
             Kind::ResultRecord { .. } => result_record::manifest().many_names(),
             Kind::CombineLocations { .. } => combine_locations::manifest().many_names(),
             Kind::AudioMatch => audio_match::manifest().many_names(),
+            Kind::Map => map::manifest().many_names(),
             Kind::Module { m, .. } => m.many_names(),
             _ => Vec::new(),
         }

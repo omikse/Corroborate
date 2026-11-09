@@ -916,7 +916,6 @@ fn audio_match_timeline() {
     std::fs::copy(&made, &file).unwrap();
     let mut d = crate::drive::Drive::new();
     d.app().open_project(file);
-    d.app().places.open = false;
     d.frames(3);
     let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
     let ctx = d.h.ctx.clone();
@@ -1034,7 +1033,6 @@ fn timeline_on_a_big_project() {
     std::fs::copy(&made, &file).unwrap();
     let mut d = crate::drive::Drive::new();
     d.app().open_project(file);
-    d.app().places.open = false;
     d.frames(3);
     assert!(d.app().nodes.iter().filter(|n| n.kind.is_source()).all(|n| n.collapsed), "the sources start collapsed");
     let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
@@ -1141,7 +1139,6 @@ fn timeline_on_a_big_project() {
 #[test]
 fn timeline_rows_scroll() {
     let mut app = App::empty();
-    app.places.open = false;
     app.tls.extra = (0..40).map(|k| (0usize, corroborate::data::Event { clock: format!("c{k:02}"), t_start: 0.0, t_end: 60.0, label: "x".into(), ..Default::default() })).collect();
     let mut d = crate::drive::Drive::with(app);
     d.frames(3);
