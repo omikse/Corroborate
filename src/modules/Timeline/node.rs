@@ -2,7 +2,7 @@
 //! playhead. Compiled into the `corroborate` program.
 
 use super::*;
-use crate::audio_match_node::{fit_axis, tick_step, tick_text};
+use crate::audio_match_node::{fit_axis, row_slider, scale_button, tick_step, tick_text};
 use corroborate::data::Data;
 use corroborate::module_manifest::{PortLabel, PortLook, Side};
 
@@ -142,10 +142,12 @@ impl crate::look::NodeLook for Look {
             ui.put(Rect::from_min_size(Pos2::new(body.left() + x * z, y - 10.0 * z), Vec2::new(w * z, 20.0 * z)), b).clicked()
         };
         let playing = app.ph.playing;
-        let (play, do_fit, toggle_always, toggle_sort) = (button(ui, 4.0, 44.0, if playing { "Pause" } else { "Play" }, playing), button(ui, 52.0, 54.0, "Fit all", false), button(ui, 110.0, 72.0, "Always fit", always), button(ui, 186.0, 90.0, "Sort by time", by_time));
-        p.text(Pos2::new(body.left() + 290.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
+        let play = button(ui, 4.0, 44.0, if playing { "Pause" } else { "Play" }, playing);
+        let (do_fit, toggle_always) = scale_button(ui, i, Rect::from_min_size(Pos2::new(body.left() + 52.0 * z, y - 10.0 * z), Vec2::new(98.0 * z, 20.0 * z)), z, always);
+        let toggle_sort = button(ui, 154.0, 90.0, "Sort by time", by_time);
+        p.text(Pos2::new(body.left() + 258.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
         let mut new_rh = rh;
-        ui.put(Rect::from_min_size(Pos2::new(body.left() + 352.0 * z, y - 9.0 * z), Vec2::new(110.0 * z, 18.0 * z)), egui::Slider::new(&mut new_rh, ROW_MIN..=ROW_MAX).show_value(false));
+        row_slider(ui, Pos2::new(body.left() + 320.0 * z, y), z, &mut new_rh, ROW_MIN..=ROW_MAX);
         if let Some(u) = app.ph.utc {
             p.text(Pos2::new(body.right() - 6.0 * z, y), Align2::RIGHT_CENTER, format!("{} UTC", timebase::fmt_utc(u)), mono(11.5), PLAYHEAD);
         }
@@ -229,7 +231,7 @@ impl crate::look::NodeLook for Look {
                 app.set_utc_playhead(v0 + ((pos.x - track.left()) / track.width()) as f64 * span);
             }
         }
-        if resp.double_clicked() || do_fit {
+        if (resp.double_clicked() || do_fit) && !always {
             app.match_ui.views.insert(i, fit);
         }
         if toggle_always {

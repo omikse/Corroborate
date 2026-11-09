@@ -73,7 +73,7 @@ Canvas keys and mouse:
 | Play, pause | Space (or Play on a SOURCER or a Timeline node): the selected node's playhead runs and its sound plays |
 | Playhead | click or drag in SOURCER's waveform, or click in a Timeline node |
 | Same clock | select sources, right-click: Same clock (Separate clocks undoes it) |
-| Audio match's rows | one row per recording: blue is where its time input puts it, amber where audio puts it after the match. Drag an amber bar to move an unanchored group (it changes no data). The anchor button on a row's time anchors its synced group there: the group's times then come out of the yellow outputs. Wheel zooms, drag pans, double-click fits |
+| Audio match's rows | one row per recording: blue is where its time input puts it, amber where audio puts it after the match. Drag an amber bar to move an unanchored group (it changes no data). The anchor button on a row's time anchors its synced group there: the group's times then come out of the yellow outputs. Wheel zooms, drag pans, double-click scales to all. Scale to all fits the axis to every bar; the circle inside it makes that live, so the axis follows the bars until you zoom or pan |
 | Time node | the shaded row's + adds a row; fill in only the boxes you need and pick - or +; wire a length into a row to add or take away a recording's length |
 | Group | Ctrl+G: the selected nodes into one group node (ports for the wires in and out); Tab or double-click opens it, Tab or the path at the top left goes back out; Alt+G ungroups |
 | Group ports | inside a group, wire a node to the empty `+` of Group Input or Group Output; right-click a Group Output port to remove it |

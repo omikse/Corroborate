@@ -516,3 +516,62 @@ fn clean_up_lays_out_the_nodes_by_their_wires() {
     let back: Vec<Pos2> = app.nodes.iter().map(|n| n.pos).collect();
     assert_eq!(back, before, "one Ctrl+Z puts them back");
 }
+
+/// Audio match's top bar and thin rows: Scale to all fits once, its circle makes it live; the row
+/// height slider is one size at any canvas zoom; the thinnest row is its name with both ports
+/// still apart.
+#[test]
+fn audio_match_scale_slider_and_thin_rows() {
+    use corroborate::timebase::FileFacts;
+    use egui::accesskit::Role;
+    let mut d = Drive::new();
+    d.app().facts.put("a.mp4", FileFacts { stamp: Some(1000.0), len: Some(100.0), source: "the file's creation_time".into() });
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: "a.mp4".into() }, Pos2::new(1400.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(40.0, 120.0));
+    app.wire(s, "audio", m, "audio 1");
+    app.sync_many_ports();
+    app.wire(s, "time", m, "time 1");
+    app.sync_many_ports();
+    d.frames(3);
+    d.shot("am_scale_default");
+    for gone in ["Fit all", "Always fit"] {
+        assert_eq!(d.h.query_all_by_label(gone).count(), 0, "{gone}");
+    }
+
+    assert!(!d.app().match_ui.views.contains_key(&m), "live at first");
+    d.click("Scale to all");
+    assert!(!d.app().match_ui.views.contains_key(&m), "pressing it while live leaves it live");
+    d.click("live");
+    let held = d.app().match_ui.views.get(&m).copied().expect("the circle stops live");
+    d.app().match_ui.views.insert(m, (held.0 - 500.0, held.1 + 900.0));
+    d.frames(2);
+    d.click("Scale to all");
+    let fitted = d.app().match_ui.views.get(&m).copied().expect("a fit once, not live");
+    assert!(fitted.1 - fitted.0 < held.1 - held.0 + 1.0, "{fitted:?}");
+    d.click("live");
+    assert!(!d.app().match_ui.views.contains_key(&m), "the circle turns live on");
+
+    let mut sizes = Vec::new();
+    for z in [0.5, 1.0, 1.6] {
+        d.app().zoom = z;
+        d.frames(3);
+        d.shot(&format!("am_slider_z{z}"));
+        let r = d.h.get_by_role(Role::Slider).rect();
+        sizes.push((r.width(), r.height()));
+    }
+    for s in &sizes {
+        assert!((s.0 - sizes[0].0).abs() < 0.5 && (s.1 - sizes[0].1).abs() < 0.5, "the same at every zoom: {sizes:?}");
+    }
+
+    d.app().zoom = 1.0;
+    if let Kind::AudioMatch { rows } = &mut d.app().nodes[m].kind {
+        rows.push(("row height".into(), "1".into()));
+    }
+    d.frames(4);
+    d.shot("am_thinnest_row");
+    let app = d.app();
+    let o = app.canvas_origin;
+    let (a, t) = (app.port_place(o, m, 0, false).0.y, app.port_place(o, m, 1, false).0.y);
+    assert!(t - a >= 10.0, "the ports of a thin row stay apart: {a} {t}");
+}

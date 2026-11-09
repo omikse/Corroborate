@@ -110,7 +110,7 @@ and the person corrects it in a Time node.
 | Before the run | Metadata start time, or "no time metadata" |
 | During the run | Progress |
 | After the run | Seconds off, green at 0 s, fully red at 30 s, going black into years |
-| Offset within a margin of the row's own length | The seconds off, plus a note: about its length. It changes no data |
+| Offset within a margin of the row's own length | The seconds off, plus a mirror icon that explains itself on hover. It changes no data |
 | Anchor's own row | The anchor icon |
 | No metadata and no links | "no links found", and the whole row is grey |
 
@@ -140,8 +140,9 @@ to show what the match is doing, as part of a separate view of the calculation.
 
 ### View
 
-Fit all and Always fit stay. Reset is removed. Wheel zooms and drag pans, and either one turns
-Always fit off. Fit all includes every bar, even one years away.
+One button, Scale to all, fits the axis to every bar, even one years away. The circle inside it
+makes it live, so the axis keeps following the bars. Wheel zooms and drag pans, and either one
+turns live off. Reset is removed. At the minimum row height a row is only its file name.
 
 ## Clock solve
 

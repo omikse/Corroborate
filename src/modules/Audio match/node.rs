@@ -797,7 +797,7 @@ pub fn json(app: &App, i: NodeId) -> String {
 /// What the rows keep between frames.
 #[derive(Default)]
 pub struct MatchUi {
-    /// Axes moved by hand, by node. None: Always fit, the axis follows the bars.
+    /// Axes moved by hand, by node. None: Scale to all is live, the axis follows the bars.
     pub views: HashMap<NodeId, (f64, f64)>,
     /// The tracks on screen: the wheel over one is not the canvas's.
     pub tracks: Vec<Rect>,
@@ -827,13 +827,16 @@ const LEFT_W: f32 = 170.0;
 const STATUS_W: f32 = 116.0;
 const RIGHT_W: f32 = 116.0;
 const ROW_DEFAULT: f32 = 64.0;
-const ROW_MIN: f32 = 20.0;
+/// The thinnest row is its file name and nothing else.
+const ROW_MIN: f32 = STRIP_H + 2.0;
 const ROW_MAX: f32 = 96.0;
-/// Rows at least this tall show the file name over their ports.
-const STRIP_FROM: f32 = 64.0;
 const STRIP_H: f32 = 20.0;
-/// Rows at least this tall write "audio" and "time" on their ports.
-const WORDS_FROM: f32 = 40.0;
+/// With ports at least this tall, "audio" and "time" are written on them.
+const WORDS_FROM: f32 = 14.0;
+/// With ports shorter than this, the anchor button moves up beside the file name.
+const ANCHOR_FROM: f32 = 10.0;
+/// How far the node's edge is outside the part a look draws in.
+const EDGE: f32 = 6.0;
 
 const AMBER: Color32 = Color32::from_rgb(233, 168, 76);
 const BLUE: Color32 = Color32::from_rgb(125, 180, 230);
@@ -845,6 +848,8 @@ const TRACK: Color32 = Color32::from_rgb(29, 32, 37);
 const INK: Color32 = Color32::from_rgb(16, 18, 20);
 const SEAM: Color32 = Color32::from_rgb(16, 18, 21);
 const GRID: Color32 = Color32::from_rgb(49, 53, 60);
+/// How solid the blue and amber bars are.
+const BAR_ALPHA: f32 = 0.6;
 const RED: Color32 = Color32::from_rgb(224, 82, 79);
 /// Group borders, in the order of their numbers.
 const GROUP_COLORS: [Color32; 8] = [
@@ -875,8 +880,52 @@ struct RowGeom {
 }
 
 fn geom(rh: f32) -> RowGeom {
-    let strip = if rh >= STRIP_FROM { STRIP_H } else { 0.0 };
-    RowGeom { strip, half: (rh - 2.0 - strip) / 2.0 }
+    RowGeom { strip: STRIP_H, half: ((rh - 2.0 - STRIP_H) / 2.0).max(0.0) }
+}
+
+/// "Scale to all": a click fits the axis to every bar. The circle inside it turns live on and off:
+/// while live, the axis follows the bars. Returns (the button was pressed, the circle was).
+pub(crate) fn scale_button(ui: &mut egui::Ui, id: NodeId, rect: Rect, z: f32, live: bool) -> (bool, bool) {
+    const LABEL: &str = "Scale to all";
+    let centre = Pos2::new(rect.right() - 11.0 * z, rect.center().y);
+    let dot = Rect::from_center_size(centre, Vec2::splat(18.0 * z));
+    let main = ui.interact(rect, egui::Id::new(("scale-to-all", id)), Sense::click());
+    main.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, LABEL));
+    let circle = ui.interact(dot, egui::Id::new(("scale-live", id)), Sense::click());
+    circle.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, live, "live"));
+    let fill = if live {
+        Color32::from_rgb(81, 88, 98)
+    } else if main.hovered() {
+        Color32::from_rgb(70, 76, 85)
+    } else {
+        Color32::from_rgb(58, 63, 71)
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, ui.visuals().widgets.inactive.corner_radius, fill);
+    p.text(Pos2::new(rect.left() + 8.0 * z, rect.center().y), Align2::LEFT_CENTER, LABEL, FontId::proportional(11.5 * z), TEXT);
+    let r = 4.5 * z;
+    if live {
+        p.circle_filled(centre, r, TEXT);
+    } else {
+        p.circle_stroke(centre, r, Stroke::new(1.2 * z, if circle.hovered() { TEXT } else { DIM }));
+    }
+    let pressed = (main.clicked(), circle.clicked());
+    main.on_hover_text("scale the time axis to show every bar");
+    circle.on_hover_text(if live { "live: the axis follows the bars. Click to stop" } else { "make it live: the axis follows the bars" });
+    pressed
+}
+
+/// The row height slider: one size on screen, whatever the canvas zoom. `at`: the middle of its
+/// left end.
+pub(crate) fn row_slider(ui: &mut egui::Ui, at: Pos2, z: f32, value: &mut f32, range: std::ops::RangeInclusive<f32>) {
+    const W: f32 = 110.0;
+    const H: f32 = 18.0;
+    let rect = Rect::from_min_size(at - Vec2::new(0.0, H * 0.5), Vec2::new(W, H));
+    let mut s = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("row-height"));
+    // The node's style is scaled by the zoom: undone here.
+    crate::look::scale(&mut s, 1.0 / z);
+    s.spacing_mut().slider_width = W;
+    s.add(egui::Slider::new(value, range).show_value(false));
 }
 
 fn place_y(slot: usize, rh: f32) -> f32 {
@@ -1039,6 +1088,16 @@ fn anchor_icon(p: &egui::Painter, r: Rect, col: Color32) {
     p.add(egui::Shape::line(arc, st));
 }
 
+/// A mirror, drawn in `r`: a line with a shape and its reflection. It marks a time that may be the
+/// recording's end read as its start.
+fn mirror_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let at = |x: f32, y: f32| r.min + Vec2::new(x / 16.0 * r.width(), y / 16.0 * r.height());
+    let st = Stroke::new((r.width() * 0.09).max(1.0), col);
+    p.line_segment([at(8.0, 1.0), at(8.0, 15.0)], st);
+    p.add(egui::Shape::convex_polygon(vec![at(6.0, 3.5), at(6.0, 12.5), at(1.0, 12.5)], col, Stroke::NONE));
+    p.add(egui::Shape::closed_line(vec![at(10.0, 3.5), at(15.0, 12.5), at(10.0, 12.5)], st));
+}
+
 fn shorten(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
@@ -1097,18 +1156,21 @@ impl crate::look::NodeLook for Look {
         let row = |n: usize| {
             let k = n.saturating_sub(1);
             let slot = app.match_ui.slots.get(&i).and_then(|s| s.get(k)).copied().unwrap_or(k);
-            place_y(slot, rh) + 2.0 + g.strip
+            place_y(slot, rh) + 2.0
         };
+        // Thin rows have no room below the name: the dots spread over the whole row.
+        let lead = g.strip * (g.half / 12.0).min(1.0);
+        let room = rh - 2.0 - lead;
         let dot = (g.half * 0.42).clamp(2.5, 5.0);
         let at = |side: Side, y: f32| Some(PortLook { side: Some(side), at: Some(y), label: Some(PortLabel::Hidden), dot_size: Some(dot), ..Default::default() });
         if let Some(n) = number("audio ") {
-            return at(Side::Left, row(n) + g.half * 0.5);
+            return at(Side::Left, row(n) + lead + room * 0.25);
         }
         if let Some(n) = number("time ") {
-            return at(Side::Left, row(n) + g.half * 1.5);
+            return at(Side::Left, row(n) + lead + room * 0.75);
         }
         if let Some(n) = number("synced ") {
-            return at(Side::Right, row(n) + g.half);
+            return at(Side::Right, row(n) + lead + room * 0.5);
         }
         // The other outputs: along the bottom edge, at the right.
         let fixed = ["links", "quality", "clock drift", "same recording", "speed change", "gaps"];
@@ -1127,6 +1189,9 @@ impl crate::look::NodeLook for Look {
         let font = |s: f32| FontId::proportional(s * z);
         let mono = |s: f32| FontId::monospace(s * z);
         let p = ui.painter().with_clip_rect(ui.clip_rect());
+        // The rows' colours run out to the node's edges, past the part a look draws in.
+        let (edge_l, edge_r) = (body.left() - EDGE * z, body.right() + EDGE * z);
+        let wide = ui.painter().with_clip_rect(ui.clip_rect().expand2(Vec2::new(EDGE * z, 0.0)).intersect(app.canvas_rect));
 
         // Draw order: by group when asked and known, the free row always last.
         let mut order: Vec<usize> = (0..v.rows.len()).collect();
@@ -1164,24 +1229,19 @@ impl crate::look::NodeLook for Look {
         // The bar along the top.
         let always = !app.match_ui.views.contains_key(&i);
         let by = by_group(&app.nodes[i].kind);
-        let (mut do_fit, mut toggle_always, mut toggle_by) = (false, false, false);
+        let mut toggle_by = false;
         let mut new_rh = rh;
         let y = body.top() + BAR_H * 0.5 * z;
         let button = |ui: &mut egui::Ui, x: f32, w: f32, text: &str, on: bool| {
             let b = egui::Button::new(egui::RichText::new(text).size(11.5 * z)).fill(if on { Color32::from_rgb(81, 88, 98) } else { Color32::from_rgb(58, 63, 71) });
             ui.put(Rect::from_min_size(Pos2::new(x, y - 10.0 * z), Vec2::new(w * z, 20.0 * z)), b).clicked()
         };
-        if button(ui, x0 + 4.0 * z, 54.0, "Fit all", false) {
-            do_fit = true;
-        }
-        if button(ui, x0 + 62.0 * z, 72.0, "Always fit", always) {
-            toggle_always = true;
-        }
-        if button(ui, x0 + 138.0 * z, 96.0, "Order by group", by) {
+        let (mut do_fit, toggle_always) = scale_button(ui, i, Rect::from_min_size(Pos2::new(x0 + 4.0 * z, y - 10.0 * z), Vec2::new(98.0 * z, 20.0 * z)), z, always);
+        if button(ui, x0 + 106.0 * z, 96.0, "Order by group", by) {
             toggle_by = true;
         }
-        p.text(Pos2::new(x0 + 250.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
-        ui.put(Rect::from_min_size(Pos2::new(x0 + 312.0 * z, y - 9.0 * z), Vec2::new(120.0 * z, 18.0 * z)), egui::Slider::new(&mut new_rh, ROW_MIN..=ROW_MAX).show_value(false));
+        p.text(Pos2::new(x0 + 216.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
+        row_slider(ui, Pos2::new(x0 + 278.0 * z, y), z, &mut new_rh, ROW_MIN..=ROW_MAX);
         let scale = if span < 86400.0 { format!("{} to {}", timebase::fmt_utc_clock(v0), timebase::fmt_utc_clock(v1)) } else { format!("{} to {}", &timebase::fmt_utc(v0)[..10], &timebase::fmt_utc(v1)[..10]) };
         if v.real {
             p.text(Pos2::new(body.right() - 8.0 * z, y), Align2::RIGHT_CENTER, scale, mono(11.5), DIM);
@@ -1211,37 +1271,41 @@ impl crate::look::NodeLook for Look {
             let top = row_top(slot);
             let (status, dead) = cell(&v, k);
             let fade = |c: Color32| if dead { c.gamma_multiply(0.45) } else { c };
-            p.rect_filled(Rect::from_min_max(Pos2::new(body.left(), top), Pos2::new(body.right(), top + 2.0 * z)), 0.0, SEAM);
+            wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, top), Pos2::new(edge_r, top + 2.0 * z)), 0.0, SEAM);
             let inner = top + 2.0 * z;
             let strip_h = g.strip * z;
             let half = g.half * z;
             let left_col = Rect::from_min_max(Pos2::new(x0, inner), Pos2::new(track.left(), top + rh * z));
+            let words = g.half >= WORDS_FROM;
             if !r.wired {
                 // The free row waits for a wire.
                 let d = alpha(DIM, 0.8);
-                p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 0.5), Align2::LEFT_CENTER, format!("audio {}", r.n), font(12.0), d);
-                p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 1.5), Align2::LEFT_CENTER, format!("time {}", r.n), font(12.0), d);
+                if words {
+                    p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 0.5), Align2::LEFT_CENTER, format!("audio {}", r.n), font(12.0), d);
+                    p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 1.5), Align2::LEFT_CENTER, format!("time {}", r.n), font(12.0), d);
+                } else {
+                    p.text(Pos2::new(x0 + 14.0 * z, left_col.center().y), Align2::LEFT_CENTER, format!("audio {0}, time {0}", r.n), font(11.5), d);
+                }
                 continue;
             }
-            if strip_h > 0.0 {
-                p.rect_filled(Rect::from_min_size(left_col.min, Vec2::new(left_col.width(), strip_h)), 0.0, fade(STRIP));
-                p.text(left_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 25), mono(11.5), fade(TEXT));
-            }
-            let words = rh >= WORDS_FROM;
+            // With no room on the ports, the anchor button sits beside the name.
+            let by_name = g.half < ANCHOR_FROM && r.meta.is_some();
+            wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, inner), Pos2::new(track.left(), inner + strip_h)), 0.0, fade(STRIP));
+            p.text(left_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, if by_name { 21 } else { 25 }), mono(11.5), fade(TEXT));
             // The port swatches: audio over time.
-            let sw_x = x0 + 12.0 * z;
-            let audio_sw = Rect::from_min_max(Pos2::new(sw_x, inner + strip_h), Pos2::new(track.left() - z, inner + strip_h + half));
-            let time_sw = Rect::from_min_max(Pos2::new(sw_x, audio_sw.bottom()), Pos2::new(track.left() - z, audio_sw.bottom() + half));
-            p.rect_filled(audio_sw, 0.0, fade(if r.uid.is_some() { AMBER } else { OFF }));
-            p.rect_filled(time_sw, 0.0, fade(if r.meta.is_some() { BLUE } else { OFF }));
+            let audio_sw = Rect::from_min_max(Pos2::new(edge_l, inner + strip_h), Pos2::new(track.left() - z, inner + strip_h + half));
+            let time_sw = Rect::from_min_max(Pos2::new(edge_l, audio_sw.bottom()), Pos2::new(track.left() - z, audio_sw.bottom() + half));
+            wide.rect_filled(audio_sw, 0.0, fade(if r.uid.is_some() { AMBER } else { OFF }));
+            wide.rect_filled(time_sw, 0.0, fade(if r.meta.is_some() { BLUE } else { OFF }));
             if words {
-                p.text(audio_sw.left_center() + Vec2::new(9.0 * z, 0.0), Align2::LEFT_CENTER, "audio", font(12.0), if r.uid.is_some() { INK } else { DIM });
-                p.text(time_sw.left_center() + Vec2::new(9.0 * z, 0.0), Align2::LEFT_CENTER, "time", font(12.0), if r.meta.is_some() { INK } else { DIM });
+                p.text(Pos2::new(x0 + 21.0 * z, audio_sw.center().y), Align2::LEFT_CENTER, "audio", font(12.0), if r.uid.is_some() { INK } else { DIM });
+                p.text(Pos2::new(x0 + 21.0 * z, time_sw.center().y), Align2::LEFT_CENTER, "time", font(12.0), if r.meta.is_some() { INK } else { DIM });
             }
             // The anchor button, on a time, once the audio has placed the row.
             if r.meta.is_some() {
-                let s = (half - 3.0 * z).min(20.0 * z).max(8.0 * z);
-                let br = Rect::from_center_size(Pos2::new(time_sw.right() - s * 0.5 - 5.0 * z, time_sw.center().y), Vec2::splat(s));
+                let s = if by_name { strip_h - 6.0 * z } else { (half - 3.0 * z).min(20.0 * z).max(8.0 * z) };
+                let (line, margin) = if by_name { (inner + strip_h * 0.5, 2.0) } else { (time_sw.center().y, 5.0) };
+                let br = Rect::from_center_size(Pos2::new(time_sw.right() - s * 0.5 - margin * z, line), Vec2::splat(s));
                 app.match_ui.anchor_at.insert((i, k), br);
                 let on = v.groups[r.group].anchor == Some(k);
                 if v.done {
@@ -1254,8 +1318,10 @@ impl crate::look::NodeLook for Look {
                 if on {
                     p.rect_filled(br, 0.0, INK);
                 }
-                p.rect_stroke(br, 0.0, Stroke::new(1.5 * z, if v.done { INK } else { alpha(INK, 0.4) }), StrokeKind::Inside);
-                anchor_icon(&p, br.shrink(s * 0.14), if on { BOTH } else if v.done { INK } else { alpha(INK, 0.4) });
+                // Dark on the blue port, light on the grey name strip.
+                let ink = if by_name { TEXT } else { INK };
+                p.rect_stroke(br, 0.0, Stroke::new(1.5 * z, if v.done { ink } else { alpha(ink, 0.4) }), StrokeKind::Inside);
+                anchor_icon(&p, br.shrink(s * 0.14), if on { BOTH } else if v.done { ink } else { alpha(ink, 0.4) });
             }
 
             // The timeline.
@@ -1267,11 +1333,12 @@ impl crate::look::NodeLook for Look {
             let blue = r.meta.map(|t| (t, t + r.len));
             let amber = r.start.map(|t| (t, t + r.len));
             let (mut gone, mut shown) = (None, false);
+            // See-through, so an overlap shows both bars.
             for (bar, col) in [(blue, BLUE), (amber, AMBER)] {
                 let Some(b) = bar else { continue };
                 match band(b).filter(|_| b.1 >= v0 && b.0 <= v1) {
                     Some(rect) => {
-                        p.rect_filled(rect, 0.0, fade(alpha(col, 0.88)));
+                        p.rect_filled(rect, 0.0, fade(alpha(col, BAR_ALPHA)));
                         shown = true;
                     }
                     None => {
@@ -1280,17 +1347,9 @@ impl crate::look::NodeLook for Look {
                     }
                 }
             }
-            if let (Some(a), Some(b)) = (blue, amber) {
-                let both = (a.0.max(b.0), a.1.min(b.1));
-                if both.1 > both.0 {
-                    if let Some(rect) = band(both).filter(|_| both.1 >= v0 && both.0 <= v1) {
-                        p.rect_filled(rect, 0.0, fade(alpha(BOTH, 0.96)));
-                    }
-                }
-            }
             if let Some(t) = r.meta.filter(|t| *t >= v0 && *t <= v1) {
                 let x = tx(t);
-                p.rect_filled(Rect::from_min_max(Pos2::new(x - 2.5 * z, lane.top()), Pos2::new(x + 2.5 * z, lane.bottom())), 0.0, fade(ANCHOR_BLUE));
+                p.rect_filled(Rect::from_min_max(Pos2::new(x - 1.25 * z, lane.top()), Pos2::new(x + 1.25 * z, lane.bottom())), 0.0, fade(ANCHOR_BLUE));
             }
             if let (Some(b), true) = (amber, v.anchored(r)) {
                 let x = tx(b.1);
@@ -1317,8 +1376,13 @@ impl crate::look::NodeLook for Look {
                 Cell::Off(d, hint) => {
                     let (bg, fg) = off_color(*d);
                     p.rect_filled(cell_r, 0.0, bg);
-                    let text = if *hint && rh >= 44.0 { format!("{}\nabout its length", gap_text(*d)) } else { gap_text(*d) };
-                    p.text(cell_r.center(), Align2::CENTER_CENTER, text, mono(if *hint { 11.5 } else { 13.0 }), fg);
+                    p.text(cell_r.center(), Align2::CENTER_CENTER, gap_text(*d), mono(13.0), fg);
+                    if *hint {
+                        let s = (16.0 * z).min(cell_r.height() - 4.0 * z);
+                        let icon = Rect::from_center_size(Pos2::new(cell_r.right() - 12.0 * z, cell_r.center().y), Vec2::splat(s));
+                        mirror_icon(&p, icon, fg);
+                        ui.interact(icon, egui::Id::new(("match-mirror", i, r.n)), Sense::hover()).on_hover_text("off by about its own length: the time may mark the end of the recording, not its start. A Time node can subtract the length");
+                    }
                 }
                 Cell::Anchor => {
                     let s = (22.0 * z).min(cell_r.height() - 2.0 * z);
@@ -1328,19 +1392,17 @@ impl crate::look::NodeLook for Look {
             }
 
             // The output.
-            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(body.right(), top + rh * z));
-            if strip_h > 0.0 {
-                p.rect_filled(Rect::from_min_size(out_col.min, Vec2::new(out_col.width(), strip_h)), 0.0, fade(STRIP));
-                p.text(out_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 15), mono(11.5), fade(TEXT));
-            }
+            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(edge_r, top + rh * z));
+            wide.rect_filled(Rect::from_min_size(out_col.min, Vec2::new(out_col.width(), strip_h)), 0.0, fade(STRIP));
+            p.text(out_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 15), mono(11.5), fade(TEXT));
             let on = v.anchored(r) && r.uid.is_some();
-            let out_sw = Rect::from_min_max(Pos2::new(out_col.left(), inner + strip_h), Pos2::new(out_col.right() - 12.0 * z, top + rh * z));
-            p.rect_filled(out_sw, 0.0, fade(if on { AMBER } else { OFF }));
+            let out_sw = Rect::from_min_max(Pos2::new(out_col.left(), inner + strip_h), out_col.max);
+            wide.rect_filled(out_sw, 0.0, fade(if on { AMBER } else { OFF }));
             if words {
-                p.text(out_sw.right_center() - Vec2::new(9.0 * z, 0.0), Align2::RIGHT_CENTER, "time", font(12.0), if on { INK } else { DIM });
+                p.text(Pos2::new(body.right() - 21.0 * z, out_sw.center().y), Align2::RIGHT_CENTER, "time", font(12.0), if on { INK } else { DIM });
             }
         }
-        p.rect_filled(Rect::from_min_size(Pos2::new(body.left(), rows_bottom), Vec2::new(body.width(), 2.0 * z)), 0.0, SEAM);
+        wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, rows_bottom), Pos2::new(edge_r, rows_bottom + 2.0 * z)), 0.0, SEAM);
 
         // Group borders: one round each run of neighbouring rows of a group.
         for (gi, grp) in v.groups.iter().enumerate().filter(|(_, g)| g.number > 0) {
@@ -1415,7 +1477,8 @@ impl crate::look::NodeLook for Look {
         if let Some(r) = resp.hover_pos().and_then(|h| row_at(h.y)).filter(|r| r.wired) {
             resp.on_hover_text(row_hover(&v, r));
         }
-        if do_fit {
+        // While live the axis already fits, and it stays live.
+        if do_fit && !always {
             app.match_ui.views.insert(i, fit);
         }
         if toggle_always {

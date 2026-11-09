@@ -18,7 +18,7 @@ off is never left out: it stays in view until a person corrects it with a Time n
 
 The status column says: before a run the row's time or `no time metadata`, during it the progress,
 after it how many seconds off the time is from the audio (green at 0 s, red at 30 s, going black
-into years), with `about its length` when that may be a stamp marking the end.
+into years), with a mirror icon when that may be a stamp marking the end.
 
 Outputs:
 - `links`: one link per matched chunk, both clocks named, each with its error (1 sigma) from how
