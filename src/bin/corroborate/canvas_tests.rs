@@ -452,3 +452,67 @@ fn pc_streams_add_a_source() {
     assert_eq!(app.nodes.iter().filter(|n| matches!(&n.kind, Kind::Sourcer { .. })).count(), 1, "no second source");
     assert_eq!(app.selected, Some(srcs[0]));
 }
+
+/// The Clean up button, in place of Results folder: recordings land in the order of the Audio
+/// match rows they feed, wires run left to right, nothing overlaps, an unwired node is parked,
+/// everything is in view, and one Ctrl+Z puts it all back.
+#[test]
+fn clean_up_lays_out_the_nodes_by_their_wires() {
+    use corroborate::timebase::FileFacts;
+    let mut d = Drive::new();
+    let names = ["a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"];
+    for (k, p) in names.iter().enumerate() {
+        d.app().facts.put(p, FileFacts { stamp: Some(1000.0 + k as f64), len: Some(100.0), source: "the file's creation_time".into() });
+    }
+    let app = d.app();
+    // Scattered, the rows' sources in the opposite order to the rows.
+    let srcs: Vec<NodeId> = names.iter().enumerate().map(|(k, p)| app.add(Kind::Sourcer { input: (*p).into() }, Pos2::new(900.0 - k as f32 * 170.0, 60.0 + k as f32 * 90.0))).collect();
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(30.0, 300.0));
+    let line = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(200.0, 30.0));
+    let lone = app.add(Kind::Map, Pos2::new(600.0, 500.0));
+    for (k, &s) in srcs.iter().enumerate() {
+        let n = k + 1;
+        app.wire(s, "audio", m, &format!("audio {n}"));
+        app.sync_many_ports();
+        app.wire(s, "time", m, &format!("time {n}"));
+        app.sync_many_ports();
+        app.wire(s, "audio", line, &format!("media {n}"));
+        app.sync_many_ports();
+        app.wire(m, &format!("synced {n}"), line, &format!("time {n}"));
+        app.sync_many_ports();
+    }
+    d.frames(3);
+    d.shot("clean_up_before");
+    assert_eq!(d.h.query_all_by_label("Results folder").count(), 0, "the button it replaced");
+    let before: Vec<Pos2> = d.app().nodes.iter().map(|n| n.pos).collect();
+    d.click("Clean up");
+    d.frames(3);
+    d.shot("clean_up_after");
+
+    let app = d.app();
+    let o = app.canvas_origin;
+    for w in app.shown_lines() {
+        assert!(app.nodes[w.from].pos.x < app.nodes[w.to].pos.x, "wires run left to right: {w:?}");
+    }
+    for k in 0..4 {
+        let (a, b) = (app.port_place(o, m, 2 * k, false).0.y, app.port_place(o, m, 2 * (k + 1), false).0.y);
+        assert!(a < b, "rows top to bottom");
+        assert!(app.nodes[srcs[k]].pos.y < app.nodes[srcs[k + 1]].pos.y, "the sources are in the order of the rows: {k}");
+    }
+    let ids: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| app.on_canvas(i)).collect();
+    for (k, &a) in ids.iter().enumerate() {
+        for &b in &ids[k + 1..] {
+            assert!(!app.node_rect(o, a).intersects(app.node_rect(o, b)), "{a} and {b} overlap");
+        }
+    }
+    let down = ids.iter().filter(|&&i| i != lone).map(|&i| app.node_rect(o, i).bottom()).fold(f32::MIN, f32::max);
+    assert!(app.node_rect(o, lone).top() > down, "the unwired node is parked underneath");
+    let view = Rect::from_min_size(o, Vec2::new(1800.0, 800.0));
+    for &i in &ids {
+        assert!(view.contains_rect(app.node_rect(o, i)), "node {i} is in view: {:?}", app.node_rect(o, i));
+    }
+
+    assert!(app.undo());
+    let back: Vec<Pos2> = app.nodes.iter().map(|n| n.pos).collect();
+    assert_eq!(back, before, "one Ctrl+Z puts them back");
+}

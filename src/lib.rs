@@ -24,6 +24,7 @@ pub mod module_manifest;
 pub mod modules;
 pub mod plugin;
 pub mod graph;
+pub mod node_layout;
 pub mod sync;
 pub mod synth;
 #[cfg(feature = "gui")]

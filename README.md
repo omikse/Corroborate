@@ -67,6 +67,7 @@ Canvas keys and mouse:
 | Copy, cut, paste, duplicate | Ctrl+C, Ctrl+X, Ctrl+V (at the pointer), Ctrl+D |
 | Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z (moves, wires, settings, names, adding, deleting) |
 | Frame | F or Home: the selection, else every node |
+| Clean up | the button in the top bar: lays out the nodes on this level by their wires, left to right, each column ordered to reduce crossings using the real port heights; separate pieces are stacked and nodes with no wires are parked underneath. Ctrl+Z puts them back |
 | Wire | drag from an output dot to an input dot, or the other way; right-click an input to unwire |
 | Add a node already wired | drag from a dot onto empty canvas: pick from the modules that fit its type (from an input, a Value of its type comes first) |
 | Play, pause | Space (or Play on a SOURCER or a Timeline node): the selected node's playhead runs and its sound plays |

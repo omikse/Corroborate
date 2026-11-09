@@ -295,6 +295,8 @@ struct App {
     /// The group the canvas shows (None: the top), and the pan and zoom outside it, one per level.
     view: Option<NodeId>,
     view_stack: Vec<(Vec2, f32)>,
+    /// Frame every node on the canvas when it is next drawn.
+    frame_all: bool,
     /// What each group definition holds, as last seen (groups.rs `sync_defs`).
     group_defs: HashMap<String, String>,
 }
@@ -360,6 +362,7 @@ impl App {
             title: String::new(),
             view: None,
             view_stack: Vec::new(),
+            frame_all: false,
             group_defs: HashMap::new(),
         }
     }
@@ -1375,6 +1378,10 @@ impl App {
         self.drop_menu_ui(&ui.ctx().clone());
         let at = (ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p)).unwrap_or(area.center()) - origin - self.pan) / self.zoom;
         self.canvas_keys(&ui.ctx().clone(), area, at.to_pos2());
+        if std::mem::take(&mut self.frame_all) {
+            let all = (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect();
+            self.frame_ids(area, all);
+        }
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
@@ -1465,10 +1472,8 @@ impl App {
                         self.save_project();
                     }
                 });
-                if ui.button("Results folder").on_hover_text(self.results_dir().display().to_string()).clicked() {
-                    let d = self.results_dir();
-                    let _ = std::fs::create_dir_all(&d);
-                    let _ = std::process::Command::new("explorer").arg(d).spawn();
+                if ui.button("Clean up").on_hover_text("lay out the nodes on this level by their wires; Ctrl+Z puts them back").clicked() {
+                    self.clean_up();
                 }
             }
             ui.colored_label(DIM, &self.msg);

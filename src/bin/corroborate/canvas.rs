@@ -425,6 +425,51 @@ impl App {
     /// Pans and zooms so the selected nodes (else all) fill the canvas.
     pub(crate) fn frame_nodes(&mut self, area: Rect) {
         let ids = if self.picked().is_empty() { (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect() } else { self.picked() };
+        self.frame_ids(area, ids);
+    }
+
+    /// Lays out the nodes on this level by their wires (`node_layout`) and shows them all. One
+    /// undo step.
+    pub(crate) fn clean_up(&mut self) {
+        use corroborate::node_layout::{place, Item, Link};
+        let ids: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect();
+        if ids.is_empty() {
+            return;
+        }
+        // Whatever just changed is its own step, so that undo brings back exactly this layout.
+        self.commit(self.snap_key());
+        // Sizes and ports in canvas units (no pan, no zoom).
+        let (pan, zoom) = (self.pan, self.zoom);
+        (self.pan, self.zoom) = (Vec2::ZERO, 1.0);
+        let items: Vec<Item> = ids
+            .iter()
+            .map(|&i| {
+                let r = self.node_rect(Pos2::ZERO, i);
+                Item { x: r.left(), y: r.top(), w: r.width(), h: r.height() }
+            })
+            .collect();
+        let slot = |n: NodeId| ids.iter().position(|&i| i == n);
+        let links: Vec<Link> = self
+            .shown_lines()
+            .iter()
+            .filter_map(|s| {
+                let (from, to) = (slot(s.from)?, slot(s.to)?);
+                let from_y = self.port_place(Pos2::ZERO, s.from, s.from_port, true).0.y - items[from].y;
+                let to_y = self.port_place(Pos2::ZERO, s.to, s.to_port, false).0.y - items[to].y;
+                Some(Link { from, from_y, to, to_y })
+            })
+            .collect();
+        (self.pan, self.zoom) = (pan, zoom);
+        for (&i, (x, y)) in ids.iter().zip(place(&items, &links)) {
+            self.nodes[i].pos = Pos2::new(x, y);
+        }
+        self.frame_all = true;
+        self.msg = format!("cleaned up {} nodes (Ctrl+Z puts them back)", ids.len());
+        self.save_project();
+    }
+
+    /// Pans and zooms so these nodes fill the canvas.
+    pub(crate) fn frame_ids(&mut self, area: Rect, ids: Vec<NodeId>) {
         if ids.is_empty() {
             return;
         }
