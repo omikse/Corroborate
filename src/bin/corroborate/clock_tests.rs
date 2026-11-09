@@ -630,6 +630,146 @@ fn make_jiku_project() {
     assert!(st.contains("of 1225 pairs"), "all 50 matched: {st}");
 }
 
+/// Makes app\projects\Jiku GT_090912 inverted from the saved Jiku project: each video's time goes
+/// through a Time node taking away the video's length, as the time in these files marks the end of
+/// the recording. It first measures that against the file names, which hold the phone's clock at
+/// the start, and builds nothing if most videos do not agree. Then runs it.
+/// Run: cargo test --profile fast --bin corroborate make_jiku_inverted_project -- --ignored --nocapture
+#[test]
+#[ignore]
+fn make_jiku_inverted_project() {
+    use corroborate::modules::time;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let projects = root.join("app").join("projects");
+    let text = std::fs::read_to_string(projects.join("Jiku GT_090912").join("project.txt")).expect("the Jiku project");
+    let mut d = crate::drive::Drive::new();
+    d.app().load_project_text(&text);
+    d.app().resolve_recordings();
+    d.app().sync_recordings();
+    d.app().stop_run();
+    let app = d.app();
+    // Hand-made Time nodes in the original: every video gets the same one here.
+    let earlier: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| !app.nodes[i].hidden && matches!(app.nodes[i].kind, Kind::Time { .. })).collect();
+    app.delete_nodes(&earlier);
+    let m = (0..app.nodes.len()).find(|&i| matches!(app.nodes[i].kind, Kind::AudioMatch { .. })).expect("an Audio match node");
+    let pairs: Vec<(usize, NodeId)> = (1..=60).filter_map(|n| app.graph.feeder(m, &format!("audio {n}")).map(|(s, _)| (n, s))).collect();
+    assert_eq!(pairs.len(), 50, "the 50 videos");
+    let reading = |r: Result<Data, String>| r.is_err_and(|e| e.contains("still reading"));
+    let read = d.wait_until(120.0, |a| pairs.iter().all(|&(_, s)| !reading(a.value_from(s, "time")) && !reading(a.value_from(s, "length"))));
+    println!("every file read: {read}");
+    let app = d.app();
+    let (mut at_end, mut at_start, mut neither) = (0, 0, 0);
+    for &(n, s) in &pairs {
+        let (Ok(Data::Time { utc: Some(stamp), .. }), Ok(Data::Custom { json, .. })) = (app.value_from(s, "time"), app.value_from(s, "length")) else {
+            println!("{:32} {n}: time {:?}, length {:?}", app.nodes[s].label, app.value_from(s, "time"), app.value_from(s, "length"));
+            continue;
+        };
+        let len: f64 = json.trim_start_matches("{\"seconds\":").trim_end_matches('}').parse().unwrap();
+        let named: f64 = app.nodes[s].label.rsplit(' ').next().unwrap().parse::<f64>().unwrap() / 1000.0;
+        let (start, end) = ((stamp - named).abs(), (stamp - len - named).abs());
+        println!("{:32} length {len:8.1}  stamp - name {:9.1}  stamp - length - name {:9.1}", app.nodes[s].label, stamp - named, stamp - len - named);
+        match () {
+            _ if end < 10.0 && end < start => at_end += 1,
+            _ if start < 10.0 => at_start += 1,
+            _ => neither += 1,
+        }
+    }
+    println!("the file's time marks: the end {at_end}, the start {at_start}, neither (the phone's clock or file name off) {neither}");
+    assert!(at_end > at_start, "the file's time does not mark the end: nothing built");
+    for (k, &(n, s)) in pairs.iter().enumerate() {
+        let mut rows = time::defaults();
+        time::add_row(&mut rows);
+        let t = app.add(Kind::Time { rows }, Pos2::new(0.0, 300.0 * k as f32));
+        app.nodes[t].label = format!("Time: end of {}", app.nodes[s].label);
+        let inputs = app.nodes[t].kind.spec().inputs;
+        app.graph.set_inputs_keep(t, inputs);
+        app.graph.disconnect(m, &format!("time {n}"));
+        app.wire(s, "time", t, "time");
+        app.wire(s, "length", t, "row 1");
+        app.wire(t, "result", m, &format!("time {n}"));
+    }
+    d.frames(3);
+    d.click("Clean up");
+    d.frames(3);
+    let dir = projects.join("Jiku GT_090912 inverted");
+    let file = project::project_in(&dir);
+    let _ = std::fs::remove_file(project::recovery_of(&file));
+    d.app().save_project_as(dir);
+    project::push_recent(&root.join("app").join("settings"), &file);
+    println!("saved {}", file.display());
+    let mut back = App::empty();
+    back.open_project(file.clone());
+    assert_eq!(back.nodes.iter().filter(|n| !n.hidden && matches!(n.kind, Kind::Time { .. })).count(), 50, "fifty Time nodes saved");
+    assert!(!back.dirty(), "it opens with nothing unsaved");
+    drop(back);
+    d.shot("jiku_inverted");
+    let app = d.app();
+    app.run();
+    let t0 = std::time::Instant::now();
+    assert!(d.wait_until(1200.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    let app = d.app();
+    println!("{} ({:.0} s)", app.nodes[m].state.lock().unwrap().status, t0.elapsed().as_secs_f64());
+    d.frames(5);
+    d.shot("jiku_inverted_run");
+    d.app().stop_all();
+}
+
+/// Makes app\projects\Hillingdon meetings: the two Hillingdon recordings in app\recordings, each
+/// dated by its mains hum with nothing but the place wired in, and shown on a Timeline. Then runs
+/// it. Needs the grid logs: set CORROBORATE_GRID_LOGS to app\grid logs.
+/// Run: cargo test --profile fast --bin corroborate make_hillingdon_project -- --ignored --nocapture
+#[test]
+#[ignore]
+fn make_hillingdon_project() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let recordings = root.join("app").join("recordings");
+    let meetings = [("youtube qJ4EtDtDAr0.mp4", "Cabinet, 22 October 2026"), ("youtube pRX5rSk_j_M.mp4", "Council, 7 July 2016")];
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    // Uxbridge Civic Centre, where they meet.
+    let place = app.add(crate::drive::place(51.5447, -0.4787, 10.0), Pos2::new(40.0, 40.0));
+    app.nodes[place].label = "Hillingdon".into();
+    let tl = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(1200.0, 40.0));
+    let mut enfs = Vec::new();
+    for (k, (file, title)) in meetings.iter().enumerate() {
+        let f = recordings.join(file);
+        assert!(f.is_file(), "{}", f.display());
+        let s = app.add(Kind::Sourcer { input: f.to_string_lossy().into_owned() }, Pos2::new(40.0, 300.0 + 400.0 * k as f32));
+        app.nodes[s].label = title.to_string();
+        let e = app.add(Kind::Enf { grid: String::new() }, Pos2::new(600.0, 300.0 + 400.0 * k as f32));
+        app.wire(s, "audio", e, "audio");
+        app.wire(place, "value", e, "location");
+        app.wire_many(s, "audio", tl);
+        app.wire(e, "time of recording", tl, &format!("time {}", k + 1));
+        enfs.push((*title, e));
+    }
+    assert_eq!(app.graph.wires().len(), 8, "{}", app.msg);
+    d.frames(3);
+    d.click("Clean up");
+    d.frames(3);
+    let dir = root.join("app").join("projects").join("Hillingdon meetings");
+    let file = project::project_in(&dir);
+    let _ = std::fs::remove_file(project::recovery_of(&file));
+    d.app().save_project_as(dir);
+    project::push_recent(&root.join("app").join("settings"), &file);
+    println!("saved {}", file.display());
+    d.shot("hillingdon_project");
+    let app = d.app();
+    app.run();
+    let t0 = std::time::Instant::now();
+    let ended = d.wait_until(1800.0, |a| enfs.iter().all(|&(_, e)| a.nodes[e].state.lock().unwrap().done));
+    println!("ended: {ended} ({:.0} s)", t0.elapsed().as_secs_f64());
+    let app = d.app();
+    for &(title, e) in &enfs {
+        let status = app.nodes[e].state.lock().unwrap().status.clone();
+        println!("{title}: {status} -> {:?}", app.value_from(e, "time of recording"));
+    }
+    d.frames(5);
+    d.shot("hillingdon_run");
+    d.app().stop_all();
+    assert!(ended, "both files ended");
+}
+
 /// The time written in a file never anchors its clock, wired or not; a live source's own time
 /// does. The file's time is on the output from before any Run, raw, with an error of 0, and a Run
 /// does not clear it; so is the file's length.
