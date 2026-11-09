@@ -74,7 +74,7 @@ Canvas keys and mouse:
 | Playhead | click or drag in SOURCER's waveform, or click a lane's ruler on the timeline |
 | Same clock | select sources, right-click: Same clock (Separate clocks undoes it) |
 | Link two clocks | drag a floating timeline row onto an event on another row, then give the error |
-| Audio match's timeline | on the node, a row per recording: amber is where its file's time stamp puts it (before any Run), teal where audio puts it after the match. Wheel zooms, drag pans, double-click fits. Wire one recording's time into its `time` input to give the linked recordings real time |
+| Audio match's timeline | on the node, a row per recording: amber is where its file's time stamp puts it (before any Run), teal where audio puts it after the match. Whether a stamp marks the recording's start or end is your call: click a row's note, or use `all start` / `all end`; the line beside them says how far the stamps disagree under each. Wheel zooms, drag pans, double-click fits. Wire one recording's time into its `time` input to give the linked recordings real time |
 | Group | Ctrl+G: the selected nodes into one group node (ports for the wires in and out); Tab or double-click opens it, Tab or the path at the top left goes back out; Alt+G ungroups |
 | Group ports | inside a group, wire a node to the empty `+` of Group Input or Group Output; right-click a Group Output port to remove it |
 | Uses of a group | Ctrl+D, copy and paste, or Add node → Groups: every use holds the same nodes (a change inside one is made in all), each with its own wires outside; right-click → Make single gives one use its own |

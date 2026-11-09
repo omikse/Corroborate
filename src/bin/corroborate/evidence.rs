@@ -28,6 +28,8 @@ pub struct Evidence {
     pub share: BTreeMap<String, String>,
     /// Keys of the evidence switched off.
     pub off: BTreeSet<String>,
+    /// Sources whose file time stamp the person reads as the recording's end, not its start.
+    pub stamp_end: BTreeSet<String>,
     /// Anchors and links made by hand (the timeline).
     pub manual_anchors: Vec<ClockAnchor>,
     pub manual_links: Vec<Link>,
@@ -92,7 +94,7 @@ impl App {
                 let a = n.state.lock().unwrap().anchor.clone();
                 let a = a.filter(|a| !a.is_creation_time() || !self.graph.targets(i, "time").is_empty());
                 if let (Some(a), Some(c)) = (a, self.clock_of(i)) {
-                    an.push(ClockAnchor { clock: c, t: 0.0, utc: a.utc0, error_s: a.error_s, from: n.uid.clone(), enabled: true });
+                    an.push(ClockAnchor { clock: c, t: 0.0, utc: self.start_utc(i, &a), error_s: a.error_s, from: n.uid.clone(), enabled: true });
                 }
             }
             // A time wired into an anchoring input: the audio starts at that time.
@@ -182,6 +184,30 @@ impl App {
 
     /// Switches a piece of evidence on or off (by its key); kept in the project and logged in the
     /// result file's setting changes.
+    /// When source `i`'s recording started in real time, by anchor `a`: a file's creation time the
+    /// person reads as the end is earlier by the recording's length (the anchor's error is that
+    /// length).
+    pub(crate) fn start_utc(&self, i: NodeId, a: &Anchor) -> f64 {
+        if a.is_creation_time() && self.ev.stamp_end.contains(&self.nodes[i].uid) {
+            a.utc0 - a.error_s
+        } else {
+            a.utc0
+        }
+    }
+
+    /// The person's reading of these sources' file stamps: the recording's end, or its start.
+    pub(crate) fn set_stamp_end(&mut self, uids: &[String], end: bool) {
+        for u in uids {
+            let changed = if end { self.ev.stamp_end.insert(u.clone()) } else { self.ev.stamp_end.remove(u) };
+            if changed {
+                let label = self.nodes.iter().find(|n| n.uid == *u).map_or(u.clone(), |n| n.label.clone());
+                let [old, new] = if end { ["start", "end"] } else { ["end", "start"] }.map(String::from);
+                self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: u.clone(), label, name: "time stamp marks".into(), old, new });
+            }
+        }
+        self.save_project();
+    }
+
     pub(crate) fn set_evidence(&mut self, key: &str, on: bool) {
         let was = !self.ev.off.contains(key);
         if was == on {
@@ -242,6 +268,9 @@ impl App {
     /// The project lines for clocks and evidence (see the top of this file).
     pub(crate) fn evidence_text(&self) -> String {
         let mut t = String::new();
+        for u in &self.ev.stamp_end {
+            t.push_str(&format!("stamp-end|{}\n", clean(u)));
+        }
         for (n, c) in &self.ev.share {
             t.push_str(&format!("clock|{}|{}\n", clean(n), clean(c)));
         }
@@ -266,6 +295,9 @@ impl App {
             }
             ["off", k] => {
                 self.ev.off.insert(k.to_string());
+            }
+            ["stamp-end", u] => {
+                self.ev.stamp_end.insert(u.to_string());
             }
             ["anchor", c, t, u, e] => {
                 if let (Some(t), Some(utc), Some(error_s)) = (num(t), num(u), num(e)) {

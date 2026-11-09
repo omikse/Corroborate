@@ -11,11 +11,14 @@
 //! time stamp puts it (read as soon as it is wired, before any Run), teal where audio puts it once
 //! the match has ended. Audio says only how the recordings lie against each other, so a linked
 //! group is placed by real time when it has some (a time wired in), else by the best fit to its
-//! stamps (`audio_match::fit_stamps`), which also says whether each stamp is the recording's start
-//! or end. Wheel over the track zooms, a drag pans, a double-click fits it again.
+//! stamps (`audio_match::fit_stamps`). Whether a stamp marks a recording's start or its end is the
+//! person's decision, made from this view: a click on a row's note changes it, the buttons change
+//! them all, and the line beside the buttons says how far the stamps disagree under each reading.
+//! A wired time follows the decision. Wheel over the track zooms, a drag pans, a double-click fits
+//! it again.
 
 use super::*;
-use corroborate::audio_match::{self, Clip, Placed, Reading};
+use corroborate::audio_match::{self, Clip, Placed, STAMP_CAP_S};
 use corroborate::data::{Data, Event};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::AtomicU64;
@@ -45,7 +48,7 @@ static RUNS: AtomicU64 = AtomicU64::new(1);
 
 impl App {
     /// The rows of node `i`'s timeline, with whether its axis is real time and what says so.
-    pub(crate) fn match_rows(&self, i: NodeId, ctx: &egui::Context) -> (Vec<Row>, bool, String) {
+    pub(crate) fn match_rows(&self, i: NodeId, ctx: &egui::Context) -> (Vec<Row>, bool, String, Option<(f64, f64)>) {
         struct Raw {
             y: f32,
             name: String,
@@ -54,6 +57,7 @@ impl App {
             stamp: Option<FileStamp>,
             len: f64,
             info: Option<corroborate::clock::ClockInfo>,
+            uid: String,
         }
         let (done, stages) = {
             let s = self.nodes[i].state.lock().unwrap();
@@ -86,6 +90,7 @@ impl App {
                 len: stamp.as_ref().and_then(|s| s.len).filter(|l| *l > 0.0).unwrap_or(audio_s),
                 stamp,
                 info,
+                uid: self.nodes[f].uid.clone(),
             });
         }
         // Linked groups, once the match has ended: two wired recordings or more on one group.
@@ -97,20 +102,30 @@ impl App {
                 }
             }
         }
-        let mut placed: Vec<Option<(f64, Reading, f64, bool)>> = vec![None; raw.len()];
+        let as_end = |r: &Raw| r.stamp.as_ref().is_some_and(|s| !s.sidecar) && self.ev.stamp_end.contains(&r.uid);
+        // Per row, once placed: where audio puts it, its stamp's difference, whether real time.
+        let mut placed: Vec<Option<(f64, Option<f64>, bool)>> = vec![None; raw.len()];
+        let mut spreads: Option<(usize, f64, f64)> = None;
         for members in groups.values().filter(|m| m.len() >= 2) {
             let start = |k: usize| raw[k].info.as_ref().map_or(0.0, |c| c.at(0.0));
             let absolute = raw[members[0]].info.as_ref().is_some_and(|c| c.kind == corroborate::clock::Kind::Absolute);
-            let recs: Vec<Placed> = members.iter().map(|&k| Placed { stamp: raw[k].stamp.as_ref().map(|s| s.t), len: raw[k].len, start: start(k), start_only: raw[k].stamp.as_ref().is_some_and(|s| s.sidecar) }).collect();
+            let recs: Vec<Placed> = members.iter().map(|&k| Placed { stamp: raw[k].stamp.as_ref().map(|s| s.t), len: raw[k].len, start: start(k), as_end: as_end(&raw[k]) }).collect();
             let fit = audio_match::fit_stamps(&recs, absolute.then_some(0.0));
             let zero = fit.zero.unwrap_or(0.0);
             for (j, &k) in members.iter().enumerate() {
-                placed[k] = Some((zero + start(k), fit.readings[j].0, fit.readings[j].1, absolute));
+                placed[k] = Some((zero + start(k), fit.diffs[j], absolute));
+            }
+            // The group with most stamps is the one the two readings are compared on.
+            if let (Some(s), Some(e)) = (audio_match::stamp_spread(&recs, false), audio_match::stamp_spread(&recs, true)) {
+                let n = recs.iter().filter(|r| r.stamp.is_some()).count();
+                if spreads.is_none_or(|b| n > b.0) {
+                    spreads = Some((n, s, e));
+                }
             }
         }
-        let any_time = raw.iter().any(|r| r.stamp.is_some()) || placed.iter().flatten().any(|p| p.3);
-        let any_fit = placed.iter().flatten().any(|p| !p.3 && p.1 != Reading::NoStamp);
-        let any_absolute = placed.iter().flatten().any(|p| p.3);
+        let any_time = raw.iter().any(|r| r.stamp.is_some()) || placed.iter().flatten().any(|p| p.2);
+        let any_fit = placed.iter().flatten().any(|p| !p.2 && p.1.is_some());
+        let any_absolute = placed.iter().flatten().any(|p| p.2);
         let time_note = match self.graph.feeder(i, "time") {
             Some((f, _)) if self.nodes[f].kind.is_source() => format!("time: {}", self.nodes[f].label),
             Some(_) => "time: only a recording's own time counts here".to_string(),
@@ -123,22 +138,22 @@ impl App {
             .zip(&placed)
             .map(|(r, p)| {
                 let tick = r.stamp.as_ref().map(|s| s.t);
-                let as_end = p.is_some_and(|p| p.1 == Reading::End);
-                let amber = tick.map(|t| if as_end { (t - r.len, t) } else { (t, t + r.len) });
+                let end = as_end(r);
+                let word = if end { "end" } else { "start" };
+                let amber = tick.map(|t| if end { (t - r.len, t) } else { (t, t + r.len) });
                 let teal = p.map(|p| (p.0, p.0 + r.len));
                 let (note, warn) = match (p, &r.stage) {
                     _ if !r.file => ("files only".to_string(), false),
-                    (Some((_, Reading::Start, d, _)), _) => (format!("start {d:+.1} s"), false),
-                    (Some((_, Reading::End, d, _)), _) => (format!("end {d:+.1} s"), false),
-                    (Some((_, Reading::Disagrees, d, _)), _) => (format!("off {}", gap_text(*d)), true),
-                    (Some((_, Reading::NoStamp, ..)), _) => ("no stamp".to_string(), false),
+                    (Some((_, Some(d), _)), _) if d.abs() < 3600.0 => (format!("{word} {d:+.1} s"), d.abs() > STAMP_CAP_S),
+                    (Some((_, Some(d), _)), _) => (format!("{word} {}", gap_text(*d)), true),
+                    (Some((_, None, _)), _) => ("no stamp".to_string(), false),
                     (None, Some(Stage::Failed(_))) => ("failed".to_string(), true),
                     (None, _) if done => ("not linked".to_string(), false),
                     (None, Some(Stage::Waiting(s))) if *s > 0.0 => (format!("decoding {s:.0} s"), false),
                     (None, Some(Stage::Waiting(_))) => ("waiting".to_string(), false),
                     (None, Some(Stage::Fingerprinting)) => ("fingerprinting".to_string(), false),
                     (None, Some(Stage::Ready(_))) => ("fingerprinted".to_string(), false),
-                    (None, None) => (if r.stamp.is_some() { String::new() } else { "no stamp".to_string() }, false),
+                    (None, None) => (if r.stamp.is_some() { word.to_string() } else { "no stamp".to_string() }, false),
                 };
                 let mut hover = vec![r.name.clone()];
                 match &r.stamp {
@@ -149,13 +164,13 @@ impl App {
                 if r.len > 0.0 {
                     hover.push(format!("length {:.2} s", r.len));
                 }
-                if let Some((at, reading, d, absolute)) = p {
-                    hover.push(match reading {
-                        Reading::Start => format!("the stamp is its start, {d:+.2} s from the group"),
-                        Reading::End => format!("the stamp is its end, {d:+.2} s from the group"),
-                        Reading::Disagrees => format!("the stamp fits neither its start nor its end: {} off", gap_text(*d)),
-                        Reading::NoStamp => "audio only".to_string(),
-                    });
+                if let Some((at, d, absolute)) = p {
+                    if let Some(d) = d {
+                        let other = if end { d + r.len } else { d - r.len };
+                        let (first, second) = if end { (other, *d) } else { (*d, other) };
+                        hover.push(format!("from the group: {first:+.2} s if the stamp is its start, {second:+.2} s if its end"));
+                        hover.push(format!("read as its {word} (click the note on the right to change it)"));
+                    }
                     let e = r.info.as_ref().map_or(0.0, |c| c.error_at(0.0));
                     if *absolute {
                         hover.push(format!("audio: starts {} UTC ± {}", timebase::fmt_utc(*at), clock_view::err_text(e)));
@@ -169,10 +184,11 @@ impl App {
                 if let Some(Stage::Failed(e)) = &r.stage {
                     hover.push(e.clone());
                 }
-                Row { y: r.y, name: r.name.clone(), note, warn, amber, tick, teal, hover: hover.join("\n") }
+                let uid = r.stamp.as_ref().filter(|s| !s.sidecar).map(|_| r.uid.clone());
+                Row { y: r.y, name: r.name.clone(), note, warn, amber, tick, teal, hover: hover.join("\n"), uid, as_end: end }
             })
             .collect();
-        (rows, any_time, time_note)
+        (rows, any_time, time_note, spreads.map(|s| (s.1, s.2)))
     }
 
     /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
@@ -627,6 +643,10 @@ pub struct Row {
     pub tick: Option<f64>,
     pub teal: Option<(f64, f64)>,
     pub hover: String,
+    /// The source's id when its stamp can be read either way (the file's creation time), and how
+    /// it is read.
+    pub uid: Option<String>,
+    pub as_end: bool,
 }
 
 const AMBER: Color32 = Color32::from_rgb(235, 165, 55);
@@ -684,7 +704,7 @@ impl crate::look::NodeLook for Look {
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
         let r = crate::look::content(app, ui, i);
-        let (rows, real_time, time_note) = app.match_rows(i, ui.ctx());
+        let (rows, real_time, time_note, spreads) = app.match_rows(i, ui.ctx());
         let z = app.zoom;
         let (name_w, note_w) = (135.0 * z, 86.0 * z);
         let track = Rect::from_min_max(Pos2::new(r.left() + name_w, r.top()), Pos2::new(r.right() - note_w, r.bottom()));
@@ -738,6 +758,34 @@ impl crate::look::NodeLook for Look {
                 p.text(Pos2::new(at, w.y), side, text, font(10.0), DIM);
             }
             p.text(Pos2::new(track.right() + 6.0 * z, w.y), Align2::LEFT_CENTER, &w.note, font(10.5), if w.warn { WARN } else { DIM });
+        }
+        // The person's decision: a click on a note changes that row's reading.
+        let mut read: Vec<(Vec<String>, bool)> = Vec::new();
+        for (k, w) in rows.iter().enumerate() {
+            let Some(uid) = &w.uid else { continue };
+            let rect = Rect::from_min_max(Pos2::new(track.right() + 2.0 * z, w.y - row_h / 2.0), Pos2::new(r.right(), w.y + row_h / 2.0));
+            let them = if w.as_end { "start" } else { "end" };
+            if ui.interact(rect, egui::Id::new(("match-note", i, k)), Sense::click()).on_hover_text(format!("click: this stamp marks the recording's {them}")).clicked() {
+                read.push((vec![uid.clone()], !w.as_end));
+            }
+        }
+        // Under the rows: every stamp at once, and how far they disagree under each reading.
+        let all: Vec<String> = rows.iter().filter_map(|w| w.uid.clone()).collect();
+        if let (false, Some(last)) = (all.is_empty(), rows.last()) {
+            let y = last.y + row_h;
+            let button = |ui: &mut egui::Ui, x: f32, text: &str| ui.put(Rect::from_center_size(Pos2::new(x, y), Vec2::new(58.0 * z, 16.0 * z)), egui::Button::new(egui::RichText::new(text).size(10.0 * z))).clicked();
+            if button(ui, r.left() + 30.0 * z, "all start") {
+                read.push((all.clone(), false));
+            }
+            if button(ui, r.left() + 94.0 * z, "all end") {
+                read.push((all.clone(), true));
+            }
+            if let Some((s, e)) = spreads {
+                p.text(Pos2::new(track.left() + 6.0 * z, y), Align2::LEFT_CENTER, format!("stamps disagree by about {s:.1} s if all mark the start, {e:.1} s if all mark the end"), font(10.5), TEXT);
+            }
+        }
+        for (uids, end) in read {
+            app.set_stamp_end(&uids, end);
         }
         // The track: wheel zooms around the pointer, a drag pans, a double-click fits it again.
         app.match_ui.tracks.push(track);

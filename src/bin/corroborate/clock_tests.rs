@@ -649,7 +649,7 @@ fn audio_match_links_two_recordings() {
     d.shot("audio_match");
     // On the node: each row placed by audio once the match has ended. These files have no stamp.
     let ctx = d.h.ctx.clone();
-    let (rows, _, note) = d.app().match_rows(m, &ctx);
+    let (rows, _, note, _) = d.app().match_rows(m, &ctx);
     assert_eq!(rows.iter().filter(|r| r.teal.is_some()).count(), 3, "{:?}", rows.iter().map(|r| r.note.clone()).collect::<Vec<_>>());
     assert!(rows.iter().all(|r| r.amber.is_none() && r.note == "no stamp"));
     assert_eq!(note, "time: not wired");
@@ -661,9 +661,21 @@ fn audio_match_links_two_recordings() {
     d.app().wire(a, "time", m, "time");
     d.app().update_clocks();
     assert_eq!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "wired: the linked recording has real time");
-    let (rows, real, note) = d.app().match_rows(m, &ctx);
+    let (rows, real, note, _) = d.app().match_rows(m, &ctx);
     assert!(real && note.starts_with("time: "), "{note}");
     assert!((rows[0].teal.unwrap().0 - 1000.0).abs() < 0.01, "{:?}", rows[0].teal);
+    // Read as the end of the recording, the wired time moves its start back by the length, and
+    // the reading is saved with the project.
+    let ua = uid(d.app(), a);
+    d.app().set_stamp_end(std::slice::from_ref(&ua), true);
+    d.app().update_clocks();
+    let (rows, ..) = d.app().match_rows(m, &ctx);
+    assert!((rows[0].teal.unwrap().0 - 940.0).abs() < 0.01, "{:?}", rows[0].teal);
+    assert!(d.app().project_text().contains(&format!("stamp-end|{ua}\n")));
+    let mut other = App::empty();
+    assert!(other.evidence_line(&["stamp-end", &ua]) && other.ev.stamp_end.contains(&ua));
+    d.app().set_stamp_end(std::slice::from_ref(&ua), false);
+    assert!(!d.app().project_text().contains("stamp-end|"));
     assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
     d.app().graph.disconnect(m, "time");
     d.app().nodes[a].state.lock().unwrap().anchor = None;
@@ -932,7 +944,7 @@ fn audio_match_timeline() {
     d.app().frame_nodes(area);
     d.app().pick_none();
     d.frames(4);
-    let (r, _, _) = rows(&mut d);
+    let (r, _, _, _) = rows(&mut d);
     let stamped = r.iter().filter(|x| x.amber.is_some()).count();
     println!("before Run: {} rows, {stamped} with a file stamp", r.len());
     assert_eq!(r.len(), 12);
@@ -945,13 +957,30 @@ fn audio_match_timeline() {
     d.shot("am_2_running");
     assert!(d.wait_until(120.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.wait(1.0);
-    let (r, _, note) = rows(&mut d);
+    let (r, _, note, spreads) = rows(&mut d);
     for x in &r {
         println!("{:28} {:18} amber {:?} teal {:?}", x.name, x.note, x.amber.map(|b| b.0 as i64), x.teal.map(|b| b.0 as i64));
     }
     println!("{note}");
     assert_eq!(r.iter().filter(|x| x.teal.is_some()).count(), 12, "every row has its audio position");
     assert_eq!(note, "audio placed by best fit");
+    assert!(r.iter().filter(|x| x.amber.is_some()).all(|x| !x.as_end && x.note.starts_with("start")), "nothing decides but the person");
+    let (s_start, s_end) = spreads.expect("both readings measured");
+    println!("stamps disagree by {s_start:.1} s as starts, {s_end:.1} s as ends");
+    assert!(s_end < 2.0 && s_start > 10.0 * s_end, "the numbers show which reading fits");
+    d.shot("am_3_overlay_as_start");
+    // One row by a click on its note, then all of them with the button.
+    let track = d.app().match_ui.tracks[0];
+    let y0 = r[0].y;
+    d.click_at(track.right() + 30.0, y0);
+    assert!(rows(&mut d).0[0].as_end, "a click on the note reads that stamp as the end");
+    d.click("all end");
+    d.wait(0.5);
+    let (r, _, _, _) = rows(&mut d);
+    for x in &r {
+        println!("{:28} {:18} amber {:?} teal {:?}", x.name, x.note, x.amber.map(|b| b.0 as i64), x.teal.map(|b| b.0 as i64));
+    }
+    assert!(r.iter().filter(|x| x.amber.is_some()).all(|x| x.as_end && !x.warn), "as ends they all agree");
     d.shot("am_3_overlay");
     let report = |app: &App, when: &str| {
         let c = &app.ev.clocks;
@@ -975,12 +1004,16 @@ fn audio_match_timeline() {
     d.drag(from, to);
     d.wait(1.0);
     assert_eq!(d.app().graph.feeder(m, "time").map(|f| f.0), Some(s), "{}", d.msg());
-    let (r2, _, note2) = rows(&mut d);
+    let (r2, _, note2, _) = rows(&mut d);
     println!("wired: {note2}");
     for x in &r2 {
         println!("{:28} {:18} teal {:?}", x.name, x.note, x.teal.map(|b| b.0 as i64));
     }
     assert!(note2.starts_with("time: phone 0"), "{note2}");
+    assert!(r2.iter().filter(|x| x.amber.is_some()).all(|x| !x.warn), "a wired end stamp fits the rest: {:?}", r2.iter().map(|x| x.note.clone()).collect::<Vec<_>>());
+    let jump = (r2[0].teal.unwrap().0 - r[0].teal.unwrap().0).abs();
+    println!("wiring the time moved the group by {jump:.2} s");
+    assert!(jump < 5.0, "the wired time follows the reading: {jump}");
     let app = d.app();
     report(app, "time wired");
     assert!(app.ev.clocks.contradictions.is_empty(), "a loose anchor makes no contradictions: {:?}", app.ev.clocks.contradictions.len());

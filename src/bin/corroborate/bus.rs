@@ -180,7 +180,7 @@ impl App {
             (PortKind::Time, _) => s
                 .anchor
                 .as_ref()
-                .map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() })
+                .map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(self.start_utc(from, a)), error_s: a.error_s, source: a.source.clone() })
                 .ok_or("no time yet".into()),
             (PortKind::Event, Kind::Plugin { .. }) => Ok(Data::Events(
                 s.plugin.findings.iter().map(|f| Event { clock: clock.clone(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: f.error_s }).collect(),
