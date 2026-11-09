@@ -97,6 +97,21 @@ fn jiku() -> Drive {
 fn cleanup_lab_jiku() {
     let mut d = jiku();
     judge(&mut d, "jiku");
+    // How far each node that feeds nothing stands from what feeds it, and what the wire passes.
+    let app = d.app();
+    let ids: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| app.on_canvas(i)).collect();
+    let (items, links, at) = sheet(app);
+    for (n, &id) in ids.iter().enumerate() {
+        if links.iter().any(|l| l.from == n) || !links.iter().any(|l| l.to == n) || links.iter().filter(|l| l.to == n).count() > 3 {
+            continue;
+        }
+        for l in links.iter().filter(|l| l.to == n) {
+            let gap = at[n].0 - (at[l.from].0 + items[l.from].w);
+            let (y0, y1) = (at[l.from].1 + l.from_y, at[n].1 + l.to_y);
+            let passed = (0..items.len()).filter(|&m| m != n && m != l.from && at[m].0 + items[m].w > at[l.from].0 + items[l.from].w && at[m].0 < at[n].0 && at[m].1 < y0.max(y1) && at[m].1 + items[m].h > y0.min(y1)).count();
+            println!("   end node {:18} gap to its feeder {gap:6.0}, height apart {:6.0}, nodes passed {passed}", app.nodes[id].label, (y1 - y0).abs());
+        }
+    }
 }
 
 /// Every source expanded, as a project looks before anyone collapses them.

@@ -227,20 +227,30 @@ fn columns(piece: &[usize], links: &[Link], count: usize) -> Vec<usize> {
     column
 }
 
-/// Deals a column taller than `limit` into several, each node to the shortest so far: the order
-/// down each one stays the column's.
-fn deal(col: &[usize], items: &[Item], limit: f32) -> Vec<Vec<usize>> {
+/// Deals a column taller than `limit` into several, left to right. A node whose wires all come
+/// from the left (a Map at the end of a branch) goes in the leftmost that has room, next to what
+/// feeds it; the others each go to the shortest so far. The order down each one stays the column's.
+fn deal(col: &[usize], items: &[Item], limit: f32, feeds_on: &[bool]) -> Vec<Vec<usize>> {
     let height: f32 = col.iter().map(|&n| items[n].h + NODE_GAP).sum();
     if height <= (limit * WRAP_OVER).max(WRAP_FROM) {
         return vec![col.to_vec()];
     }
     let k = (height / limit).ceil() as usize;
-    let mut out = vec![Vec::new(); k];
+    let mut which = vec![0usize; items.len()];
     let mut used = vec![0.0f32; k];
-    for &n in col {
-        let s = (0..k).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
-        out[s].push(n);
+    for &n in col.iter().filter(|&&n| !feeds_on[n]) {
+        let s = (0..k).find(|&s| used[s] + items[n].h <= limit).unwrap_or(k - 1);
+        which[n] = s;
         used[s] += items[n].h + NODE_GAP;
+    }
+    for &n in col.iter().filter(|&&n| feeds_on[n]) {
+        let s = (0..k).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
+        which[n] = s;
+        used[s] += items[n].h + NODE_GAP;
+    }
+    let mut out = vec![Vec::new(); k];
+    for &n in col {
+        out[which[n]].push(n);
     }
     out
 }
@@ -291,10 +301,14 @@ fn place_piece(piece: &[usize], items: &[Item], links: &[Link], out: &mut [(f32,
     let area: f32 = piece.iter().map(|&n| (items[n].w + COLUMN_GAP) * (items[n].h + NODE_GAP)).sum();
     let tallest = piece.iter().map(|&n| items[n].h).fold(0.0, f32::max);
     let limit = tallest.max((area / SCREEN).sqrt());
+    let mut feeds_on = vec![false; items.len()];
+    for l in links.iter().filter(|l| column[l.to] > column[l.from]) {
+        feeds_on[l.from] = true;
+    }
     // (nodes, the gap after them)
     let mut stacks: Vec<(Vec<usize>, f32)> = Vec::new();
     for col in &best {
-        let dealt = deal(col, items, limit);
+        let dealt = deal(col, items, limit, &feeds_on);
         let last = dealt.len() - 1;
         stacks.extend(dealt.into_iter().enumerate().map(|(k, c)| (c, if k == last { COLUMN_GAP } else { DEALT_GAP })));
     }
@@ -535,6 +549,29 @@ mod tests {
         for k in 0..40 {
             assert!((at[k].1 + 60.0 - (at[40].1 + 30.0 + k as f32 * 64.0)).abs() < 200.0, "node {k} is near its row: {at:?}");
         }
+    }
+
+    /// A node at the end of a branch stays beside what feeds it when its column is dealt out,
+    /// with nothing between them: the recordings that go on further right take the other columns.
+    #[test]
+    fn an_end_node_stays_next_to_what_feeds_it() {
+        // 0 feeds 1 and also 2, 2 is one of many feeding the tall node 3 at the far right; 1 ends.
+        let mut items = vec![item(0.0, 170.0), item(9.0, 400.0)];
+        let mut links = vec![link(0, 1, 60.0, 30.0)];
+        items.push(item(20.0, 170.0));
+        links.push(link(0, 2, 60.0, 30.0));
+        let sink = 40;
+        for k in 3..sink {
+            items.push(item(k as f32 * 8.0, 170.0));
+        }
+        items.push(Item { x: 0.0, y: 0.0, w: 980.0, h: 2600.0 });
+        for k in 2..sink {
+            links.push(link(k, sink, 60.0, 30.0 + k as f32 * 64.0));
+        }
+        let at = place(&items, &links);
+        assert!(apart(&items, &at), "{at:?}");
+        let gap = at[1].0 - (at[0].0 + items[0].w);
+        assert!((gap - COLUMN_GAP).abs() < 1.0, "the end node is in the first column after its feeder: gap {gap}");
     }
 
     /// An ordinary column is left whole, even when it is a few nodes tall.
