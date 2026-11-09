@@ -34,16 +34,17 @@ In the workbench: right-click (or **Add node**) to add nodes, drag from a dot to
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
 Projects: the top bar shows **Project**, the project's name (with • while it has unsaved changes)
-and **Recordings**. Project has **New** (Ctrl+N), **Open…** (Ctrl+O, pick a project's folder),
-**Open project file…** (a single .txt project), **Open recent**, **Save** (Ctrl+S), **Save as…**
-(Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project folder**. Save as and Save
-a copy pick (or make) a folder: a project is that folder, its file `<folder>\<folder name>.txt`, with
+and **Recordings**. Project has **New…** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**, **Save**
+(Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project
+folder**. New, Open, Save as and Save a copy all pick a folder, and New and the two saves can make
+one: a project is that folder, its file `<folder>\<folder name>.txt`, with
 `results\` (what its Result records write) and `recordings\` (files copied into it); the dialogs start in
-`app\projects\`. The project file changes only on Save; until then changes are kept in
+`app\projects\`. A folder that already holds another project is refused for New and the saves, so
+its file is never written over. The project file changes only on Save; until then changes are kept in
 `<name>.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
-ask Save, Don't save or Cancel when there are unsaved changes. Until it is saved somewhere, the
-project is "untitled" and lives in `settings\project.txt` (written as you work); New keeps the old
-one as `settings\project.bak.txt`. The project last opened opens at the next start
+ask Save, Don't save or Cancel when there are unsaved changes. A project that was never given a
+folder (the first start, or `--new`) is "untitled" and lives in `settings\project.txt` (written as
+you work). The project last opened opens at the next start
 (`settings\last_project.txt`; the ten last opened are `settings\recent.txt`). `--new` starts with an empty untitled project.
 
 Recordings belong to the project: every file a SOURCER reads is listed under **Recordings** with

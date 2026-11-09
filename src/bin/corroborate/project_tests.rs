@@ -259,10 +259,10 @@ fn new_open_save_as() {
     d.app().save_project_as(dir.join("case one.txt"));
     assert_eq!(d.app().project_name(), "case one");
     assert!(std::fs::read_to_string(&file).unwrap().contains("wire|0|location|1|location 1"));
-    d.app().new_project();
+    d.app().new_project(&dir.join("case two"));
     d.frames(3);
     assert!(d.app().nodes.is_empty(), "New empties the canvas");
-    assert_eq!(d.app().project_name(), "untitled");
+    assert_eq!(d.app().project_name(), "case two");
     d.shot("project_new");
     d.app().open_project(file.clone());
     d.frames(3);

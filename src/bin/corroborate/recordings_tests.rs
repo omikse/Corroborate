@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::drive::{out_dir, Drive};
-use project::{project_file_of, project_in, project_place, push_recent, recent_in, recovery_of, Answer, Then};
+use project::{project_file_of, project_in, project_place, push_recent, recent_in, recovery_of, taken_by, Answer, Then};
 use recordings::{relative, State};
 use std::path::Path;
 
@@ -79,6 +79,50 @@ fn folders_are_projects() {
     assert_eq!(project_file_of(&other), Some(other.join("old name.txt")), "the only project file in a renamed folder");
 }
 
+/// New makes the project in the picked folder at once, and Open on that folder finds it, nodes
+/// added since and all. An empty project is still a project.
+#[test]
+fn new_makes_a_project_in_its_folder() {
+    let d = fresh("new").join("harbour case");
+    let mut a = App::empty();
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    a.new_project(&d);
+    let file = d.join("harbour case.txt");
+    assert_eq!(a.project_path.as_deref(), Some(file.as_path()), "the project file takes the folder's name");
+    assert!(a.nodes.is_empty(), "New empties the canvas");
+    assert!(!a.dirty(), "nothing to save yet");
+    assert_eq!(project_file_of(&d), Some(file.clone()), "the new, empty project is there to Open");
+    let mut b = App::empty();
+    b.open_project(file.clone());
+    assert_eq!(b.project_path.as_deref(), Some(file.as_path()));
+    assert!(!b.dirty(), "an empty project opens with nothing unsaved");
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    assert!(a.dirty());
+    assert!(a.save());
+    let mut c = App::empty();
+    c.open_project(project_file_of(&d).unwrap());
+    assert_eq!(c.nodes.len(), 1, "saves go into the folder");
+}
+
+/// New and the saves are refused a folder holding another project; a project's own folder is
+/// fine for its own Save as, and a folder of other files is free.
+#[test]
+fn a_folder_holding_a_project_is_taken() {
+    let root = fresh("taken");
+    let d = root.join("case");
+    let mut a = App::empty();
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    a.save_project_as(project_in(&d));
+    let file = project_in(&d);
+    assert_eq!(taken_by(&d, None), Some(file.clone()), "for New and Save a copy");
+    assert_eq!(taken_by(&d, Some(&file)), None, "its own folder, for its own Save as");
+    assert_eq!(taken_by(&d, Some(&root.join("other").join("other.txt"))), Some(file), "another project's Save as");
+    let notes = root.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(notes.join("list.txt"), "not a project").unwrap();
+    assert_eq!(taken_by(&notes, None), None, "other files take no room");
+}
+
 #[test]
 fn recent_projects_newest_first_once() {
     let d = fresh("recent");
@@ -130,7 +174,7 @@ fn save_mark_and_round_trip() {
     assert!(!d.app().dirty());
     let want = graph_of(d.app());
 
-    d.app().request(Then::New);
+    d.app().request(Then::New(dir.join("next case")));
     assert!(d.app().ask.is_none(), "nothing unsaved: no question");
     d.frames(2);
     assert!(d.app().nodes.is_empty() && d.app().library.list.is_empty());
@@ -180,14 +224,16 @@ fn unsaved_changes_ask_first() {
     let file = d.app().project_path.clone().unwrap();
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.app().save_project();
-    d.app().request(Then::New);
+    let next = dir.join("next case");
+    d.app().request(Then::New(next.clone()));
     d.frames(3);
-    assert_eq!(d.app().ask, Some(Then::New));
+    assert_eq!(d.app().ask, Some(Then::New(next.clone())));
     d.shot("project_ask");
     d.click("Cancel");
     assert!(d.app().ask.is_none());
     assert_eq!(d.app().nodes.len(), 2, "Cancel keeps everything");
-    d.app().request(Then::New);
+    assert!(!next.exists(), "Cancel makes no new project");
+    d.app().request(Then::New(next));
     d.frames(2);
     d.click("Save");
     assert!(d.app().nodes.is_empty(), "saved, then a new project");
