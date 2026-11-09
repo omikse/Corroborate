@@ -232,6 +232,17 @@ impl App {
         Snap { nodes, wires, key }
     }
 
+    /// The folder `old` is now `new`: undo steps read the recordings inside it from there too.
+    pub(crate) fn history_paths_moved(&mut self, old: &std::path::Path, new: &std::path::Path) {
+        for n in self.history.snaps.iter_mut().flat_map(|s| s.nodes.iter_mut().flatten()) {
+            if let Kind::Sourcer { input } = &mut n.kind {
+                if let Some(to) = Self::file_of(input).and_then(|f| recordings::moved_with(old, new, &f)) {
+                    *input = to.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
     /// Makes the current project an undo step if it differs from the last one.
     fn commit(&mut self, key: String) {
         let h = &self.history;

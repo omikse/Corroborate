@@ -248,7 +248,7 @@ fn old_names_are_saved_as_ids() {
 fn new_open_save_as() {
     let dir = out_dir().join("project_menu");
     let _ = std::fs::remove_dir_all(&dir);
-    let file = dir.join("case one").join("case one.txt");
+    let file = dir.join("case one").join("project.txt");
     let mut d = Drive::new();
     let inv = d.app().add(Kind::InvertLocation, Pos2::new(40.0, 60.0));
     let map = d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
@@ -256,7 +256,7 @@ fn new_open_save_as() {
     d.frames(3);
     assert_eq!(d.app().project_name(), "untitled");
     let before = describe_project(d.app());
-    d.app().save_project_as(dir.join("case one.txt"));
+    d.app().save_project_as(dir.join("case one"));
     assert_eq!(d.app().project_name(), "case one");
     assert!(std::fs::read_to_string(&file).unwrap().contains("wire|0|location|1|location 1"));
     d.app().new_project(&dir.join("case two"));
@@ -326,8 +326,8 @@ fn collapse_is_remembered() {
     let m = a.add(Kind::Map, Pos2::new(40.0, 60.0));
     a.add(Kind::Sourcer { input: String::new() }, Pos2::new(500.0, 60.0));
     d.frames(3);
-    d.app().save_project_as(dir.join("folded.txt"));
-    let file = dir.join("folded").join("folded.txt");
+    d.app().save_project_as(dir.join("folded"));
+    let file = dir.join("folded").join("project.txt");
     let p = d.node_title(m);
     d.right_click_at(p.x, p.y);
     d.click("Collapse");

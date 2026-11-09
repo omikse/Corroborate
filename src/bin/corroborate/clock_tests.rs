@@ -567,7 +567,7 @@ fn timeline_node_draws_what_it_is_given() {
     d.shot("timeline_node_sorted");
 }
 
-/// Makes the Jiku project in the app folder: app\projects\Jiku GT_090912\Jiku GT_090912.txt, one
+/// Makes the Jiku project in the app folder: app\projects\Jiku GT_090912\project.txt, one
 /// SOURCER per video of event GT_090912 (the .mp4 files in tests\data\jiku, referenced where
 /// they are, not copied: 13 GB), all wired into one Audio match node, and puts it first in Open
 /// recent. Then runs it headless (no window) and checks the recordings link into groups, drawn
@@ -601,10 +601,11 @@ fn make_jiku_project() {
         app.wire_many(s, "audio", m);
     }
     assert_eq!(app.graph.wires().len(), 50, "every video wired in");
-    let file = project::project_place(&root.join("app").join("projects").join("Jiku GT_090912"));
+    let dir = root.join("app").join("projects").join("Jiku GT_090912");
+    let file = project::project_in(&dir);
     // A fresh project: no unsaved changes of an earlier one restored over it.
     let _ = std::fs::remove_file(project::recovery_of(&file));
-    app.save_project_as(file.clone());
+    app.save_project_as(dir);
     assert!(file.is_file(), "{}", file.display());
     project::push_recent(&root.join("app").join("settings"), &file);
     println!("saved {}", file.display());
@@ -669,7 +670,7 @@ fn a_file_stamp_is_a_claim_only() {
 #[ignore]
 fn jiku_project_opens_stopped() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let made = root.join("app").join("projects").join("Jiku GT_090912").join("Jiku GT_090912.txt");
+    let made = root.join("app").join("projects").join("Jiku GT_090912").join("project.txt");
     assert!(made.is_file(), "make it first: make_jiku_project");
     let dir = crate::drive::out_dir().join("Jiku copy");
     let _ = std::fs::remove_dir_all(&dir);
@@ -770,9 +771,10 @@ fn make_jiku_group6() {
     for &s in &made {
         app.wire_many(s, "audio", a);
     }
-    let file = project::project_place(&root.join("app").join("projects").join("Jiku group 6"));
+    let dir = root.join("app").join("projects").join("Jiku group 6");
+    let file = project::project_in(&dir);
     let _ = std::fs::remove_file(project::recovery_of(&file));
-    app.save_project_as(file.clone());
+    app.save_project_as(dir);
     assert!(file.is_file());
     project::push_recent(&root.join("app").join("settings"), &file);
     println!("saved {}", file.display());
@@ -788,7 +790,7 @@ fn make_jiku_group6() {
 fn audio_match_timeline() {
     use crate::audio_match_node::{cell, Cell};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let made = root.join("app").join("projects").join("Jiku group 6").join("Jiku group 6.txt");
+    let made = root.join("app").join("projects").join("Jiku group 6").join("project.txt");
     assert!(made.is_file(), "make it first: make_jiku_group6");
     let dir = crate::drive::out_dir().join("Jiku group 6 copy");
     let _ = std::fs::remove_dir_all(&dir);

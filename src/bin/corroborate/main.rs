@@ -272,6 +272,9 @@ struct App {
     /// The project file chosen with Open or Save as; None is the untitled one,
     /// settings\project.txt (project.rs).
     project_path: Option<PathBuf>,
+    /// The name being typed in the top bar; the first frame takes the keyboard (project.rs).
+    renaming: Option<String>,
+    renaming_fresh: bool,
     /// Shared clocks, the evidence about the clocks and the clocks solved from it (evidence.rs).
     ev: evidence::Evidence,
     /// The location panel (right).
@@ -350,6 +353,8 @@ impl App {
             sel: Default::default(),
             history: Default::default(),
             project_path: None,
+            renaming: None,
+            renaming_fresh: false,
             next_uid: 1,
             ev: Default::default(),
             maps: Default::default(),

@@ -130,6 +130,11 @@ pub fn relative(from: &Path, to: &Path) -> Option<PathBuf> {
     Some(r)
 }
 
+/// Where `p` is once folder `old` has become `new`; None when `p` is not inside `old`.
+pub fn moved_with(old: &Path, new: &Path, p: &Path) -> Option<PathBuf> {
+    relative(old, p).filter(|r| !r.starts_with("..") && !r.is_absolute()).map(|r| new.join(r))
+}
+
 /// A file with `size` and `print` under `root` (at most 4 folders down), whatever its name.
 fn find(root: &Path, size: u64, want: &str, depth: usize) -> Option<PathBuf> {
     let entries = std::fs::read_dir(root).ok()?;
@@ -321,6 +326,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The folder `old` is now `new` (the project was renamed): recordings inside it, and the
+    /// SOURCERs reading them, follow. Undo steps are text and follow too.
+    pub(crate) fn folder_moved(&mut self, old: &Path, new: &Path) {
+        for k in 0..self.library.list.len() {
+            let at = self.library.list[k].path.clone();
+            let Some(to) = moved_with(old, new, &at) else { continue };
+            self.point_sources(&at, &to);
+            self.library.list[k].path = to;
+        }
+        self.history_paths_moved(old, new);
     }
 
     /// Recording `id` is now at `new` (Locate…, a finished copy): its SOURCERs follow.

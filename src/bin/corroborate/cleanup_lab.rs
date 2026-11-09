@@ -8,7 +8,7 @@ use super::drive::{self, Drive};
 use super::*;
 use corroborate::node_layout::{measure, Item, Link, Report};
 
-const JIKU: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/app/projects/Jiku GT_090912/Jiku GT_090912.txt");
+const JIKU: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/app/projects/Jiku GT_090912/project.txt");
 
 /// The canvas as the placer sees it, in canvas units.
 fn sheet(app: &mut App) -> (Vec<Item>, Vec<Link>, Vec<(f32, f32)>) {

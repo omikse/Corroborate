@@ -108,6 +108,12 @@ impl Drive {
         self.frames(2);
     }
 
+    /// Presses a key.
+    pub fn press(&mut self, key: egui::Key) {
+        self.h.key_press(key);
+        self.frames(2);
+    }
+
     /// Clicks at a point on screen (canvas coordinates as shown in the PNG).
     pub fn click_at(&mut self, x: f32, y: f32) {
         let p = Pos2::new(x, y);

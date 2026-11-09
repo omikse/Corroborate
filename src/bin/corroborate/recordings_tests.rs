@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::drive::{out_dir, Drive};
-use project::{project_file_of, project_in, project_place, push_recent, recent_in, recovery_of, taken_by, Answer, Then};
+use project::{bad_name, drop_recent, project_file_of, project_in, push_recent, recent_in, recovery_of, taken_by, Answer, Then};
 use recordings::{relative, State};
 use std::path::Path;
 
@@ -47,10 +47,8 @@ fn source_inputs(app: &App) -> Vec<String> {
 #[test]
 fn places_and_relative_paths() {
     let p = |s: &str| PathBuf::from(s);
-    assert_eq!(project_place(&p(r"C:\cases\case one.txt")), p(r"C:\cases\case one\case one.txt"), "Save as makes the project's folder");
-    assert_eq!(project_place(&p(r"C:\cases\case one\case one.txt")), p(r"C:\cases\case one\case one.txt"), "already in its folder");
-    assert_eq!(project_place(&p(r"C:\cases\x")), p(r"C:\cases\x\x.txt"), "gets .txt");
-    assert_eq!(recovery_of(&p(r"C:\a\b.txt")), p(r"C:\a\b.recovery.txt"));
+    assert_eq!(project_in(&p(r"C:\cases\case one")), p(r"C:\cases\case one\project.txt"));
+    assert_eq!(recovery_of(&p(r"C:\a\project.txt")), p(r"C:\a\project.recovery.txt"));
     if cfg!(windows) {
         assert_eq!(relative(&p(r"C:\cases\one"), &p(r"C:\cases\one\recordings\a.wav")), Some(p(r"recordings\a.wav")));
         assert_eq!(relative(&p(r"C:\cases\one"), &p(r"C:\media\a.wav")), Some(p(r"..\..\media\a.wav")));
@@ -59,24 +57,152 @@ fn places_and_relative_paths() {
     }
 }
 
-/// Save as picks a folder: the project is `<folder>\<folder name>.txt`; Open on a folder finds
-/// that file, or the one project file there.
+/// Save as picks a folder: the project is that folder's project.txt, and the folder's name is the
+/// project's, even when the folder is renamed outside the program.
 #[test]
 fn folders_are_projects() {
     let d = fresh("folders").join("case two");
     std::fs::create_dir_all(&d).unwrap();
-    assert_eq!(project_in(&d), d.join("case two.txt"));
     assert_eq!(project_file_of(&d), None, "an empty folder holds no project");
     let mut a = App::empty();
     a.add(Kind::Map, Pos2::new(10.0, 10.0));
-    a.save_project_as(project_in(&d));
-    assert_eq!(a.project_path.as_deref(), Some(d.join("case two.txt").as_path()), "no folder inside the picked one");
-    assert_eq!(project_file_of(&d), Some(d.join("case two.txt")));
+    a.save_project_as(d.clone());
+    assert_eq!(a.project_path.as_deref(), Some(d.join("project.txt").as_path()), "no folder inside the picked one");
+    assert_eq!(a.project_name(), "case two");
+    assert_eq!(project_file_of(&d), Some(d.join("project.txt")));
     let other = d.parent().unwrap().join("renamed");
-    std::fs::create_dir_all(&other).unwrap();
-    std::fs::copy(d.join("case two.txt"), other.join("old name.txt")).unwrap();
-    std::fs::write(other.join("notes.txt"), "not a project").unwrap();
-    assert_eq!(project_file_of(&other), Some(other.join("old name.txt")), "the only project file in a renamed folder");
+    std::fs::rename(&d, &other).unwrap();
+    let mut b = App::empty();
+    b.open_project(project_file_of(&other).unwrap());
+    assert_eq!(b.project_name(), "renamed", "the name is the folder's");
+    let notes = d.parent().unwrap().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(notes.join("list.txt"), "node|map|0|0||\n").unwrap();
+    assert_eq!(project_file_of(&notes), None, "only project.txt is a project");
+}
+
+/// Renaming moves the folder: recordings inside it are read from the new place, those outside
+/// stay, the name and the project file follow, and it opens clean afterwards.
+#[test]
+fn rename_moves_the_folder_and_what_is_in_it() {
+    let root = fresh("rename");
+    let (d, moved) = (root.join("harbour"), root.join("harbour blast"));
+    let (inside, beside) = (d.join("recordings").join("inside.wav"), root.join("beside.wav"));
+    wav(&inside, 300.0, 0.5);
+    wav(&beside, 400.0, 0.5);
+    let mut a = App::empty();
+    for f in [&inside, &beside] {
+        a.add(Kind::Sourcer { input: f.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
+    }
+    a.sync_recordings();
+    a.save_project_as(d.clone());
+    assert!(a.rename_project("harbour blast"), "{}", a.msg);
+    assert!(!d.exists() && moved.join("recordings").join("inside.wav").is_file(), "the folder moved with what is in it");
+    assert_eq!(a.project_name(), "harbour blast");
+    assert_eq!(a.results_dir(), moved.join("results"));
+    assert!(!a.dirty(), "a saved project stays saved");
+    let inputs = source_inputs(&a);
+    assert_eq!(recordings::key(Path::new(&inputs[0])), recordings::key(&moved.join("recordings").join("inside.wav")));
+    assert_eq!(recordings::key(Path::new(&inputs[1])), recordings::key(&beside), "one outside the folder stays");
+    let mut b = App::empty();
+    b.open_project(project_in(&moved));
+    assert!(b.library.list.iter().all(|r| r.state == State::Ok), "{:?}", b.library.list);
+    assert!(!b.dirty());
+    assert_eq!(graph_of(&b), graph_of(&a));
+}
+
+/// Unsaved changes stay unsaved through a rename, and come back from the recovery file.
+#[test]
+fn rename_keeps_unsaved_changes_unsaved() {
+    let root = fresh("rename_unsaved");
+    let mut a = App::empty();
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    a.save_project_as(root.join("before"));
+    a.add(Kind::Map, Pos2::new(300.0, 10.0));
+    a.save_project();
+    assert!(a.rename_project("after"), "{}", a.msg);
+    assert!(a.dirty());
+    let file = project_in(&root.join("after"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().filter(|l| l.starts_with("node|")).count(), 1, "Save has not happened");
+    assert!(recovery_of(&file).is_file());
+    let mut b = App::empty();
+    b.open_project(file);
+    assert_eq!(b.nodes.len(), 2, "the unsaved node came back");
+}
+
+/// What a rename refuses, leaving the project where it was; changing only the letter case works.
+#[test]
+fn rename_refusals() {
+    let root = fresh("rename_refused");
+    std::fs::create_dir_all(root.join("taken")).unwrap();
+    let mut a = App::empty();
+    a.add(Kind::Map, Pos2::new(10.0, 10.0));
+    assert!(!a.rename_project("x"), "untitled has no folder");
+    a.save_project_as(root.join("case"));
+    for name in ["", "   ", "a/b", r"a\b", "a:b", "what?", "dots.", "CON", "com1.backup", "taken", "case"] {
+        assert!(!a.rename_project(name), "{name:?}");
+        assert_eq!(a.project_name(), "case");
+        assert!(root.join("case").join("project.txt").is_file());
+    }
+    assert!(a.msg.contains("not renamed") || a.msg.contains("saved"), "{}", a.msg);
+    assert!(bad_name("Jiku GT_090912 (2)").is_none());
+    assert!(bad_name("console").is_none(), "only the exact device names");
+    assert!(a.rename_project("Case"), "{}", a.msg);
+    assert_eq!(a.project_name(), "Case");
+}
+
+/// An undo step from before a rename reads a recording inside the folder from the new place.
+#[test]
+fn undo_after_a_rename_finds_the_recording() {
+    let root = fresh("rename_undo");
+    let inside = root.join("old").join("recordings").join("inside.wav");
+    wav(&inside, 300.0, 0.5);
+    let mut d = Drive::new();
+    d.app().add(Kind::Sourcer { input: inside.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
+    d.app().sync_recordings();
+    d.app().save_project_as(root.join("old"));
+    // A change becomes an undo step once it has held for a moment.
+    d.wait(1.5);
+    d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
+    assert!(d.app().rename_project("new"));
+    assert!(d.app().undo());
+    assert_eq!(d.app().nodes.iter().filter(|n| !n.hidden).count(), 1, "the Map is undone");
+    let want = recordings::key(&root.join("new").join("recordings").join("inside.wav"));
+    assert_eq!(recordings::key(Path::new(&source_inputs(d.app())[0])), want);
+}
+
+/// Clicking the name in the top bar makes it a box: Enter renames, Esc leaves it.
+#[test]
+fn the_name_in_the_top_bar_renames_the_project() {
+    let root = fresh("rename_bar");
+    let mut d = Drive::new();
+    d.app().add(Kind::Map, Pos2::new(40.0, 60.0));
+    d.app().save_project_as(root.join("first name"));
+    d.frames(2);
+    d.click("first name");
+    assert_eq!(d.app().renaming.as_deref(), Some("first name"));
+    d.type_into(0, "typed then left");
+    d.press(egui::Key::Escape);
+    assert!(d.app().renaming.is_none());
+    assert_eq!(d.app().project_name(), "first name", "Esc leaves it");
+    d.click("first name");
+    d.type_into(0, "second name");
+    d.shot("project_rename");
+    d.press(egui::Key::Enter);
+    assert!(d.app().renaming.is_none());
+    assert_eq!(d.app().project_name(), "second name");
+    assert!(root.join("second name").join("project.txt").is_file() && !root.join("first name").exists());
+    d.shot("project_renamed");
+}
+
+#[test]
+fn renamed_projects_leave_recent() {
+    let d = fresh("recent_drop");
+    for k in [1, 2] {
+        push_recent(&d, &PathBuf::from(format!(r"C:\cases\p{k}\project.txt")));
+    }
+    drop_recent(&d, &PathBuf::from(r"C:\cases\p2\project.txt"));
+    assert_eq!(recent_in(&d), [PathBuf::from(r"C:\cases\p1\project.txt")]);
 }
 
 /// New makes the project in the picked folder at once, and Open on that folder finds it, nodes
@@ -87,8 +213,9 @@ fn new_makes_a_project_in_its_folder() {
     let mut a = App::empty();
     a.add(Kind::Map, Pos2::new(10.0, 10.0));
     a.new_project(&d);
-    let file = d.join("harbour case.txt");
-    assert_eq!(a.project_path.as_deref(), Some(file.as_path()), "the project file takes the folder's name");
+    let file = d.join("project.txt");
+    assert_eq!(a.project_path.as_deref(), Some(file.as_path()));
+    assert_eq!(a.project_name(), "harbour case", "the name is the folder's");
     assert!(a.nodes.is_empty(), "New empties the canvas");
     assert!(!a.dirty(), "nothing to save yet");
     assert_eq!(project_file_of(&d), Some(file.clone()), "the new, empty project is there to Open");
@@ -112,7 +239,7 @@ fn a_folder_holding_a_project_is_taken() {
     let d = root.join("case");
     let mut a = App::empty();
     a.add(Kind::Map, Pos2::new(10.0, 10.0));
-    a.save_project_as(project_in(&d));
+    a.save_project_as(d.clone());
     let file = project_in(&d);
     assert_eq!(taken_by(&d, None), Some(file.clone()), "for New and Save a copy");
     assert_eq!(taken_by(&d, Some(&file)), None, "its own folder, for its own Save as");
@@ -151,8 +278,8 @@ fn save_mark_and_round_trip() {
     d.app().wire(src, "audio", enf, "audio");
     d.frames(3);
     assert_eq!(d.app().library.list.len(), 1, "the SOURCER's file joined the project");
-    d.app().save_project_as(dir.join("case one.txt"));
-    let file = dir.join("case one").join("case one.txt");
+    d.app().save_project_as(dir.join("case one"));
+    let file = dir.join("case one").join("project.txt");
     assert_eq!(d.app().project_path.as_deref(), Some(file.as_path()));
     let text = std::fs::read_to_string(&file).unwrap();
     let rec = text.lines().find(|l| l.starts_with("rec|")).expect("a recording line");
@@ -193,7 +320,7 @@ fn recovery_restores_and_revert_drops() {
     let dir = fresh("recovery");
     let mut a = App::empty();
     a.add(Kind::Map, Pos2::new(10.0, 10.0));
-    a.save_project_as(dir.join("r.txt"));
+    a.save_project_as(dir.join("r"));
     let file = a.project_path.clone().unwrap();
     a.add(Kind::InvertLocation, Pos2::new(300.0, 10.0));
     a.save_project();
@@ -220,7 +347,7 @@ fn unsaved_changes_ask_first() {
     let dir = fresh("ask");
     let mut d = Drive::new();
     d.app().add(Kind::Map, Pos2::new(40.0, 60.0));
-    d.app().save_project_as(dir.join("ask.txt"));
+    d.app().save_project_as(dir.join("ask"));
     let file = d.app().project_path.clone().unwrap();
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.app().save_project();
@@ -273,7 +400,7 @@ fn moved_missing_and_changed_recordings() {
     }
     a.sync_recordings();
     assert_eq!(a.library.list.len(), 5);
-    a.save_project_as(old.join("case").join("case.txt"));
+    a.save_project_as(old.join("case"));
     let want = graph_of(&a).len();
     drop(a);
 
@@ -284,7 +411,7 @@ fn moved_missing_and_changed_recordings() {
     std::fs::rename(new.join("case").join("renamed.wav"), new.join("case").join("recordings").join("now here.wav")).unwrap();
 
     let mut b = App::empty();
-    b.open_project(new.join("case").join("case.txt"));
+    b.open_project(new.join("case").join("project.txt"));
     assert_eq!(graph_of(&b).len(), want);
     let state = |b: &App, name: &str| b.library.list.iter().find(|r| r.path.to_string_lossy().contains(name)).map(|r| r.state.clone());
     assert!(matches!(state(&b, "inside.wav"), Some(State::Moved(_))), "{:?}", b.library.list);
@@ -327,7 +454,7 @@ fn copy_into_project_and_remove() {
     d.frames(2);
     let id = d.app().library.list[0].id.clone();
     assert!(!d.app().copy_into_project(&id), "untitled: nowhere to copy to");
-    d.app().save_project_as(dir.join("c.txt"));
+    d.app().save_project_as(dir.join("c"));
     assert!(d.app().copy_into_project(&id));
     assert!(d.wait_until(10.0, |a| !a.copying()), "the copy finished");
     let copy = dir.join("c").join("recordings").join("tower.wav");
@@ -335,7 +462,7 @@ fn copy_into_project_and_remove() {
     assert!(clip.is_file(), "the original stays");
     assert_eq!(recordings::key(Path::new(&source_inputs(d.app())[0])), recordings::key(&copy), "the SOURCER reads the copy");
     assert!(d.app().save());
-    assert!(std::fs::read_to_string(dir.join("c").join("c.txt")).unwrap().contains(r"|recordings\tower.wav|") || cfg!(not(windows)));
+    assert!(std::fs::read_to_string(dir.join("c").join("project.txt")).unwrap().contains(r"|recordings\tower.wav|") || cfg!(not(windows)));
     d.app().delete_nodes(&[src]);
     d.frames(2);
     assert_eq!(d.app().library.list.len(), 1, "the recording stays in the project");
@@ -352,7 +479,7 @@ fn top_bar_shot() {
     let mut d = Drive::new();
     d.app().add(Kind::Sourcer { input: clip.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
     d.frames(2);
-    d.app().save_project_as(dir.join("hillingdon.txt"));
+    d.app().save_project_as(dir.join("hillingdon"));
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.frames(2);
     d.click("Project");

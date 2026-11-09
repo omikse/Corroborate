@@ -1,15 +1,15 @@
 //! The project: Project → New…, Open…, Save as… and Save a copy… (each picks a folder), Open
 //! recent, Save, Revert to saved.
 //!
-//! A saved project is a folder named after it: `<name>\<name>.txt` (nodes, wires, clocks,
-//! evidence and its recordings, one per line), with `results\` for what its Result records write
-//! and `recordings\` for files copied into it (recordings.rs). New and Save as pick (or make) the
-//! folder, and the project file takes the folder's name; a folder that already holds another
-//! project is refused. projects\ next to the program is where the dialogs start. Recordings are
-//! kept with their path relative to the project file and their absolute path, so a project folder
-//! can move.
+//! A saved project is a folder, and the folder's name is the project's only name. In it are
+//! `project.txt` (nodes, wires, clocks, evidence and its recordings, one per line), `results\`
+//! for what its Result records write and `recordings\` for files copied into it (recordings.rs).
+//! New and Save as pick (or make) the folder; a folder that already holds another project is
+//! refused. Clicking the name in the top bar renames the folder. projects\ next to the program is
+//! where the dialogs start. Recordings are kept with their path relative to the project file and
+//! their absolute path, so a project folder can move.
 //!
-//! The project file changes only on Save (Ctrl+S). Changes go to `<name>.recovery.txt` beside it
+//! The project file changes only on Save (Ctrl+S). Changes go to `project.recovery.txt` beside it
 //! (on each change and every 10 s), and the next Open restores them when it is newer. The top bar
 //! marks unsaved changes with •; New, Open and closing the window ask Save, Don't save or Cancel.
 //!
@@ -82,45 +82,51 @@ pub(crate) fn remember(path: Option<&Path>) {
     }
 }
 
-/// The recovery file of project file `p`: `<name>.recovery.txt` beside it.
+/// Takes `p` out of `dir`\recent.txt.
+pub(crate) fn drop_recent(dir: &Path, p: &Path) {
+    let k = recordings::key(p);
+    let text: String = recent_in(dir).iter().filter(|q| recordings::key(q) != k).map(|q| format!("{}\n", q.display())).collect();
+    let _ = std::fs::write(dir.join("recent.txt"), text);
+}
+
+/// The recovery file of project file `p`: `project.recovery.txt` beside it.
 pub(crate) fn recovery_of(p: &Path) -> PathBuf {
     p.with_file_name(format!("{}.recovery.txt", p.file_stem().unwrap_or_default().to_string_lossy()))
 }
 
-/// Where Save as puts a project chosen as `p`: in a folder named after it, `<name>\<name>.txt`,
-/// unless `p` already is in one.
-pub(crate) fn project_place(p: &Path) -> PathBuf {
-    let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    let stem = stem.strip_suffix(".recovery").unwrap_or(&stem).to_string();
-    let file = format!("{stem}.txt");
-    let parent = p.parent().map(Path::to_path_buf).unwrap_or_default();
-    if parent.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&stem)) {
-        parent.join(file)
-    } else {
-        parent.join(&stem).join(file)
-    }
-}
-
-/// The project file of project folder `dir`: `<dir>\<dir name>.txt`.
+/// The project file of project folder `dir`.
 pub(crate) fn project_in(dir: &Path) -> PathBuf {
-    dir.join(format!("{}.txt", dir.file_name().unwrap_or_default().to_string_lossy()))
+    dir.join("project.txt")
 }
 
-/// The project in folder `dir` for Open: `<dir name>.txt`, else the only project file there
-/// (recovery files and others without nodes do not count).
+/// The project in folder `dir`, for Open; None when it holds none.
 pub(crate) fn project_file_of(dir: &Path) -> Option<PathBuf> {
-    let own = project_in(dir);
-    if own.is_file() {
-        return Some(own);
+    let file = project_in(dir);
+    file.is_file().then_some(file)
+}
+
+/// The name of the project whose file is `file`: its folder's.
+pub(crate) fn name_of(file: &Path) -> String {
+    file.parent().and_then(Path::file_name).unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// Why a folder cannot be called `name` on Windows; None when it can.
+pub(crate) fn bad_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("a project needs a name".into());
     }
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) && !p.to_string_lossy().ends_with(".recovery.txt"))
-        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(|l| l.starts_with("node|"))))
-        .collect();
-    (found.len() == 1).then(|| found.remove(0))
+    if let Some(c) = name.chars().find(|c| "<>:\"/\\|?*".contains(*c) || c.is_control()) {
+        return Some(format!("a folder name cannot contain {c}"));
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("a folder name cannot end with a dot or a space".into());
+    }
+    let device = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered = |p: &str| device.strip_prefix(p).is_some_and(|d| matches!(d, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT") {
+        return Some(format!("{device} is reserved by Windows"));
+    }
+    None
 }
 
 /// The project already in folder `dir` that writing a project there would replace; `own`, the
@@ -158,12 +164,55 @@ impl App {
         Some(settings_dir().join("project.txt"))
     }
 
-    /// The project's name for the top bar: its file name, or "untitled".
+    /// The project's name for the top bar: its folder's, or "untitled".
     pub(crate) fn project_name(&self) -> String {
-        match &self.project_path {
-            Some(p) => p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
-            None => "untitled".into(),
+        self.project_path.as_deref().map_or("untitled".into(), name_of)
+    }
+
+    /// Renames the project: its folder takes the new name, what is inside moves with it, and
+    /// recordings inside it are read from the new place. Unsaved changes stay unsaved. Windows
+    /// refuses while a file in the folder is open, which is reported as it is.
+    pub(crate) fn rename_project(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        let Some(file) = self.project_path.clone() else { return false };
+        let Some(old) = file.parent().map(Path::to_path_buf) else { return false };
+        if name == name_of(&file) {
+            return false;
         }
+        if let Some(why) = bad_name(name) {
+            self.msg = format!("not renamed: {why}");
+            return false;
+        }
+        if self.copying() {
+            self.msg = "not renamed: a recording is still being copied into the project".into();
+            return false;
+        }
+        let new = old.with_file_name(name);
+        // Only the letter case changing is the same folder, which does exist already.
+        if new.exists() && recordings::key(&new) != recordings::key(&old) {
+            self.msg = format!("not renamed: {} already exists", new.display());
+            return false;
+        }
+        if let Err(e) = std::fs::rename(&old, &new) {
+            self.msg = format!("not renamed: {e} (press Stop, and close whatever has a file in the folder open)");
+            return false;
+        }
+        let unsaved = self.dirty();
+        let new_file = project_in(&new);
+        self.project_path = Some(new_file.clone());
+        self.folder_moved(&old, &new);
+        if !cfg!(test) {
+            drop_recent(&settings_dir(), &file);
+        }
+        remember(Some(&new_file));
+        // The file keeps the old absolute paths of recordings inside the folder until written.
+        if unsaved {
+            self.save_project();
+        } else {
+            self.save();
+        }
+        self.msg = format!("renamed to {}", new.display());
+        true
     }
 
     /// Where results go: results\ beside the project file, or next to the program while untitled.
@@ -230,10 +279,10 @@ impl App {
         true
     }
 
-    /// Project → Save as: writes the project into its folder (see `project_place`), which becomes
-    /// this project's; the old project's recovery file goes, as its changes are in the new one.
-    pub(crate) fn save_project_as(&mut self, path: PathBuf) {
-        let path = project_place(&path);
+    /// Project → Save as: writes the project into folder `dir`, which becomes this project's; the
+    /// old project's recovery file goes, as its changes are in the new one.
+    pub(crate) fn save_project_as(&mut self, dir: PathBuf) {
+        let path = project_in(&dir);
         self.sync_recordings();
         if !self.save_project_to(&path) {
             self.msg = format!("cannot write {}", path.display());
@@ -252,9 +301,9 @@ impl App {
         self.last_project_save = Instant::now();
     }
 
-    /// Project → Save a copy: writes the project into another folder; this one stays open as it is.
-    pub(crate) fn save_copy(&mut self, path: PathBuf) -> Option<PathBuf> {
-        let path = project_place(&path);
+    /// Project → Save a copy: writes the project into folder `dir`; this one stays open as it is.
+    pub(crate) fn save_copy(&mut self, dir: PathBuf) -> Option<PathBuf> {
+        let path = project_in(&dir);
         self.sync_recordings();
         if !self.save_project_to(&path) {
             self.msg = format!("cannot write {}", path.display());
@@ -281,8 +330,8 @@ impl App {
         (self.earth, self.mics, self.canvas_origin) = (earth, mics, origin);
     }
 
-    /// Project → New: an empty project in folder `dir`, its file `<dir>\<dir name>.txt` written at
-    /// once. An untitled project before it stays in settings\project.txt.
+    /// Project → New: an empty project in folder `dir`, its project.txt written at once. An
+    /// untitled project before it stays in settings\project.txt.
     pub(crate) fn new_project(&mut self, dir: &Path) {
         let file = project_in(dir);
         if !App::empty().save_project_to(&file) {
@@ -400,7 +449,7 @@ impl App {
                 } else {
                     match self.free_folder("Save the project in this folder", false) {
                         Some(d) => {
-                            self.save_project_as(project_in(&d));
+                            self.save_project_as(d);
                             self.project_path.is_some()
                         }
                         None => false,
@@ -448,7 +497,7 @@ impl App {
         let d = self.folder_dialog(title)?;
         let own = self.project_path.clone().filter(|_| own_ok);
         if let Some(p) = taken_by(&d, own.as_deref()) {
-            self.msg = format!("{} already holds the project {}: pick another folder, or Open it", d.display(), p.file_name().unwrap_or_default().to_string_lossy());
+            self.msg = format!("{} already holds the project {}: pick another folder, or Open it", d.display(), name_of(&p));
             return None;
         }
         Some(d)
@@ -466,14 +515,14 @@ impl App {
         let Some(d) = self.folder_dialog("Open the project in this folder") else { return };
         match project_file_of(&d) {
             Some(p) => self.request(Then::Open(p)),
-            None => self.msg = format!("no project in {} (it holds no {}.txt)", d.display(), project_in(&d).file_stem().unwrap_or_default().to_string_lossy()),
+            None => self.msg = format!("no project in {} (it holds no project.txt)", d.display()),
         }
     }
 
-    /// Save as: pick (or make) the project's folder; the project becomes `<folder>\<folder>.txt`.
+    /// Save as: pick (or make) the project's folder.
     fn save_as_dialog(&mut self) {
         if let Some(d) = self.free_folder("Save the project in this folder", true) {
-            self.save_project_as(project_in(&d));
+            self.save_project_as(d);
         }
     }
 
@@ -516,8 +565,7 @@ impl App {
                 }
                 for p in list {
                     let there = p.is_file();
-                    let name = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-                    let b = ui.add_enabled(there, egui::Button::new(name)).on_hover_text(p.display().to_string()).on_disabled_hover_text(format!("{} is not there", p.display()));
+                    let b = ui.add_enabled(there, egui::Button::new(name_of(&p))).on_hover_text(p.display().to_string()).on_disabled_hover_text(format!("{} is not there", p.display()));
                     if b.clicked() {
                         ui.close();
                         self.request(Then::Open(p));
@@ -542,7 +590,7 @@ impl App {
             if ui.button("Save a copy…").on_hover_text("write the project into another folder; this one stays open").clicked() {
                 ui.close();
                 if let Some(d) = self.free_folder("Save a copy of the project in this folder", false) {
-                    self.save_copy(project_in(&d));
+                    self.save_copy(d);
                 }
             }
             if ui.add_enabled(named && dirty, egui::Button::new("Revert to saved")).clicked() {
@@ -558,15 +606,49 @@ impl App {
             }
         });
         let path = self.project_file().map(|p| p.display().to_string()).unwrap_or_else(|| "not saved".into());
-        let (name, hover) = match (named, dirty) {
-            (true, true) => (format!("{} •", self.project_name()), format!("{path}\nunsaved changes (Ctrl+S saves; they are kept in {} until then)", self.project_path.as_deref().map(recovery_of).unwrap_or_default().display())),
-            (false, true) => (format!("{} •", self.project_name()), "untitled: kept in settings\\project.txt; Save as gives it its own folder".to_string()),
-            _ => (self.project_name(), path),
+        let hover = match (named, dirty) {
+            (true, true) => format!("{path}\nunsaved changes (Ctrl+S saves; they are kept in {} until then)\nclick to rename the project and its folder", self.project_path.as_deref().map(recovery_of).unwrap_or_default().display()),
+            (true, false) => format!("{path}\nclick to rename the project and its folder"),
+            (false, true) => "untitled: kept in settings\\project.txt\nclick to give it a folder".to_string(),
+            (false, false) => format!("{path}\nclick to give it a folder"),
         };
-        ui.colored_label(TEXT, name).on_hover_text(hover);
+        self.name_box(ui, hover);
+        if dirty {
+            ui.colored_label(TEXT, "•");
+        }
         ui.separator();
         self.recordings_menu(ui);
         ui.separator();
+    }
+
+    /// The project's name in the top bar. A click makes it a box to type a new name in: Enter or
+    /// clicking away renames, Esc leaves it. An untitled project has no folder to rename, so the
+    /// click gives it one.
+    fn name_box(&mut self, ui: &mut egui::Ui, hover: String) {
+        let Some(typed) = &mut self.renaming else {
+            let r = ui.add(egui::Label::new(egui::RichText::new(self.project_name()).color(TEXT)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::Text).on_hover_text(hover);
+            if r.clicked() {
+                if self.project_path.is_some() {
+                    self.renaming = Some(self.project_name());
+                    self.renaming_fresh = true;
+                } else {
+                    self.save_as_dialog();
+                }
+            }
+            return;
+        };
+        let mut out = egui::TextEdit::singleline(typed).clip_text(false).desired_width(90.0).show(ui);
+        if std::mem::take(&mut self.renaming_fresh) {
+            out.response.request_focus();
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(typed.chars().count()));
+            out.state.cursor.set_char_range(Some(all));
+            out.state.store(ui.ctx(), out.response.id);
+        } else if out.response.lost_focus() {
+            let leave = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if let Some(name) = self.renaming.take().filter(|_| !leave) {
+                self.rename_project(&name);
+            }
+        }
     }
 
     /// The question about unsaved changes, while one waits.

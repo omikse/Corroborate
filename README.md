@@ -37,11 +37,12 @@ Projects: the top bar shows **Project**, the project's name (with • while it h
 and **Recordings**. Project has **New…** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**, **Save**
 (Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project
 folder**. New, Open, Save as and Save a copy all pick a folder, and New and the two saves can make
-one: a project is that folder, its file `<folder>\<folder name>.txt`, with
+one: a project is that folder and the folder's name is its only name, with `project.txt` inside,
 `results\` (what its Result records write) and `recordings\` (files copied into it); the dialogs start in
 `app\projects\`. A folder that already holds another project is refused for New and the saves, so
-its file is never written over. The project file changes only on Save; until then changes are kept in
-`<name>.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
+its file is never written over. Click the name in the top bar to rename the project: Enter or
+clicking away renames its folder, Esc leaves it. The project file changes only on Save; until then changes are kept in
+`project.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
 ask Save, Don't save or Cancel when there are unsaved changes. A project that was never given a
 folder (the first start, or `--new`) is "untitled" and lives in `settings\project.txt` (written as
 you work). The project last opened opens at the next start
