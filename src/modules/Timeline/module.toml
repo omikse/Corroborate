@@ -1,0 +1,19 @@
+id = "timeline"
+label = "Timeline"
+category = "View"
+role = "view"
+
+# Each row is one recording: its standard audio or video output, and the time to draw it at
+# (usually a yellow output of Audio match).
+[[input]]
+name = "media"
+kind = "any"
+many = true
+
+[[input]]
+name = "time"
+kind = "time"
+many = true
+
+[look]
+status = false

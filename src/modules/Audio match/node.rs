@@ -805,8 +805,8 @@ pub struct MatchUi {
     pub shift: HashMap<(NodeId, String), f64>,
     /// The group being dragged and the axis held still meanwhile.
     grab: Option<(NodeId, String, (f64, f64))>,
-    /// Which row is drawn where (row → place), by node, as last drawn.
-    slots: HashMap<NodeId, Vec<usize>>,
+    /// Which row is drawn where (row → place), by node, as last drawn (Audio match and Timeline).
+    pub slots: HashMap<NodeId, Vec<usize>>,
     /// Who was in each anchored group at the last result, by node and anchor; who has left it since.
     members: HashMap<(NodeId, String), BTreeSet<String>>,
     lost: HashMap<NodeId, BTreeSet<String>>,
@@ -993,7 +993,7 @@ fn day_and_time(t: f64) -> String {
 }
 
 /// The axis that fits every bar, however far apart they are.
-fn fit_axis(bars: &[(f64, f64)]) -> (f64, f64) {
+pub(crate) fn fit_axis(bars: &[(f64, f64)]) -> (f64, f64) {
     if bars.is_empty() {
         return (0.0, 600.0);
     }
@@ -1004,13 +1004,13 @@ fn fit_axis(bars: &[(f64, f64)]) -> (f64, f64) {
 }
 
 /// A round step giving about six ticks across `span` seconds.
-fn tick_step(span: f64) -> f64 {
+pub(crate) fn tick_step(span: f64) -> f64 {
     let want = span / 6.0;
     [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 21600.0, 86400.0, 604800.0, 2629800.0, 7889400.0, YEAR, 2.0 * YEAR, 5.0 * YEAR, 10.0 * YEAR, 50.0 * YEAR, 100.0 * YEAR, 500.0 * YEAR].into_iter().find(|s| *s >= want).unwrap_or(want)
 }
 
 /// A tick's label: time of day, then the date, then the year as the ticks grow apart.
-fn tick_text(t: f64, step: f64) -> String {
+pub(crate) fn tick_text(t: f64, step: f64) -> String {
     let (c, d) = (timebase::fmt_utc_clock(t), timebase::fmt_utc(t));
     if step < 60.0 {
         c

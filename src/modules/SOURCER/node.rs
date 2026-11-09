@@ -630,7 +630,6 @@ impl crate::look::NodeLook for Look {
                 app.pick_only(i);
                 app.go_live();
                 app.ph.playing = true;
-                app.follow = true;
             }
             None => {}
         }

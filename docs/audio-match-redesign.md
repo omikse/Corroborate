@@ -1,6 +1,6 @@
 # Audio match redesign
 
-Status: design, from interviews on 2026-11-09. Nothing here is built yet.
+Status: built on 2026-11-09, from interviews that day. Later work is under Open.
 Mockup: https://claude.ai/artifact/5Boi6NUG3GXEho8YYUYdnf
 
 ## The idea
@@ -232,7 +232,10 @@ on. They remain on their own nodes and in the result file.
 ## Migration
 
 - `stamp-end|` project lines: create a Time node with the length subtracted when loading.
-- A wire into the old `time` input: decide when building.
+- A wire into the old `time` input: its recording holds the group's anchor (it meant the same).
+- Every other recording's time is wired to its row, so old projects still show their metadata.
+- Manual anchors and links saved from the old panel stay evidence and stay in the result file;
+  there is no display for them now.
 
 ## Order of work
 
@@ -267,6 +270,6 @@ Jiku project, then `run.cmd`.
   doesn't come straight from a SOURCER; the node needs a `length` output, since SOURCER's is the
   file's and not the corrected one; and `clock_at` puts a node fed audio on its source's clock, so
   times on the corrected audio need mapping back to the original file's.
-- Full Timeline node design, timed events, and what happens to saved manual anchors and links once
-  drag-to-link is gone.
+- Full Timeline node design and timed events.
+- Evidence switches: projects keep their `off|` lines, but nothing on screen sets them any more.
 - The separate view of how Audio match calculated its result.

@@ -26,7 +26,10 @@ yourself, put yt-dlp options one per line in `settings\yt-dlp.txt` next to the p
 Ports:
 - input `text` (optional): text from another node replaces what is typed in the field. No node gives
   text yet; when it is wired the node says so and uses the field.
-- outputs `audio`, `time`, `metadata`, `video` and `location`, all declared in `module.toml`.
+- outputs `audio`, `time`, `length`, `metadata`, `video` and `location`, all declared in
+  `module.toml`. A file's time and length are read once, before any Run, and a Run does not clear
+  them. `time` is what the file says, raw, with an error of 0: the whole project reads it as the
+  start of the recording, and a Time node corrects a file that means something else.
   `look.rhai` hides them until a source is chosen, `video` unless it has pictures (video files, web
   pages, video streams), and `location` until the file's metadata gives coordinates (ISO 6709 in
   `location`, `location-eng` or `com.apple.quicktime.location.ISO6709`: the exact point, shown on

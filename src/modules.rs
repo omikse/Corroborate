@@ -28,6 +28,8 @@ pub mod result_record;
 pub mod sourcer;
 #[path = "modules/Time/mod.rs"]
 pub mod time;
+#[path = "modules/Timeline/mod.rs"]
+pub mod timeline;
 #[path = "modules/Value/mod.rs"]
 pub mod value;
 
@@ -43,6 +45,7 @@ pub fn builtin() -> Vec<&'static crate::module_manifest::Manifest> {
         sourcer::manifest(),
         value::manifest(),
         time::manifest(),
+        timeline::manifest(),
         planes::manifest(),
         enf::manifest(),
         audio_match::manifest(),

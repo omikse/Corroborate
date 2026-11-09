@@ -6,7 +6,7 @@
 
 use corroborate::core::{NodeSpec, Port, PortKind, Role};
 use corroborate::module_manifest::{self as mm, Manifest};
-use corroborate::modules::{audio_match, combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, time, value};
+use corroborate::modules::{audio_match, combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, time, timeline, value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,8 @@ pub enum Kind {
     /// Links between the clocks of the wired recordings, from the sounds they share, and each
     /// recording's better time. `rows`: which recording holds each group's anchor, how it is drawn.
     AudioMatch { rows: Vec<(String, String)> },
+    /// Recordings drawn where the times wired in say they were. `rows`: how it is drawn.
+    Timeline { rows: Vec<(String, String)> },
     /// A time corrected in the open, row by row. `rows`: see `modules::time`.
     Time { rows: Vec<(String, String)> },
     /// The grid-frequency file it reads (empty: the bundled file).
@@ -71,6 +73,7 @@ impl Kind {
             "planes" => Kind::Planes,
             "audio-match" => Kind::AudioMatch { rows: Vec::new() },
             "time" => Kind::Time { rows: time::defaults() },
+            "timeline" => Kind::Timeline { rows: Vec::new() },
             "enf" => Kind::Enf { grid: String::new() },
             "grid-frequencies" => Kind::GridFrequencies { path: String::new() },
             "result-record" => Kind::ResultRecord { folder: String::new() },
@@ -89,6 +92,7 @@ impl Kind {
             Kind::Planes => label(planes::manifest()),
             Kind::AudioMatch { .. } => label(audio_match::manifest()),
             Kind::Time { .. } => label(time::manifest()),
+            Kind::Timeline { .. } => label(timeline::manifest()),
             Kind::Enf { .. } => label(enf::manifest()),
             Kind::GridFrequencies { .. } => label(grid_frequencies::manifest()),
             Kind::Plugin { path } => plugin::label(path),
@@ -110,6 +114,7 @@ impl Kind {
             Kind::ResultRecord { .. } => result_record::manifest().many_rows(),
             Kind::CombineLocations { .. } => combine_locations::manifest().many_rows(),
             Kind::AudioMatch { .. } => audio_match::manifest().many_rows(),
+            Kind::Timeline { .. } => timeline::manifest().many_rows(),
             Kind::Map => map::manifest().many_rows(),
             Kind::Module { m, .. } => m.many_rows(),
             _ => mm::Many::default(),
@@ -123,6 +128,7 @@ impl Kind {
             Kind::Planes => planes::spec(),
             Kind::AudioMatch { .. } => audio_match::spec(),
             Kind::Time { rows } => time::spec(rows),
+            Kind::Timeline { .. } => timeline::spec(),
             Kind::Enf { .. } => enf::spec(),
             Kind::GridFrequencies { .. } => grid_frequencies::spec(),
             Kind::Plugin { .. } => plugin::spec(),
@@ -152,7 +158,7 @@ impl Kind {
             Kind::Missing { param, .. } => param.clone(),
             Kind::Group { def, .. } => def.clone(),
             Kind::Value { ty, .. } => ty.clone(),
-            Kind::Planes | Kind::AudioMatch { .. } | Kind::Time { .. } | Kind::Map | Kind::InvertLocation | Kind::Module { .. } | Kind::GroupInput | Kind::GroupOutput => String::new(),
+            Kind::Planes | Kind::AudioMatch { .. } | Kind::Time { .. } | Kind::Timeline { .. } | Kind::Map | Kind::InvertLocation | Kind::Module { .. } | Kind::GroupInput | Kind::GroupOutput => String::new(),
         }
     }
 
@@ -193,7 +199,7 @@ impl Kind {
     /// Lines a project file keeps under the node: a Value's fields, a module's settings.
     pub fn rows(&self) -> &[(String, String)] {
         match self {
-            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Time { rows } => rows,
+            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Time { rows } | Kind::Timeline { rows } => rows,
             _ => &[],
         }
     }
@@ -233,7 +239,7 @@ impl Kind {
     /// keeps the default), a missing module's row as it was.
     pub fn add_row(&mut self, k: String, v: String) {
         match self {
-            Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } => rows.push((k, v)),
+            Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Timeline { rows } => rows.push((k, v)),
             Kind::Time { rows } => match rows.iter_mut().find(|(q, _)| *q == k) {
                 Some((_, x)) => *x = v,
                 None => rows.push((k, v)),

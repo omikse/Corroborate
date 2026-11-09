@@ -32,18 +32,13 @@ pub struct Evidence {
     /// While loading a project saved before there were Time nodes: the sources whose stamp was read
     /// as the recording's end.
     pub stamp_end: BTreeSet<String>,
-    /// Anchors and links made by hand (the timeline).
+    /// Anchors and links made by hand, kept from older projects.
     pub manual_anchors: Vec<ClockAnchor>,
     pub manual_links: Vec<Link>,
     /// All evidence last gathered, with its on/off state, and the clocks solved from it.
     pub anchors: Vec<ClockAnchor>,
     pub links: Vec<Link>,
     pub clocks: clock::Clocks,
-    /// How sure the shown errors are, and the largest error allowed (seconds, at that confidence).
-    pub conf: clock_view::Confidence,
-    pub max_error: Option<f64>,
-    /// The clock group last clicked on a wire box (the timeline shows its row).
-    pub focus: Option<String>,
 }
 
 impl App {
@@ -147,66 +142,40 @@ impl App {
         }
     }
 
-    /// Groups merged or split by new evidence: each playhead moves to the group its clocks are in
-    /// now, at the same moment. A group that already has one keeps it, unless the moving one is
-    /// the active group's (what the user is watching wins). Shifts of groups gone are dropped.
+    /// New evidence gave a clock real time, or took it away: its playhead moves over at the same
+    /// moment. The selected node's wins the real-time one.
     fn carry_playheads(&mut self, new: &clock::Clocks) {
         let old = &self.ev.clocks;
-        let active = self.active_key();
-        // (absolute, group) → position, before; every clock that has a playhead says where it is.
-        let mut moves: Vec<(bool, String, f64, bool)> = Vec::new();
+        let active = self.active_clock();
         let mut clocks: BTreeSet<String> = self.ph.floating.keys().cloned().collect();
         clocks.extend(self.nodes.iter().enumerate().filter_map(|(i, _)| self.clock_of(i)));
+        let (mut utc, mut local) = (Vec::new(), Vec::new());
         for c in &clocks {
             let (o, n) = (old.get(c), new.get(c));
-            let (oa, na) = (o.kind == clock::Kind::Absolute, n.kind == clock::Kind::Absolute);
-            if oa == na && o.group == n.group {
-                continue;
+            match (o.kind == clock::Kind::Absolute, n.kind == clock::Kind::Absolute) {
+                (false, true) => {
+                    if let Some(&t) = self.ph.floating.get(c) {
+                        utc.push((Some(c) == active.as_ref(), n.at(t), c.clone()));
+                    }
+                }
+                (true, false) => {
+                    if let Some(u) = self.ph.utc {
+                        local.push((c.clone(), o.back(u)));
+                    }
+                }
+                _ => {}
             }
-            let Some(p) = self.ph.get(oa, &o.group) else { continue };
-            // The moment on clock c, then on the new group's numbering.
-            let pos = n.at(o.back(p));
-            let was_active = active.as_ref().is_some_and(|(a, g)| *a == oa && (oa || *g == o.group));
-            moves.push((na, n.group.clone(), pos, was_active));
         }
-        // Active first, so it wins.
-        moves.sort_by_key(|m| !m.3);
-        let mut set: BTreeSet<(bool, String)> = BTreeSet::new();
-        for (abs, g, pos, was_active) in moves {
-            let key = (abs, if abs { String::new() } else { g.clone() });
-            if set.contains(&key) || (!was_active && self.ph.get(abs, &g).is_some()) {
-                continue;
+        utc.sort_by_key(|x| !x.0);
+        for (i, (is_active, at, c)) in utc.into_iter().enumerate() {
+            if i == 0 && (is_active || self.ph.utc.is_none()) {
+                self.ph.set(true, "", at);
             }
-            self.ph.set(abs, &g, pos);
-            set.insert(key);
+            self.ph.floating.remove(&c);
         }
-        // Playheads and shifts of groups that no longer exist.
-        let live: BTreeSet<String> = clocks.iter().map(|c| new.get(c)).filter(|i| i.kind != clock::Kind::Absolute).map(|i| i.group).collect();
-        self.ph.floating.retain(|g, _| live.contains(g));
-        self.tls.shift.retain(|g, _| live.contains(g));
-    }
-
-    /// Switches a piece of evidence on or off (by its key); kept in the project and logged in the
-    /// result file's setting changes.
-    pub(crate) fn set_evidence(&mut self, key: &str, on: bool) {
-        let was = !self.ev.off.contains(key);
-        if was == on {
-            return;
+        for (c, t) in local {
+            self.ph.set(false, &c, t);
         }
-        if on {
-            self.ev.off.remove(key);
-        } else {
-            self.ev.off.insert(key.to_string());
-        }
-        self.changes.push(bus::SettingChange {
-            utc: timebase::now_unix(),
-            node: "clocks".into(),
-            label: "evidence".into(),
-            name: key.to_string(),
-            old: if was { "on" } else { "off" }.into(),
-            new: if on { "on" } else { "off" }.into(),
-        });
-        self.save_project();
     }
 
     /// Same clock: sources `nodes` share one clock (named by the smallest of their clocks), with
@@ -309,11 +278,6 @@ pub fn not_comparable(clocks: &clock::Clocks, used: &[String]) -> Vec<(String, V
     g.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
 }
 
-/// The warning a node shows when its times are on clocks with no link between them.
-pub fn comparable_note(groups: &[(String, Vec<String>)]) -> Option<String> {
-    (!groups.is_empty()).then(|| format!("! times on {} clock groups with no link between them: not comparable", groups.len()))
-}
-
 impl App {
     /// The result file's time part: every clock, every piece of evidence (with its switch and
     /// contradictions), the events of the nodes `ids` with their clock and UTC ± error when known,
@@ -382,7 +346,7 @@ impl App {
                 z(clock::Ev::Link(k))
             )
         }));
-        let (events, _) = self.timeline_events();
+        let events = self.all_events();
         let events: Vec<_> = events.into_iter().filter(|(i, _)| ids.contains(i)).collect();
         let ev_j: Vec<String> = events
             .iter()
@@ -413,15 +377,34 @@ impl App {
         )
     }
 
-    /// The clocks of the times wired into a node's inputs.
-    pub(crate) fn input_clocks(&self, i: NodeId) -> Vec<String> {
+    /// A node's name, or its module's when it has none.
+    pub(crate) fn node_name(&self, i: NodeId) -> String {
+        if self.nodes[i].label.is_empty() { self.graph.nodes()[i].spec.name.to_string() } else { self.nodes[i].label.clone() }
+    }
+
+    /// Every event on an output of the project, with the node it came from.
+    pub(crate) fn all_events(&self) -> Vec<(NodeId, corroborate::data::Event)> {
         let mut out = Vec::new();
-        for p in &self.graph.nodes()[i].spec.inputs {
-            let Some((from, port)) = self.graph.feeder(i, p.name) else { continue };
-            match self.value_from(from, port) {
-                Ok(corroborate::data::Data::Events(v)) => out.extend(v.into_iter().map(|e| e.clock)),
-                Ok(corroborate::data::Data::Time { clock, .. }) => out.push(clock),
-                _ => {}
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.hidden {
+                continue;
+            }
+            for p in &self.graph.nodes()[i].spec.outputs {
+                if p.kind != PortKind::Event {
+                    continue;
+                }
+                if let Ok(Data::Events(v)) = self.value_from(i, p.name) {
+                    out.extend(v.into_iter().map(|e| (i, e)));
+                }
+            }
+            if matches!(n.kind, Kind::Enf { .. }) {
+                let clock = self.clock_of(i).unwrap_or_default();
+                let s = n.state.lock().unwrap();
+                out.extend(s.enf.segments.iter().map(|g| {
+                    let (label, detail) = (format!("{:.3} Hz", g.mean_hz), format!("hum {:.3} Hz ({:.3}–{:.3}), harmonic {}", g.mean_hz, g.min_hz, g.max_hz, g.harmonic));
+                    (i, corroborate::data::Event { clock: clock.clone(), t_start: g.t_start, t_end: g.t_end, label, detail, error_s: 0.0 })
+                }));
             }
         }
         out

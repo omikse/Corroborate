@@ -95,7 +95,7 @@ impl App {
         let per_row = self.nodes[to].kind.many_rows().per_row.max(1);
         let inputs = &g[to].spec.inputs;
         let row = &inputs[inputs.len().saturating_sub(per_row)..];
-        let free = g[from].spec.outputs.iter().find(|p| p.name == out).and_then(|o| row.iter().find(|p| corroborate::core::NodeSpec::can_connect(o, p))).or(row.first()).map(|p| p.name);
+        let free = g[from].spec.outputs.iter().find(|p| p.name == out).and_then(|o| row.iter().find(|p| p.kind == o.kind).or_else(|| row.iter().find(|p| corroborate::core::NodeSpec::can_connect(o, p)))).or(row.first()).map(|p| p.name);
         if let Some(free) = free {
             self.wire(from, out, to, free);
         }
@@ -150,11 +150,7 @@ impl App {
         if let Some(r) = self.recordings.get(&i) {
             return format!("● recording {}", sourcer_node::fmt_secs(timebase::now_unix() - r.started));
         }
-        let note = self.record_notes.get(&i).cloned().unwrap_or_else(|| "not recording".into());
-        match crate::evidence::comparable_note(&crate::evidence::not_comparable(&self.ev.clocks, &self.input_clocks(i))) {
-            Some(w) => format!("{note} · {w}"),
-            None => note,
-        }
+        self.record_notes.get(&i).cloned().unwrap_or_else(|| "not recording".into())
     }
 
     pub(crate) fn record_json(&self, i: NodeId) -> String {

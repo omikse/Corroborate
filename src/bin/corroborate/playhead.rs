@@ -1,9 +1,9 @@
-//! Linked playheads. Every absolute group shares one position (in UTC); each floating group has its
-//! own (in the time of the group's reference clock). A view asks for the playhead on its own clock
-//! and the solved clocks convert it, so moving it in one view moves it in every linked one.
-//! Unanchored groups follow nobody. The selected node's group has the active playhead. When new
-//! evidence merges or splits groups, each playhead moves to its clocks' new group at the same
-//! moment; on a clash the active group's wins (evidence.rs `carry_playheads`).
+//! Playheads. There is one real-time playhead, in UTC (Coordinated Universal Time), shared by all
+//! Timeline nodes and followed by anything with a real time. A clock with no real time keeps its
+//! own, linked to nothing. A view asks for the playhead on its own clock and the solved clocks
+//! convert it. The selected node's clock has the active playhead. When new evidence gives a clock
+//! real time or takes it away, its playhead moves over at the same moment (evidence.rs
+//! `carry_playheads`).
 //!
 //! Play on a SOURCER (or Space) plays and pauses: the active playhead moves in real time and
 //! linked views follow. A live source's playhead stops at "now", the newest audio received, and
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 pub struct Playheads {
     /// Where every absolute group is, in UTC.
     pub utc: Option<f64>,
-    /// Floating group id → position on its reference clock.
+    /// Clock with no real time → position on it.
     pub floating: BTreeMap<String, f64>,
     /// Counts the moves, so views that follow the playhead (Planes) know when it moved.
     pub rev: u64,
@@ -28,22 +28,22 @@ pub struct Playheads {
 }
 
 impl Playheads {
-    /// Sets the playhead of a group: absolute ones in UTC, floating ones on the reference clock.
-    pub fn set(&mut self, absolute: bool, group: &str, pos: f64) {
+    /// Sets a playhead: the real-time one in UTC, a clock's own on that clock.
+    pub fn set(&mut self, absolute: bool, clock: &str, pos: f64) {
         if absolute {
             self.utc = Some(pos);
         } else {
-            self.floating.insert(group.to_string(), pos);
+            self.floating.insert(clock.to_string(), pos);
         }
         self.rev += 1;
     }
 
-    /// The playhead of a group, as `set` takes it.
-    pub fn get(&self, absolute: bool, group: &str) -> Option<f64> {
+    /// A playhead, as `set` takes it.
+    pub fn get(&self, absolute: bool, clock: &str) -> Option<f64> {
         if absolute {
             self.utc
         } else {
-            self.floating.get(group).copied()
+            self.floating.get(clock).copied()
         }
     }
 }
@@ -52,28 +52,39 @@ impl App {
     /// The playhead in `clock`'s own time.
     pub(crate) fn playhead_on(&self, clock: &str) -> Option<f64> {
         let c = self.ev.clocks.get(clock);
-        self.ph.get(c.kind == Ck::Absolute, &c.group).map(|p| c.back(p))
+        if c.kind == Ck::Absolute {
+            self.ph.utc.map(|p| c.back(p))
+        } else {
+            self.ph.floating.get(clock).copied()
+        }
     }
 
-    /// Moves the playhead of `clock`'s group to `t` on that clock.
+    /// Moves `clock`'s playhead to `t` on that clock.
     pub(crate) fn set_playhead(&mut self, clock: &str, t: f64) {
         let c = self.ev.clocks.get(clock);
-        self.ph.set(c.kind == Ck::Absolute, &c.group, c.at(t));
+        if c.kind == Ck::Absolute {
+            self.ph.set(true, "", c.at(t));
+        } else {
+            self.ph.set(false, clock, t);
+        }
     }
 
-    /// The clock of the selected node: its group's playhead is the active one.
+    /// Moves the real-time playhead (a click on a Timeline node).
+    pub(crate) fn set_utc_playhead(&mut self, utc: f64) {
+        self.ph.set(true, "", utc);
+    }
+
+    /// The clock of the selected node: its playhead is the active one.
     pub(crate) fn active_clock(&self) -> Option<String> {
         self.selected.and_then(|i| self.clock_of(i))
     }
 
-    /// The active group as `Playheads` keys it: (absolute, group); with nothing selected, the
-    /// absolute one when it has a playhead.
+    /// The active playhead as `Playheads` keys it: (absolute, clock); with nothing that has a
+    /// clock selected, the real-time one when it has a position.
     pub(crate) fn active_key(&self) -> Option<(bool, String)> {
         match self.active_clock() {
-            Some(c) => {
-                let i = self.ev.clocks.get(&c);
-                Some((i.kind == Ck::Absolute, i.group))
-            }
+            Some(c) if self.ev.clocks.get(&c).kind == Ck::Absolute => Some((true, String::new())),
+            Some(c) => Some((false, c)),
             None => self.ph.utc.is_some().then(|| (true, String::new())),
         }
     }
@@ -84,20 +95,21 @@ impl App {
         self.nodes.iter().any(|n| !n.hidden && n.state.lock().map(|s| s.live).unwrap_or(false))
     }
 
-    /// "Now" for a group, as `Playheads` keys it: the newest audio of its live sources.
-    pub(crate) fn live_now(&self, absolute: bool, group: &str) -> Option<f64> {
-        self.audio_end(absolute, group, true)
+    /// "Now" for a playhead, as `Playheads` keys it: the newest audio of its live sources.
+    pub(crate) fn live_now(&self, absolute: bool, clock: &str) -> Option<f64> {
+        self.audio_end(absolute, clock, true)
     }
 
-    /// The end of the audio received so far in a group (only live sources' with `live_only`).
-    fn audio_end(&self, absolute: bool, group: &str, live_only: bool) -> Option<f64> {
+    /// The end of the audio received so far on a playhead (only live sources' with `live_only`).
+    fn audio_end(&self, absolute: bool, clock: &str, live_only: bool) -> Option<f64> {
         (0..self.nodes.len())
             .filter(|&i| !self.nodes[i].hidden && self.nodes[i].kind.is_source())
             .filter_map(|i| {
                 let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).ok()?;
-                let c = self.ev.clocks.get(&self.clock_of(i)?);
-                let same = if absolute { c.kind == Ck::Absolute } else { c.kind != Ck::Absolute && c.group == group };
-                ((live || !live_only) && same && a > 0.0).then_some(c.at(a))
+                let id = self.clock_of(i)?;
+                let c = self.ev.clocks.get(&id);
+                let same = if absolute { c.kind == Ck::Absolute } else { c.kind != Ck::Absolute && id == clock };
+                ((live || !live_only) && same && a > 0.0).then_some(if absolute { c.at(a) } else { a })
             })
             .reduce(f64::max)
     }
@@ -131,8 +143,8 @@ impl App {
         }
     }
 
-    /// Every source's group gets a playhead as soon as it has audio: at the start of a recording,
-    /// at now for a live source. So the timeline and the views always show one.
+    /// Every source's clock gets a playhead as soon as it has audio: at the start of a recording,
+    /// at now for a live source. So the views always show one.
     pub(crate) fn ensure_playheads(&mut self) {
         for i in 0..self.nodes.len() {
             if self.nodes[i].hidden || !self.nodes[i].kind.is_source() {
@@ -146,14 +158,13 @@ impl App {
         }
     }
 
-    /// Play or pause from a source node: its group becomes the active one (the node is selected).
+    /// Play or pause from a source node: its playhead becomes the active one (the node is selected).
     /// Playing a recording that is at its end starts it again from the beginning.
     pub(crate) fn play_source(&mut self, i: NodeId) {
         if self.selected != Some(i) {
             self.pick_only(i);
             if self.ph.playing {
-                // Another group was playing: this click moves the play here.
-                self.follow = true;
+                // Another clock was playing: this click moves the play here.
                 return;
             }
         }
@@ -165,7 +176,6 @@ impl App {
                     self.set_playhead(&clock, 0.0);
                 }
             }
-            self.follow = true;
         }
         self.ph.playing = !self.ph.playing;
     }
@@ -185,7 +195,7 @@ impl App {
         }
     }
 
-    /// Jumps the active group's playhead to now (live projects).
+    /// Jumps the active playhead to now (live projects).
     pub(crate) fn go_live(&mut self) {
         if let Some((abs, g)) = self.active_key().or(Some((true, String::new()))) {
             if let Some(n) = self.live_now(abs, &g) {
@@ -194,10 +204,10 @@ impl App {
         }
     }
 
-    /// Whether `clock` is in the active playhead's group (every absolute clock is one group).
+    /// Whether `clock` follows the active playhead (every clock with real time does together).
     pub(crate) fn is_active_clock(&self, clock: &str) -> bool {
         let Some(a) = self.active_clock() else { return false };
         let (x, y) = (self.ev.clocks.get(&a), self.ev.clocks.get(clock));
-        (x.kind == Ck::Absolute && y.kind == Ck::Absolute) || x.group == y.group
+        (x.kind == Ck::Absolute && y.kind == Ck::Absolute) || a == clock
     }
 }

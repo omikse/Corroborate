@@ -6,7 +6,6 @@ use super::*;
 use corroborate::clock::Kind as Ck;
 use corroborate::data::Data;
 use corroborate::module_manifest as mm;
-use egui_kittest::kittest::Queryable;
 
 fn source(app: &mut App, y: f32) -> NodeId {
     app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, y))
@@ -77,11 +76,10 @@ fn a_wired_time_anchors_the_audio() {
     assert_eq!((an.clock.as_str(), an.t, an.error_s, an.from.clone()), (us.as_str(), 0.0, 0.5, uid(&app, p)));
     assert_eq!(app.ev.clocks.get(&us).kind, Ck::Absolute);
 
-    app.set_evidence(&an.key(), false);
+    app.ev.off.insert(an.key());
     app.update_clocks();
     assert_eq!(app.ev.clocks.get(&us).kind, Ck::None, "switched off");
     assert!(!app.ev.anchors[0].enabled);
-    assert_eq!(app.changes.last().map(|c| (c.name.clone(), c.new.clone())), Some((an.key(), "off".into())));
 }
 
 /// Planes' passes are readable on its output, on the clock of its audio, with the fit's error.
@@ -145,195 +143,6 @@ protocol = 2
     let (utc, err) = app.ev.clocks.to_utc(&uid(&app, s), 3.0).expect("anchored by the module");
     assert!((utc - 500.0).abs() < 1e-6 && (err - 0.2).abs() < 1e-6, "{utc} ± {err}");
     assert_eq!(app.ev.anchors[0].from, uid(&app, k));
-}
-
-/// Groups on the canvas: absolute first with the first colour, then relative (dashed), then
-/// unanchored (faint); linked sources share one group.
-#[test]
-fn canvas_groups_colours_and_styles() {
-    use crate::clock_view::{glow_style, PALETTE};
-    let mut app = App::empty();
-    let (a, b, c) = (source(&mut app, 40.0), source(&mut app, 300.0), source(&mut app, 560.0));
-    anchor(&app, a, 1000.0, 1.0);
-    let (ub, uc) = (uid(&app, b), uid(&app, c));
-    app.update_clocks();
-    let cg = app.canvas_groups();
-    assert_eq!(cg.groups.len(), 3);
-    assert_eq!((cg.groups[0].kind, cg.groups[0].color), (Ck::Absolute, PALETTE[0]));
-    assert_eq!(cg.groups[1].kind, Ck::None);
-    assert_ne!(cg.groups[1].color, cg.groups[2].color);
-    assert!(glow_style(Ck::Absolute).0 > glow_style(Ck::None).0);
-    assert!(glow_style(Ck::Relative).1 && !glow_style(Ck::Absolute).1);
-
-    app.ev.manual_links.push(corroborate::clock::Link { a: ub, t_a: 0.0, b: uc, t_b: 5.0, error_s: 0.5, from: "manual".into(), enabled: true });
-    app.update_clocks();
-    let cg = app.canvas_groups();
-    assert_eq!(cg.groups.iter().map(|g| g.kind).collect::<Vec<_>>(), vec![Ck::Absolute, Ck::Relative]);
-    assert_eq!(cg.of_node[b], cg.of_node[c]);
-    assert_ne!(cg.of_node[a], cg.of_node[b]);
-
-    // A node group holding a and b glows in both their groups' colours.
-    let g = app.add(Kind::Group { def: "Group".into(), rows: Vec::new() }, Pos2::ZERO);
-    app.nodes[a].parent = Some(g);
-    app.nodes[b].parent = Some(g);
-    let cg = app.canvas_groups();
-    let mut both = [cg.of_node[a].clone(), cg.of_node[b].clone()].concat();
-    both.sort_unstable();
-    assert_eq!(cg.of_node[g], both);
-}
-
-/// The wire box: UTC time, count and span, error at each confidence, red over the maximum.
-#[test]
-fn wire_box_text_and_confidence() {
-    use crate::clock_view::{wire_text, Confidence as Cf};
-    use corroborate::clock::Anchor as An;
-    use corroborate::data::Event;
-    let clocks = corroborate::clock::solve(&[An { clock: "s".into(), t: 0.0, utc: 45_000.0, error_s: 2.0, from: "n1".into(), enabled: true }], &[]);
-    let name = |c: &str| format!("clip {c}");
-    let ev = |t: f64, e: f64| Event { clock: "s".into(), t_start: t, t_end: t, error_s: e, ..Default::default() };
-    let events = Data::Events(vec![ev(60.0, 1.5), ev(540.0, 0.5)]);
-    let tx = |d: &Data, cf, max| wire_text(&clocks, d, cf, max, &name).unwrap();
-
-    let t = tx(&events, Cf::P95, None);
-    assert_eq!(t.top, "2 events, 12:31–12:39");
-    assert_eq!(t.bottom, "± 5.00 s"); // 2 sigma of sqrt(2² + 1.5²) = 2.5 s
-    assert_eq!(tx(&events, Cf::P68, None).bottom, "± 2.50 s");
-    assert_eq!(tx(&events, Cf::P997, None).bottom, "± 7.50 s");
-    assert!(!t.over && tx(&events, Cf::P95, Some(4.0)).over && !tx(&events, Cf::P95, Some(6.0)).over);
-
-    let rel = Data::Time { clock: "z".into(), t: 41.2, utc: None, error_s: 0.1, source: String::new() };
-    assert_eq!(tx(&rel, Cf::P68, None).top, "+00:41.2 on clip z");
-    let abs = Data::Time { clock: "s".into(), t: 0.0, utc: Some(45_003.0), error_s: 1.0, source: String::new() };
-    assert_eq!((tx(&abs, Cf::P68, None).top.as_str(), tx(&abs, Cf::P68, None).bottom.as_str()), ("12:30:03 UTC", "± 1.00 s"));
-}
-
-/// Timeline rows: absolute first (placed on UTC), then relative (on the group's reference clock),
-/// then unanchored; a floating row starts under the first absolute event.
-#[test]
-fn timeline_rows_order_and_placement() {
-    use crate::timeline::{build_rows, default_shift};
-    use corroborate::clock::{Anchor as An, Link};
-    use corroborate::data::Event;
-    let clocks = corroborate::clock::solve(
-        &[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 2.0, from: "n1".into(), enabled: true }],
-        &[Link { a: "b".into(), t_a: 0.0, b: "c".into(), t_b: 10.0, error_s: 1.0, from: "manual".into(), enabled: true }],
-    );
-    let ev = |c: &str, t: f64, e: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t + 1.0, error_s: e, ..Default::default() });
-    // Listed unanchored first, to show the order comes from the kind.
-    let events = [ev("z", 5.0, 0.0), ev("c", 3.0, 0.0), ev("b", 4.0, 0.0), ev("a", 30.0, 0.5)];
-    let rows = build_rows(&clocks, &events, &|c| format!("clip {c}"));
-    let kinds: Vec<Ck> = rows.iter().map(|r| r.group.kind).collect();
-    assert_eq!(kinds, vec![Ck::Absolute, Ck::Relative, Ck::None]);
-    let a = &rows[0].subs[0].events[0];
-    assert_eq!((a.t0, a.own_err), (1030.0, 0.5));
-    // The clock's error grows away from the anchor (unknown drift): a hair over 2 s at 30-31 s.
-    assert!((a.err0 - 2.0).abs() < 1e-4 && a.err1 > a.err0, "{} {}", a.err0, a.err1);
-    assert!((a.err() - a.err1.hypot(0.5)).abs() < 1e-9);
-    // b and c share a group; both placed on the reference clock (the smaller id, b), the one
-    // that starts first first.
-    assert_eq!(rows[1].subs.len(), 2);
-    let on_ref: Vec<(&str, f64)> = rows[1].subs.iter().map(|s| (s.clock.as_str(), s.events[0].t0)).collect();
-    assert!(on_ref[0].0 == "c" && (on_ref[0].1 - -7.0).abs() < 1e-6 && (on_ref[1].1 - 4.0).abs() < 1e-6, "{on_ref:?}");
-    assert_eq!(rows[2].subs[0].events[0].t0, 5.0, "unanchored: as it is");
-    // The floating row's first event starts under the first absolute one.
-    let s = default_shift(&rows, &rows[2], 0.0);
-    assert!((rows[2].first().unwrap() + s - 1030.0).abs() < 1e-9);
-    assert_eq!(default_shift(&rows, &rows[0], 0.0), 0.0);
-}
-
-#[test]
-fn sync_list_entries_share_and_contradictions() {
-    use corroborate::clock::{solve, Anchor, Link};
-    let an = |t: f64, utc: f64, from: &str, enabled: bool| Anchor { clock: "a".into(), t, utc, error_s: 1.0, from: from.into(), enabled };
-    let name = |c: &str| c.to_string();
-    let who = |f: &str| f.to_string();
-
-    // Two agreeing anchors share the error evenly; the link ties b to a.
-    let anchors = vec![an(0.0, 1000.0, "n1", true), an(10.0, 1010.0, "n2", true)];
-    let links = vec![Link { a: "a".into(), t_a: 5.0, b: "b".into(), t_b: 2.0, error_s: 1.0, from: "manual".into(), enabled: true }];
-    let clocks = solve(&anchors, &links);
-    let e = crate::timeline::sync_entries(&anchors, &links, &clocks, 2.0, &name, &who);
-    assert_eq!(e.len(), 3);
-    assert!(e.iter().all(|x| x.contradiction.is_none()));
-    assert!((e[0].share - e[1].share).abs() < 1e-6 && e[0].share > 0.0);
-    assert_eq!(e[2].from, "manual");
-    assert!(e[2].title.starts_with("link"));
-
-    // Disagreeing anchors are flagged; a switched-off one has no share.
-    let anchors = vec![an(0.0, 1000.0, "n1", true), an(0.0, 1100.0, "n2", true), an(0.0, 5000.0, "n3", false)];
-    let clocks = solve(&anchors, &[]);
-    let e = crate::timeline::sync_entries(&anchors, &[], &clocks, 2.0, &name, &who);
-    assert!(e[0].contradiction.is_some() && e[1].contradiction.is_some());
-    assert!(!e[2].enabled && e[2].share == 0.0 && e[2].contradiction.is_none());
-
-    // Lines: an anchor alone; the links of one pair together, whichever way round.
-    let anchors = vec![an(0.0, 1000.0, "n1", true)];
-    let l = |a: &str, b: &str, t: f64| Link { a: a.into(), t_a: t, b: b.into(), t_b: t + 2.0, error_s: 0.01, from: "m".into(), enabled: true };
-    let links = vec![l("a", "b", 1.0), l("b", "c", 1.0), l("b", "a", 9.0), l("a", "b", 20.0)];
-    let clocks = solve(&anchors, &links);
-    let e = crate::timeline::sync_entries(&anchors, &links, &clocks, 2.0, &name, &who);
-    let lines = crate::timeline::sync_lines(&e, &links);
-    assert_eq!(lines, vec![(None, vec![0]), (Some("a|b".into()), vec![1, 3, 4]), (Some("b|c".into()), vec![2])]);
-}
-
-/// A dragged row's event meets the closest event on another row within the tolerance; an absolute
-/// row gives an anchor in UTC, a floating one a link in its own clock's time.
-#[test]
-fn drop_match_finds_the_closest_pair() {
-    use crate::timeline::{build_rows, drop_match};
-    use corroborate::clock::Anchor as An;
-    use corroborate::data::Event;
-    let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }], &[]);
-    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, ..Default::default() });
-    let rows = build_rows(&clocks, &[ev("a", 10.0), ev("a", 20.0), ev("z", 3.0)], &|c| c.to_string());
-    let off = |c: &str, s: f64| clocks.get(c).back(s);
-    // z's event at 3 is drawn at 3 + shift: 1018 is 2 s short of a's event at 20 s (UTC 1020).
-    let all = |_: &crate::timeline::Row| true;
-    let m = drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &all, (f64::MIN, f64::MAX)).unwrap();
-    assert!(m.absolute && m.a == "z" && m.t_a == 3.0 && m.t_b == 1020.0 && (m.gap - 2.0).abs() < 1e-9, "{m:?}");
-    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 1.0, &all, (f64::MIN, f64::MAX)).is_none());
-    // A row not on screen, or an event outside the time shown, is not matched.
-    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &|r| r.group.id == "z", (f64::MIN, f64::MAX)).is_none());
-    assert!(drop_match(&rows, "z", &|r| if r.group.id == "z" { 1015.0 } else { 0.0 }, &off, 3.0, &all, (-10.0, 0.0)).is_none());
-}
-
-/// Dragging a floating row so its event meets another floating row's event asks for the error;
-/// confirming makes a manual link and the row joins that group.
-#[test]
-fn drag_a_row_onto_an_event_links_it() {
-    use corroborate::data::Event;
-    let mut d = crate::drive::Drive::new();
-    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, label: c.into(), ..Default::default() });
-    let app = d.app();
-    app.tls.extra = vec![ev("c1", 10.0), ev("c2", 5.0)];
-    app.follow = false;
-    app.tl = (0.0, 60.0);
-    d.frames(3);
-    let (track, v0, span) = d.app().tls.geom.unwrap();
-    let y = d.app().tls.row_y.iter().find(|(g, _)| g == "c2").unwrap().1;
-    let x = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
-    let (from, to) = (Pos2::new(x(5.0), y), Pos2::new(x(10.0) + 2.0, y));
-    d.h.hover_at(from);
-    d.h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
-    d.frames(1);
-    for k in 1..=6 {
-        d.h.hover_at(from + (to - from) * (k as f32 / 6.0));
-        d.frames(1);
-    }
-    d.h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
-    d.frames(3);
-    let p = d.app().tls.pending.clone().expect("the drop asks for the link's error");
-    assert!(!p.absolute && p.a == "c2" && p.t_a == 5.0 && p.b == "c1" && p.t_b == 10.0 && p.error_s > 0.0, "{p:?}");
-    d.shot("timeline_link_box");
-    d.click("Link");
-    d.frames(3);
-    let app = d.app();
-    assert_eq!(app.ev.manual_links.len(), 1);
-    assert_eq!(app.ev.manual_links[0].from, "manual");
-    let (g1, g2) = (app.ev.clocks.get("c1").group.clone(), app.ev.clocks.get("c2").group.clone());
-    assert_eq!(g1, g2, "c2 joined c1's group");
-    assert!(app.tls.pending.is_none() && !app.tls.shift.contains_key("c2"));
-    d.shot("timeline_linked");
 }
 
 /// Moving the playhead in SOURCER's waveform moves it on the timeline and in Planes, which is on
@@ -439,11 +248,11 @@ fn sound_follows_the_selected_node() {
     assert_eq!((a.lock().unwrap().len(), t), (1600, 0.05));
 }
 
-/// Times on clock groups with nothing linking them are listed as not comparable and warned
-/// about; the result file carries the clocks, the evidence and the events with their UTC.
+/// Times on clock groups with nothing linking them are listed as not comparable; the result file
+/// carries the clocks, the evidence and the events with their UTC.
 #[test]
 fn not_comparable_and_the_result_file() {
-    use crate::evidence::{comparable_note, not_comparable};
+    use crate::evidence::not_comparable;
     use corroborate::clock::{solve, Anchor as An, Link};
     let clocks = solve(
         &[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }],
@@ -454,8 +263,6 @@ fn not_comparable_and_the_result_file() {
     assert!(not_comparable(&clocks, &s(&["a", "utc"])).is_empty(), "both absolute");
     let nc = not_comparable(&clocks, &s(&["a", "b", "z"]));
     assert_eq!(nc.len(), 3);
-    assert!(comparable_note(&nc).unwrap().contains("3 clock groups"));
-    assert!(comparable_note(&[]).is_none());
 
     let mut app = App::empty();
     let a = source(&mut app, 40.0);
@@ -463,144 +270,6 @@ fn not_comparable_and_the_result_file() {
     app.update_clocks();
     let j = app.result_json(&[a]);
     assert!(j.contains("\"clocks\":[{") && j.contains("\"kind\":\"absolute\"") && j.contains("\"type\":\"anchor\"") && j.contains("\"not_comparable\":[]"), "{j}");
-}
-
-/// The canvas outlines each group and numbers it; the timeline gives each group its own lane and
-/// ruler: UTC for a dated source, time on the reference clock for linked ones, none unanchored.
-/// Media are square boxes with see-through margins either side.
-#[test]
-fn timeline_lanes_per_group() {
-    use corroborate::clock::Link;
-    let mut d = crate::drive::Drive::new();
-    let app = d.app();
-    let a = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 40.0));
-    let enf = app.add(Kind::Enf { grid: String::new() }, Pos2::new(330.0, 40.0));
-    app.wire(a, "audio", enf, "audio");
-    let b = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(30.0, 330.0));
-    let c = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(700.0, 330.0));
-    let e = app.add(Kind::Sourcer { input: String::new() }, Pos2::new(1050.0, 60.0));
-    let utc0 = 1_467_916_147.0;
-    anchor(app, a, utc0, 20.0);
-    for (i, s) in [(a, 300.0), (b, 200.0), (c, 150.0), (e, 120.0)] {
-        app.nodes[i].state.lock().unwrap().audio_s = s;
-    }
-    d.frames(3);
-    let app = d.app();
-    let (cb, cc) = (app.clock_of(b).unwrap(), app.clock_of(c).unwrap());
-    app.ev.manual_links.push(Link { a: cb, t_a: 30.0, b: cc, t_b: 0.0, error_s: 4.0, from: "manual".into(), enabled: true });
-    app.update_clocks();
-    app.follow = false;
-    app.tl = (utc0 - 40.0, utc0 + 360.0);
-    d.frames(4);
-    let app = d.app();
-    assert_eq!(app.tls.row_y.len(), 3, "one lane per group: dated, linked, unanchored");
-    let ys: Vec<f32> = app.tls.row_y.iter().map(|r| r.1).collect();
-    assert!(ys[1] - ys[0] > 40.0, "the dated lane has its own ruler above the lane: {ys:?}");
-    d.shot("timeline_lanes");
-}
-
-/// Group numbers stay with their group: others leaving or a merge do not renumber the rest.
-#[test]
-fn group_numbers_stay_put() {
-    use crate::clock_view::number_groups;
-    let mut known = Default::default();
-    assert_eq!(number_groups(&mut known, &["a", "b", "c"]), vec![1, 2, 3]);
-    // b merged into a (the merge keeps a's id): c stays 3.
-    assert_eq!(number_groups(&mut known, &["a", "c"]), vec![1, 3]);
-    // A new group takes the smallest free number.
-    assert_eq!(number_groups(&mut known, &["a", "c", "d"]), vec![1, 3, 2]);
-}
-
-/// Linking two groups keeps what the user watches: the active group's playhead moves into the
-/// merged group at the same moment on its clock; the other group's playhead and shift go.
-#[test]
-fn playheads_carry_over_a_merge() {
-    use corroborate::clock::Link;
-    let mut d = crate::drive::Drive::new();
-    let app = d.app();
-    let b = source(app, 40.0);
-    let c = source(app, 330.0);
-    for i in [b, c] {
-        app.nodes[i].state.lock().unwrap().audio_s = 100.0;
-    }
-    d.frames(3);
-    let app = d.app();
-    let (cb, cc) = (app.clock_of(b).unwrap(), app.clock_of(c).unwrap());
-    app.set_playhead(&cb, 12.0);
-    app.set_playhead(&cc, 3.0);
-    app.tls.shift.insert(cc.clone(), 50.0);
-    app.pick_only(c);
-    // b 30 s is c 0 s.
-    app.ev.manual_links.push(Link { a: cb.clone(), t_a: 30.0, b: cc.clone(), t_b: 0.0, error_s: 1.0, from: "manual".into(), enabled: true });
-    app.update_clocks();
-    let g = app.ev.clocks.get(&cc).group.clone();
-    assert_eq!(app.ev.clocks.get(&cb).group, g, "one group now");
-    let at = app.playhead_on(&cc).unwrap();
-    assert!((at - 3.0).abs() < 1e-6, "the watched source is still at 3 s: {at}");
-    assert_eq!(app.ph.floating.len(), 1, "one playhead for the one group");
-    assert!(app.tls.shift.keys().all(|k| *k == g), "shifts of groups gone are dropped");
-}
-
-/// Two clocks linked at both ends of an hour, one running 300 ppm fast: the timeline places the
-/// drifting clock's events drift-corrected, and a playhead set on it reads back the same moment.
-#[test]
-fn drifting_clocks_on_the_timeline_and_playheads() {
-    use crate::timeline::build_rows;
-    use corroborate::clock::Link;
-    use corroborate::data::Event;
-    let k = 1.0 + 300e-6;
-    let link = |ta: f64| Link { a: "a".into(), t_a: ta, b: "b".into(), t_b: 20.0 + ta * k, error_s: 0.01, from: "m".into(), enabled: true };
-    let clocks = corroborate::clock::solve(&[], &[link(0.0), link(3600.0)]);
-    let ev = |c: &str, t: f64| (0usize, Event { clock: c.into(), t_start: t, t_end: t, ..Default::default() });
-    let rows = build_rows(&clocks, &[ev("a", 3600.0), ev("b", 20.0 + 3600.0 * k)], &|c| c.to_string());
-    let t: Vec<f64> = rows[0].subs.iter().map(|s| s.events[0].t0).collect();
-    assert!((t[0] - t[1]).abs() < 0.05, "the same moment lines up despite 1.08 s of drift: {t:?}");
-    let b = clocks.get("b");
-    assert!((b.back(b.at(1234.5)) - 1234.5).abs() < 1e-9);
-
-    let mut app = App::empty();
-    app.ev.clocks = clocks;
-    app.set_playhead("b", 2000.0);
-    let back = app.playhead_on("b").unwrap();
-    assert!((back - 2000.0).abs() < 1e-6, "{back}");
-    let on_a = app.playhead_on("a").unwrap();
-    assert!((on_a - (2000.0 - 20.0) / k).abs() < 0.05, "{on_a}");
-}
-
-/// One anchor at the start of an hour-long recording: the right margin (the clock's error at the
-/// end) is wider than the left, by about 0.36 s at 100 ppm.
-#[test]
-fn margins_grow_away_from_the_evidence() {
-    use crate::timeline::build_rows;
-    use corroborate::clock::Anchor as An;
-    use corroborate::data::Event;
-    let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 0.01, from: "n".into(), enabled: true }], &[]);
-    let rows = build_rows(&clocks, &[(0usize, Event { clock: "a".into(), t_start: 0.0, t_end: 3600.0, ..Default::default() })], &|c| c.to_string());
-    let e = &rows[0].subs[0].events[0];
-    assert!((e.err0 - 0.01).abs() < 1e-6 && (e.err1 - 0.36).abs() < 0.01, "{} {}", e.err0, e.err1);
-}
-
-/// Headless: an hour-long span anchored at its start draws a thin margin at the start and a
-/// wide one at the end (`target/drive/timeline_drift_start.png`, `timeline_drift_end.png`).
-#[test]
-fn drift_margins_drawn() {
-    use corroborate::clock::Anchor as An;
-    use corroborate::data::Event;
-    let mut d = crate::drive::Drive::new();
-    let app = d.app();
-    app.tls.extra = vec![(0usize, Event { clock: "c".into(), t_start: 0.0, t_end: 3600.0, label: "an hour".into(), ..Default::default() })];
-    app.ev.manual_anchors.push(An { clock: "c".into(), t: 0.0, utc: 1_700_000_000.0, error_s: 0.05, from: "manual".into(), enabled: true });
-    app.update_clocks();
-    app.follow = false;
-    // The start, then the end, at the same zoom (6 s across).
-    app.tl = (1_700_000_000.0 - 3.0, 1_700_000_000.0 + 3.0);
-    d.frames(3);
-    d.shot("timeline_drift_start");
-    let e = d.app().ev.clocks.get("c");
-    assert!(e.error_at(3600.0) > 5.0 * e.error_at(0.0));
-    d.app().tl = (1_700_003_600.0 - 3.0, 1_700_003_600.0 + 3.0);
-    d.frames(3);
-    d.shot("timeline_drift_end");
 }
 
 /// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start; b's
@@ -823,6 +492,79 @@ fn time_node_corrects_a_time() {
     assert!(back.load_project_text(&text));
     assert_eq!(back.nodes[t].kind.rows(), d.app().nodes[t].kind.rows());
     assert_eq!(back.graph.nodes()[t].spec.inputs.len(), 2);
+}
+
+/// A clock with no real time keeps its own playhead, linked to nothing, even to a clock audio ties
+/// it to. Once it has real time it is on the one real-time playhead, at the same moment.
+#[test]
+fn one_real_time_playhead() {
+    use corroborate::clock::{Anchor as An, Link};
+    let mut app = App::empty();
+    let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
+    let (ca, cb) = (uid(&app, a), uid(&app, b));
+    app.ev.manual_links.push(Link { a: ca.clone(), t_a: 20.0, b: cb.clone(), t_b: 0.0, error_s: 0.01, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    app.set_playhead(&ca, 12.0);
+    assert_eq!(app.playhead_on(&ca), Some(12.0));
+    assert_eq!(app.playhead_on(&cb), None, "linked by audio, but no real time: its own");
+    app.ev.manual_anchors.push(An { clock: ca.clone(), t: 0.0, utc: 1000.0, error_s: 0.01, from: "manual".into(), enabled: true });
+    app.update_clocks();
+    assert!((app.ph.utc.unwrap() - 1012.0).abs() < 1e-6, "{:?}", app.ph.utc);
+    assert!(app.ph.floating.is_empty());
+    assert!((app.playhead_on(&cb).unwrap() + 8.0).abs() < 1e-3, "{:?}", app.playhead_on(&cb));
+    app.set_utc_playhead(1030.0);
+    assert!((app.playhead_on(&ca).unwrap() - 30.0).abs() < 1e-3);
+    assert!((app.playhead_on(&cb).unwrap() - 10.0).abs() < 1e-3);
+}
+
+/// A clock's error is smallest at its evidence and grows with unknown drift.
+#[test]
+fn errors_grow_away_from_the_evidence() {
+    use corroborate::clock::Anchor as An;
+    let clocks = corroborate::clock::solve(&[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 0.01, from: "n".into(), enabled: true }], &[]);
+    let c = clocks.get("a");
+    assert!((c.error_at(0.0) - 0.01).abs() < 1e-6 && (c.error_at(3600.0) - 0.36).abs() < 0.01);
+    assert!((c.back(c.at(1234.5)) - 1234.5).abs() < 1e-9);
+}
+
+/// The Timeline node: a bar at the time wired in, as long as the media, with margins from the
+/// time's error; a row with no time has no bar; rows sort by time, ports following; a click on the
+/// ruler moves the real-time playhead.
+#[test]
+fn timeline_node_draws_what_it_is_given() {
+    use corroborate::timebase::FileFacts;
+    let mut d = crate::drive::Drive::new();
+    for (p, t) in [("a.mp4", 1000.0), ("b.mp4", 500.0)] {
+        d.app().facts.put(p, FileFacts { stamp: Some(t), len: Some(100.0), source: "the file's creation_time".into() });
+    }
+    d.app().facts.put("c.mp4", FileFacts { stamp: None, len: Some(40.0), source: String::new() });
+    let app = d.app();
+    let (a, b, c) = (app.add(Kind::Sourcer { input: "a.mp4".into() }, Pos2::new(30.0, 40.0)), app.add(Kind::Sourcer { input: "b.mp4".into() }, Pos2::new(30.0, 330.0)), app.add(Kind::Sourcer { input: "c.mp4".into() }, Pos2::new(30.0, 620.0)));
+    let t = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(560.0, 40.0));
+    for s in [a, b, c] {
+        app.wire_many(s, "audio", t);
+    }
+    assert_eq!(app.graph.nodes()[t].spec.inputs.len(), 8, "rows of media and time: three wired, one free");
+    app.wire(a, "time", t, "time 1");
+    app.wire(b, "time", t, "time 2");
+    app.wire(c, "time", t, "time 3");
+    d.frames(3);
+    let rows = d.app().timeline_rows(t);
+    assert_eq!((rows[0].at, rows[1].at, rows[2].at), (Some((1000.0, 0.0)), Some((500.0, 0.0)), None));
+    assert_eq!(rows[2].len, 40.0);
+    let o = d.app().canvas_origin;
+    let y1 = d.app().port_place(o, t, 0, false).0.y;
+    d.shot("timeline_node");
+    if let Kind::Timeline { rows } = &mut d.app().nodes[t].kind {
+        rows.push(("sort by time".into(), "true".into()));
+    }
+    d.frames(3);
+    assert!((d.app().port_place(o, t, 2, false).0.y - y1).abs() < 0.01 && d.app().port_place(o, t, 0, false).0.y > y1, "row 2 is earlier, so it is drawn first and its ports follow");
+    let track = *d.app().match_ui.tracks.last().unwrap();
+    d.click_at(track.center().x, track.top() + 8.0);
+    let u = d.app().ph.utc.expect("a click on the ruler sets the real-time playhead");
+    assert!(u > 500.0 && u < 1100.0, "{u}");
+    d.shot("timeline_node_sorted");
 }
 
 /// Makes the Jiku project in the app folder: app\projects\Jiku GT_090912\Jiku GT_090912.txt, one
@@ -1152,162 +894,21 @@ fn audio_match_timeline() {
     d.app().match_ui.views.remove(&m);
     d.frames(4);
     d.shot("am_8_thin_rows");
+    // The yellow outputs into a Timeline node: every recording at its real time.
+    let pos = d.app().nodes[m].pos + Vec2::new(1100.0, 0.0);
+    let tl = d.app().add(Kind::Timeline { rows: Vec::new() }, pos);
+    let wired: Vec<usize> = d.app().match_view(m).rows.iter().filter(|r| r.wired).map(|r| r.n).collect();
+    for n in wired {
+        let (s, _) = d.app().graph.feeder(m, &format!("audio {n}")).unwrap();
+        d.app().wire_many(s, "audio", tl);
+        d.app().wire(m, &format!("synced {n}"), tl, &format!("time {n}"));
+    }
+    d.frames(3);
+    assert!(d.app().timeline_rows(tl).iter().filter(|r| r.wired).all(|r| r.at.is_some() && r.len > 0.0), "{:?}", d.app().timeline_rows(tl));
+    let area = d.app().canvas_rect;
+    d.app().frame_nodes(area);
+    d.frames(4);
+    d.shot("am_9_timeline_node");
     d.app().stop_run();
 }
 
-/// The timeline on a big project, handled like a user would (a copy of the Jiku project in
-/// target\drive): the panel dragged taller, each group of several recordings one summary bar,
-/// zoomed out with the wheel, panned by dragging empty space, a group opened by a click on its
-/// bar, the rows scrolled, a floating row dragged along, a bar hovered, the group closed by a
-/// click on its label. PNGs tl_1_closed … tl_7_closed_again.
-/// Run: cargo test --profile fast --bin corroborate timeline_on_a_big_project -- --ignored --nocapture
-#[test]
-#[ignore]
-fn timeline_on_a_big_project() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let made = root.join("app").join("projects").join("Jiku GT_090912").join("Jiku GT_090912.txt");
-    assert!(made.is_file(), "make it first: make_jiku_project");
-    let dir = crate::drive::out_dir().join("Jiku timeline");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("Jiku timeline.txt");
-    std::fs::copy(&made, &file).unwrap();
-    let mut d = crate::drive::Drive::new();
-    d.app().open_project(file);
-    d.frames(3);
-    assert!(d.app().nodes.iter().filter(|n| n.kind.is_source()).all(|n| n.collapsed), "the sources start collapsed");
-    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch { .. })).unwrap();
-    d.click("▶ Run");
-    assert!(d.wait_until(180.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
-    d.wait(1.0);
-    let n_pics = d.app().nodes.iter().filter(|n| n.state.lock().unwrap().source.frames_asked != sourcer_node::Asked::Nothing).count();
-    assert_eq!(n_pics, 0, "collapsed sources read no pictures");
-
-    // The panel: drag its top edge up.
-    let (track, ..) = d.app().tls.geom.expect("timeline drawn");
-    let edge = track.top() - 30.0;
-    d.drag(Pos2::new(700.0, edge), Pos2::new(700.0, 260.0));
-    d.frames(3);
-    let (track, ..) = d.app().tls.geom.unwrap();
-    println!("timeline track {track:?}");
-    let bars = d.app().tls.bars.clone();
-    println!("{} summary bars, {} rows", bars.len(), d.app().tls.row_y.len());
-    assert!(!bars.is_empty(), "groups of several recordings are summary bars");
-    d.shot("tl_1_closed");
-
-    // Zoom out: wheel over the track.
-    let span0 = d.app().tl.1 - d.app().tl.0;
-    d.scroll(track.center(), -8.0);
-    let span1 = d.app().tl.1 - d.app().tl.0;
-    println!("span {span0:.0} s -> {span1:.0} s");
-    assert!(span1 > span0 * 1.5, "the wheel zooms out");
-    d.shot("tl_2_zoomed_out");
-
-    // Pan: drag empty space under the rows.
-    let (track, ..) = d.app().tls.geom.unwrap();
-    let below = d.app().tls.row_y.iter().map(|r| r.1).fold(track.top(), f32::max) + 40.0;
-    if below < track.bottom() - 10.0 {
-        let v0 = d.app().tl.0;
-        d.drag(Pos2::new(track.center().x, below), Pos2::new(track.center().x - 200.0, below));
-        println!("pan: view start {v0:.0} -> {:.0}", d.app().tl.0);
-        assert!(d.app().tl.0 > v0, "dragging empty space to the left moves the view later");
-        assert!(!d.app().follow);
-    } else {
-        println!("no empty space under the rows to pan on");
-    }
-
-    // Open the first group: a click on its bar.
-    let (g, bar) = d.app().tls.bars[0].clone();
-    d.click_at(bar.center().x, bar.center().y);
-    assert!(d.app().tls.expanded.contains(&g), "a click on the bar opens the group");
-    d.frames(3);
-    d.shot("tl_3_open");
-
-    // Scroll the rows: wheel over the labels.
-    let (track, ..) = d.app().tls.geom.unwrap();
-    // The track is the rows' whole scrolled content: aim inside the panel (the screen is 900 high).
-    let seen = |t: Rect| Rect::from_min_max(t.min, Pos2::new(t.right(), t.bottom().min(880.0)));
-    let track = seen(track);
-    let y_before = d.app().tls.row_y.last().map(|r| r.1);
-    d.scroll_with(Pos2::new(track.left() - 100.0, track.center().y), -6.0, egui::Modifiers::ALT);
-    let y_after = d.app().tls.row_y.last().map(|r| r.1);
-    println!("last row y {y_before:?} -> {y_after:?}");
-    assert!(y_after < y_before, "Alt + wheel over the labels scrolls the rows");
-    d.shot("tl_4_scrolled");
-    d.scroll_with(Pos2::new(track.left() - 100.0, track.center().y), 20.0, egui::Modifiers::ALT);
-    let (track, ..) = d.app().tls.geom.unwrap();
-    let track = seen(track);
-
-    // Drag a floating group row along by 150 px (the open one, the only one in sight).
-    let (g2, y2) = d.app().tls.row_y.iter().find(|r| r.1 > track.top() + 20.0 && r.1 < track.bottom() - 10.0).cloned().expect("a group row in sight");
-    let before = d.app().tls.shift.get(&g2).copied();
-    let x = track.left() + 60.0;
-    d.drag(Pos2::new(x, y2), Pos2::new(x + 150.0, y2));
-    let (after, pending) = (d.app().tls.shift.get(&g2).copied(), d.app().tls.pending.is_some());
-    println!("row {g2}: shift {before:?} -> {after:?}, pending link: {pending}");
-    assert!(after != before, "the row moved");
-    d.shot("tl_5_dragged");
-    d.app().tls.pending = None;
-    d.frames(2);
-
-    // Hover a bar: what it holds.
-    if let Some((_, bar)) = d.app().tls.bars.iter().find(|b| b.1.center().y < 880.0).cloned() {
-        d.h.hover_at(bar.center() + Vec2::new(bar.width() * 0.2, 0.0));
-        d.frames(10);
-        d.shot("tl_6_hover");
-    }
-
-    // Close it again: a click on its label.
-    let y = d.app().tls.row_y.iter().find(|r| r.0 == g).unwrap().1;
-    d.click_at(track.left() - 120.0, y - 5.0);
-    assert!(!d.app().tls.expanded.contains(&g), "a click on the label closes it");
-    d.frames(3);
-    d.shot("tl_7_closed_again");
-
-    // The Sync list: one line per pair of recordings; a click opens a pair's links.
-    let pairs = d.h.query_all_by_label_contains(" links: phone").count();
-    println!("{} links in {pairs} pair lines", d.app().ev.links.len());
-    assert!(pairs > 10 && pairs < d.app().ev.links.len() / 2, "links listed by pair: {pairs}");
-    d.click_contains(" links: phone");
-    assert_eq!(d.app().tls.sync_open.len(), 1, "a click opens the pair");
-    d.frames(3);
-    d.shot("tl_8_sync_pair_open");
-    d.app().stop_run();
-}
-
-/// With more rows than fit: the wheel zooms the time axis and leaves the rows where they are, Alt +
-/// wheel moves the rows and leaves the time axis, over the track and over the labels alike.
-#[test]
-fn timeline_rows_scroll() {
-    let mut app = App::empty();
-    app.tls.extra = (0..40).map(|k| (0usize, corroborate::data::Event { clock: format!("c{k:02}"), t_start: 0.0, t_end: 60.0, label: "x".into(), ..Default::default() })).collect();
-    let mut d = crate::drive::Drive::with(app);
-    d.frames(3);
-    let (track, ..) = d.app().tls.geom.expect("drawn");
-    let alt = egui::Modifiers::ALT;
-    let none = egui::Modifiers::NONE;
-    let on_labels = Pos2::new(track.left() - 100.0, track.top() + 60.0);
-    let on_track = Pos2::new(track.left() + track.width() * 0.25, track.top() + 60.0);
-    let state = |d: &mut crate::drive::Drive| (d.app().tls.row_y[0].1, d.app().tl);
-    for at in [on_track, on_labels] {
-        // Plain wheel: the time axis zooms out, the rows stay.
-        let (y0, tl0) = state(&mut d);
-        d.scroll_with(at, -5.0, none);
-        let (y1, tl1) = state(&mut d);
-        assert_eq!(y1, y0, "the wheel leaves the rows where they are");
-        assert!(tl1.1 - tl1.0 > (tl0.1 - tl0.0) * 1.2, "the wheel zooms out: {tl0:?} -> {tl1:?}");
-        if at == on_track {
-            let time_at = |tl: (f64, f64)| tl.0 + (tl.1 - tl.0) * 0.25;
-            assert!((time_at(tl1) - time_at(tl0)).abs() < (tl0.1 - tl0.0) * 0.02, "around the pointer: {tl0:?} -> {tl1:?}");
-        }
-        d.shot("timeline_wheel_zoomed");
-        // Alt + wheel: the rows move, the time axis stays. Back up to the top afterwards.
-        d.scroll_with(at, -5.0, alt);
-        let (y2, tl2) = state(&mut d);
-        assert!(y2 < y1 - 20.0, "Alt + wheel moves the rows: {y1} -> {y2}");
-        assert_eq!(tl2, tl1, "and leaves the time axis");
-        d.shot("timeline_alt_wheel_rows");
-        d.scroll_with(at, 20.0, alt);
-        assert_eq!(state(&mut d).0, y1, "Alt + wheel back up");
-    }
-}

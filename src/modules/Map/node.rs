@@ -6,8 +6,7 @@
 //!   "Maps"); without them the built-in Blue Marble image is drawn in the same projection. Google's
 //!   satellite and road maps can be switched on (google_maps.rs): one choice for all Map nodes,
 //!   online, so offline at every start and marked while on.
-//! - **Points** (a typed latitude and longitude, a file's GPS) are pins in their clock group's
-//!   colour; a click selects the node they come from. **Areas** are their 1° cells, green where
+//! - **Points** (a typed latitude and longitude, a file's GPS) are pins; a click selects the node they come from. **Areas** are their 1° cells, green where
 //!   they add and red where they subtract. New inputs are framed by themselves.
 //!
 //! `paint` is the small fixed world map (Robinson over NASA Blue Marble, Natural Earth coastlines)
@@ -21,6 +20,7 @@ use walkers::{lat_lon, MapMemory, PmTiles, Projector, Tiles};
 const NODE_W: f32 = 360.0;
 const MAP_H: f32 = 240.0;
 
+const PIN: Color32 = Color32::from_rgb(96, 165, 250);
 const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
 const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
 
@@ -425,16 +425,7 @@ impl App {
         self.map_source_bar(ui, i);
         self.read_map_files(&ctx);
         let (places, _) = self.map_inputs(i);
-        let colours: Vec<(Color32, String)> = {
-            let cg = self.canvas_groups();
-            places
-                .iter()
-                .map(|p| match cg.of_node[p.node].first() {
-                    Some(&g) => (cg.groups[g].color, clock_view::group_label(cg.nums[g])),
-                    None => (TEXT, String::new()),
-                })
-                .collect()
-        };
+        let colours: Vec<(Color32, String)> = places.iter().map(|_| (PIN, String::new())).collect();
         let online = self.maps.google.live();
         let n_maps = self.maps.tiles.as_ref().map_or(0, |t| t.len());
         let uid = self.nodes[i].uid.clone();

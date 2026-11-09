@@ -1,10 +1,24 @@
 # Audio match (detector)
 
-Finds where recordings of one event hear the same sound, and links their clocks: moment `t_a` on
-one recording is moment `t_b` on another. Wire every recording's audio in (a new input appears
-each time one is wired: `audio 1`, `audio 2`, …); every pair is matched. The links go into the
-clock solve like any link in the project (wired or not), which works out each recording's offset
-and drift; the timeline then shows the recordings in one group, side by side.
+The time module. Each row takes one recording's audio and the time its metadata claims (`audio N`
+and `time N`, growing as they are wired; dropping a SOURCER's audio on a row also draws its time
+wire) and gives a better time on its yellow output, `synced N`.
+
+It finds where recordings of one event hear the same sound, and links their clocks: moment `t_a` on
+one recording is moment `t_b` on another; every pair is matched. The links go into the clock solve
+like any link in the project (wired or not), which works out each recording's offset and drift.
+
+Recordings linked by audio are a synced group, drawn with a coloured border and its number; only
+this node shows them, and audio alone decides what a group is. Until a group has an anchor its amber
+bars are only shown, with the middle of the audio on the middle of its times, and can be dragged;
+that changes no data and nothing comes out. A click on the anchor of any row with a time anchors the
+group there: the audio's start snaps to that time, every other row keeps its real offset, and every
+row's yellow output gives its time, with an error from the anchor and the links. A time 200 years
+off is never left out: it stays in view until a person corrects it with a Time node.
+
+The status column says: before a run the row's time or `no time metadata`, during it the progress,
+after it how many seconds off the time is from the audio (green at 0 s, red at 30 s, going black
+into years), with `about its length` when that may be a stamp marking the end.
 
 Outputs:
 - `links`: one link per matched chunk, both clocks named, each with its error (1 sigma) from how
@@ -38,5 +52,5 @@ Limits now: files only (a stream or microphone wired in is named in the status a
 each file is decoded again here, and all are matched once their decoding is done, not while
 the sources play.
 
-Files: `module.toml` (ports and use cases), `mod.rs` (its ports), `node.rs` (runs the match,
-fills the outputs and the result file).
+Files: `module.toml` (ports and use cases), `mod.rs` (its ports), `node.rs` (runs the match, the
+rows on the canvas, the outputs and the result file).

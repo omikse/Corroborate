@@ -1,7 +1,6 @@
 //! Corroborate: the workbench. Sources, detectors and plugins are nodes in a graph; wires
-//! decide what feeds what. the graph runs always (a change restarts it); each node's window shows its raw data;
-//! the timeline shows every finding on one clock with its time error; the Record node keeps
-//! a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
+//! decide what feeds what. the graph runs always (a change restarts it); each node shows its raw data;
+//! the Record node keeps a result JSON (findings, facts and the graph as the evidence trail) up to date on disk.
 //!
 //! Graph: scroll to zoom, drag a node to move it, middle-drag to pan, right-drag a box to select, drag
 //! from an output port to an input port to wire them (types must match), right-click an input
@@ -9,7 +8,7 @@
 //! nodes, delete, copy and paste, undo: canvas.rs. Nodes have no windows: each shows its data and
 //! controls on the canvas.
 //!
-//! This file draws the graph, the timeline and the windows' frames. What each node shows and does
+//! This file draws the graph and the window's frame. What each node shows and does
 //! is in its module folder (`src/modules/<node>/node.rs`); the matches on `Kind` here only call it.
 
 // Release builds are a Windows GUI program: no console window. Debug builds keep the console
@@ -37,9 +36,7 @@ mod canvas;
 mod drop_menu;
 mod google_maps;
 mod groups;
-mod clock_view;
 mod evidence;
-mod timeline;
 mod playhead;
 mod sound;
 mod project;
@@ -64,6 +61,8 @@ mod grid_frequencies_node;
 mod invert_location_node;
 #[path = "../../modules/Time/node.rs"]
 mod time_node;
+#[path = "../../modules/Timeline/node.rs"]
+mod timeline_node;
 #[path = "../../modules/Value/node.rs"]
 mod value_node;
 #[path = "../../modules/Map/node.rs"]
@@ -105,7 +104,7 @@ const WARN: Color32 = Color32::from_rgb(224, 164, 88);
 const SEL: Color32 = Color32::from_rgb(95, 179, 161);
 const GOOD: Color32 = Color32::from_rgb(140, 220, 110);
 const LIVE: Color32 = Color32::from_rgb(255, 80, 80);
-/// Playheads, wherever they are drawn (timeline, source waveform, hum trace).
+/// Playheads, wherever they are drawn (Timeline nodes, source waveform, hum trace).
 const PLAYHEAD: Color32 = Color32::from_rgb(255, 210, 90);
 /// An output (or use case) with nothing on it: not built yet, or the signal is too weak for it.
 const GHOST: Color32 = Color32::from_rgb(88, 94, 104);
@@ -236,17 +235,11 @@ struct App {
     sig_seen: (String, Instant),
     textures: HashMap<NodeId, (u64, f64, TextureHandle)>,
     lut: [[u8; 4]; 256],
-    /// Timeline view (UTC seconds when anchored, else source seconds), and whether it follows the end.
-    tl: (f64, f64),
-    follow: bool,
     mics: Vec<String>,
     /// The Earth image under every map (loaded at the first frame).
     earth: Option<TextureHandle>,
     /// Areas worked out this frame, by node (see `area_from`).
     area_cache: std::cell::RefCell<HashMap<NodeId, Result<(Arc<Area>, String), String>>>,
-    /// Group id → its number (1°, 2°…) while the group lives, so numbers and colours stay put
-    /// when other groups come, go or merge (clock_view::number_groups).
-    group_nums: std::cell::RefCell<std::collections::BTreeMap<String, usize>>,
     last_project_save: Instant,
     /// Where the canvas starts on screen (last frame); tests use it to find nodes.
     canvas_origin: Pos2,
@@ -279,8 +272,6 @@ struct App {
     project_path: Option<PathBuf>,
     /// Shared clocks, the evidence about the clocks and the clocks solved from it (evidence.rs).
     ev: evidence::Evidence,
-    /// The timeline panel: open rows, picked row, floating rows' shifts (timeline.rs).
-    tls: timeline::TlState,
     /// The location panel (right).
     maps: map_node::Maps,
     ph: playhead::Playheads,
@@ -334,12 +325,9 @@ impl App {
             sig_seen: (String::new(), Instant::now()),
             textures: HashMap::new(),
             lut: colormap(),
-            tl: (0.0, 600.0),
-            follow: true,
             mics: Vec::new(),
             earth: None,
             area_cache: Default::default(),
-            group_nums: Default::default(),
             last_project_save: Instant::now(),
             canvas_origin: Pos2::ZERO,
             canvas_rect: Rect::NOTHING,
@@ -360,7 +348,6 @@ impl App {
             project_path: None,
             next_uid: 1,
             ev: Default::default(),
-            tls: Default::default(),
             maps: Default::default(),
             ph: Default::default(),
             sound: Default::default(),
@@ -731,7 +718,6 @@ impl App {
             return;
         }
         self.stop = Some(stop);
-        self.follow = true;
         self.msg = format!("running {started} source(s)");
     }
 
@@ -848,7 +834,7 @@ impl App {
                 Kind::Plugin { path } => plugin_node::json(path, &s),
                 Kind::Value { ty, rows } => value_node::json(ty, rows),
                 Kind::Sourcer { .. } => sourcer_node::json(&s),
-                Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } => String::new(),
+                Kind::Map | Kind::InvertLocation | Kind::CombineLocations { .. } | Kind::Timeline { .. } => String::new(),
                 Kind::Missing { name, .. } => format!(",\"module_missing\":\"{}\"", json_escape(name)),
                 Kind::Group { def, .. } => format!(",\"group\":\"{}\"", json_escape(def)),
                 Kind::GroupInput | Kind::GroupOutput => String::new(),
@@ -1009,7 +995,6 @@ impl App {
         // Scripted looks of the nodes on screen, run again only when what they read changed.
         self.run_scripts(origin, area, ui.input(|i| i.time));
 
-        self.draw_glow(ui, &painter, origin);
         let trail = self.lit_trail();
         // Wires out of a node fed by a running live stream pulse in the direction of flow.
         let live: Vec<bool> = self.nodes.iter().map(|n| n.state.lock().map(|s| s.running && s.live).unwrap_or(false)).collect();
@@ -1032,7 +1017,6 @@ impl App {
             }
         }
 
-        self.draw_wire_boxes(ui, &painter, origin);
         let mut clicked: Option<(NodeId, egui::Modifiers)> = None;
         let mut move_by = Vec2::ZERO;
         let mut delete = None;
@@ -1486,9 +1470,6 @@ impl App {
                     let _ = std::fs::create_dir_all(&d);
                     let _ = std::process::Command::new("explorer").arg(d).spawn();
                 }
-                if !self.follow && ui.button("Follow timeline").clicked() {
-                    self.follow = true;
-                }
             }
             ui.colored_label(DIM, &self.msg);
         });
@@ -1572,15 +1553,6 @@ impl App {
         });
         egui::Panel::top("streams").frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(10, 4)).stroke(Stroke::new(1.0, LINE))).show(ui, |ui| {
             self.streams_bar(ui);
-        });
-        let open = self.tls.open;
-        egui::Panel::bottom(if open { "timeline" } else { "timeline-closed" })
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(0.0))
-            .resizable(open)
-            .default_size(190.0)
-            .size_range(if open { 80.0..=700.0 } else { 0.0..=f32::INFINITY })
-            .show(ui, |ui| {
-            self.timeline_view(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             self.graph_view(ui);

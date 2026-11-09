@@ -448,7 +448,6 @@ pub const MANY_MAX: usize = 64;
 
 /// A name that lives as long as the program, kept once however often it is asked for. Ports and
 /// node names are `&'static str`; names read from files come through here.
-
 pub fn intern(s: &str) -> &'static str {
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
     let mut names = NAMES.lock().unwrap();
