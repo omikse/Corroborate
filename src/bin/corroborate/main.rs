@@ -281,6 +281,8 @@ struct App {
     sound: sound::Sound,
     /// The number of the next stable node id (`n<number>`), saved with the project.
     next_uid: u64,
+    /// Audio match nodes' timelines: file stamps read, axes moved by hand, where the tracks are.
+    match_ui: audio_match_node::MatchUi,
     /// The project's recordings (recordings.rs), and relative paths read but not resolved yet.
     library: recordings::Library,
     rel_pending: Vec<(String, String)>,
@@ -333,6 +335,7 @@ impl App {
             last_project_save: Instant::now(),
             canvas_origin: Pos2::ZERO,
             canvas_rect: Rect::NOTHING,
+            match_ui: Default::default(),
             programs: HashMap::new(),
             bus_sent: Instant::now(),
             changes: Vec::new(),
@@ -924,12 +927,14 @@ impl App {
         // Scale around the pointer, keeping the item under it in place while scrolling.
         if let Some(pointer) = bg.hover_pos() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
+            // Over an Audio match timeline the wheel is the timeline's.
+            if scroll != 0.0 && !self.match_ui.tracks.iter().any(|r| r.contains(pointer)) {
                 let world = (pointer - area.min - self.pan) / self.zoom;
                 self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(MIN_ZOOM, 2.5);
                 self.pan = pointer - area.min - world * self.zoom;
             }
         }
+        self.match_ui.tracks.clear();
         // Background dots: one mesh of small squares, and never closer than 16 px when zoomed out.
         let mut step = 22.0 * self.zoom;
         while step < 16.0 {

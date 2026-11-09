@@ -641,12 +641,33 @@ fn audio_match_links_two_recordings() {
     let m = app.add(Kind::AudioMatch, Pos2::new(460.0, 120.0));
     app.wire_many(a, "audio", m);
     app.wire_many(b, "audio", m);
-    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 3, "two wired and one free");
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 4, "the time input, two wired and one free");
     app.wire_many(c, "audio", m);
     app.run();
     assert!(d.wait_until(30.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.frames(5);
     d.shot("audio_match");
+    // On the node: each row placed by audio once the match has ended. These files have no stamp.
+    let ctx = d.h.ctx.clone();
+    let (rows, _, note) = d.app().match_rows(m, &ctx);
+    assert_eq!(rows.iter().filter(|r| r.teal.is_some()).count(), 3, "{:?}", rows.iter().map(|r| r.note.clone()).collect::<Vec<_>>());
+    assert!(rows.iter().all(|r| r.amber.is_none() && r.note == "no stamp"));
+    assert_eq!(note, "time: not wired");
+    // One recording's time wired in: every recording linked to it has real time.
+    d.app().nodes[a].state.lock().unwrap().anchor = Some(Anchor { utc0: 1000.0, error_s: 60.0, source: "file creation_time (low confidence)".into() });
+    d.app().update_clocks();
+    let ub = uid(d.app(), b);
+    assert_ne!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "not wired, not trusted");
+    d.app().wire(a, "time", m, "time");
+    d.app().update_clocks();
+    assert_eq!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "wired: the linked recording has real time");
+    let (rows, real, note) = d.app().match_rows(m, &ctx);
+    assert!(real && note.starts_with("time: "), "{note}");
+    assert!((rows[0].teal.unwrap().0 - 1000.0).abs() < 0.01, "{:?}", rows[0].teal);
+    assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
+    d.app().graph.disconnect(m, "time");
+    d.app().nodes[a].state.lock().unwrap().anchor = None;
+    d.app().update_clocks();
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
     let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") else { panic!("no quality: {st}") };
@@ -818,6 +839,180 @@ fn jiku_project_opens_stopped() {
     println!("stopped in {:.1} s", t.elapsed().as_secs_f64());
     assert!(running.is_empty() && d.app().stopped, "Stop stops it: still running {running:?}");
     assert!(worst < 2.0, "no frame takes seconds: worst {worst:.1} s");
+}
+
+/// Makes app\projects\Jiku group 6: the 12 recordings the audio match links to
+/// GT_090912_0_1347196530871, found by matching all 50 videos in memory, and an Audio match, sources
+/// collapsed, first in Open recent. The 50-video project is not touched.
+/// Run: cargo test --profile fast --bin corroborate make_jiku_group6 -- --ignored --nocapture
+#[test]
+#[ignore]
+fn make_jiku_group6() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data = root.join("tests").join("data").join("jiku").join("GT_090912");
+    let mut videos: Vec<PathBuf> = std::fs::read_dir(&data).expect("no Jiku data").filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "mp4")).collect();
+    videos.sort();
+    assert_eq!(videos.len(), 50);
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let sources: Vec<NodeId> = videos.iter().map(|v| app.add(Kind::Sourcer { input: v.to_string_lossy().into_owned() }, Pos2::ZERO)).collect();
+    for &s in &sources {
+        app.nodes[s].collapsed = true;
+    }
+    let m = app.add(Kind::AudioMatch, Pos2::ZERO);
+    for &s in &sources {
+        app.wire_many(s, "audio", m);
+    }
+    app.run();
+    assert!(d.wait_until(300.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    d.frames(3);
+    let app = d.app();
+    app.update_clocks();
+    let group_of = |app: &App, s: NodeId| app.ev.clocks.get(&uid(app, s)).group;
+    let key = videos.iter().position(|v| v.to_string_lossy().contains("GT_090912_0_1347196530871")).expect("the video");
+    let group = group_of(app, sources[key]);
+    let members: Vec<PathBuf> = (0..50).filter(|&k| group_of(app, sources[k]) == group).map(|k| videos[k].clone()).collect();
+    app.stop_run();
+    assert_eq!(members.len(), 12, "group 6 has 12 recordings");
+
+    let mut e = crate::drive::Drive::new();
+    let app = e.app();
+    let cols = 3;
+    let mut made = Vec::new();
+    for (k, v) in members.iter().enumerate() {
+        let s = app.add(Kind::Sourcer { input: v.to_string_lossy().into_owned() }, Pos2::new(30.0 + 290.0 * (k % cols) as f32, 40.0 + 190.0 * (k / cols) as f32));
+        let stem = v.file_stem().unwrap().to_string_lossy().into_owned();
+        let parts: Vec<&str> = stem.split('_').collect();
+        app.nodes[s].label = format!("phone {} {}", parts[2], parts[3]);
+        app.nodes[s].collapsed = true;
+        made.push(s);
+    }
+    let a = app.add(Kind::AudioMatch, Pos2::new(30.0 + 290.0 * cols as f32 + 120.0, 40.0));
+    for &s in &made {
+        app.wire_many(s, "audio", a);
+    }
+    let file = project::project_place(&root.join("app").join("projects").join("Jiku group 6"));
+    let _ = std::fs::remove_file(project::recovery_of(&file));
+    app.save_project_as(file.clone());
+    assert!(file.is_file());
+    project::push_recent(&root.join("app").join("settings"), &file);
+    println!("saved {}", file.display());
+}
+
+/// The Audio match timeline on the 12 recordings, handled like a user would (a copy of the project
+/// in target\drive): file stamps shown before Run, the audio sync laid over them after, a
+/// recording's time wired in with a drag, the track zoomed and panned, a row hovered. PNGs am_1 to am_6.
+/// Run: cargo test --profile fast --bin corroborate audio_match_timeline -- --ignored --nocapture
+#[test]
+#[ignore]
+fn audio_match_timeline() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let made = root.join("app").join("projects").join("Jiku group 6").join("Jiku group 6.txt");
+    assert!(made.is_file(), "make it first: make_jiku_group6");
+    let dir = crate::drive::out_dir().join("Jiku group 6 copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Jiku group 6 copy.txt");
+    std::fs::copy(&made, &file).unwrap();
+    let mut d = crate::drive::Drive::new();
+    d.app().open_project(file);
+    d.app().places.open = false;
+    d.frames(3);
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
+    let ctx = d.h.ctx.clone();
+    let rows = |d: &mut crate::drive::Drive| d.app().match_rows(m, &ctx);
+    assert!(d.app().stopped && !d.app().running(), "opens stopped");
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end && rows(&mut d).0.iter().filter(|r| r.amber.is_some()).count() < 6 {
+        d.h.step();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    d.wait(3.0);
+    d.app().pick_only(m);
+    let area = d.app().canvas_rect;
+    d.app().frame_nodes(area);
+    d.app().pick_none();
+    d.frames(4);
+    let (r, _, _) = rows(&mut d);
+    let stamped = r.iter().filter(|x| x.amber.is_some()).count();
+    println!("before Run: {} rows, {stamped} with a file stamp", r.len());
+    assert_eq!(r.len(), 12);
+    assert!(r.iter().all(|x| x.teal.is_none()), "no audio result before Run");
+    assert!(!d.app().running(), "reading stamps decodes nothing");
+    d.shot("am_1_stamps_before_run");
+
+    d.click("▶ Run");
+    d.wait(1.5);
+    d.shot("am_2_running");
+    assert!(d.wait_until(120.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
+    d.wait(1.0);
+    let (r, _, note) = rows(&mut d);
+    for x in &r {
+        println!("{:28} {:18} amber {:?} teal {:?}", x.name, x.note, x.amber.map(|b| b.0 as i64), x.teal.map(|b| b.0 as i64));
+    }
+    println!("{note}");
+    assert_eq!(r.iter().filter(|x| x.teal.is_some()).count(), 12, "every row has its audio position");
+    assert_eq!(note, "audio placed by best fit");
+    d.shot("am_3_overlay");
+    let report = |app: &App, when: &str| {
+        let c = &app.ev.clocks;
+        let z: Vec<f64> = c.contradictions.iter().map(|x| x.1).collect();
+        let worst = z.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let rates: Vec<i64> = app.nodes.iter().filter(|n| n.kind.is_source()).map(|n| (c.get(&n.uid).rate * 1e6) as i64).collect();
+        println!("{when}: {} contradictions, worst {worst:.1} sigma; rates ppm {rates:?}", z.len());
+    };
+    report(d.app(), "best fit");
+
+    // Wire a stamped recording's time into the node: frame everything, drag dot to dot.
+    let area = d.app().canvas_rect;
+    d.app().frame_nodes(area);
+    d.frames(3);
+    let app = d.app();
+    let s = (0..app.nodes.len()).find(|&i| app.nodes[i].label == "phone 0 1347196530871").expect("the recording");
+    let out_k = app.graph.nodes()[s].spec.outputs.iter().position(|p| p.name == "time").unwrap();
+    let o = app.canvas_origin;
+    let (from, to) = (app.port_place(o, s, out_k, true).0, app.port_place(o, m, 0, false).0);
+    let before: Vec<Option<(f64, f64)>> = r.iter().map(|x| x.teal).collect();
+    d.drag(from, to);
+    d.wait(1.0);
+    assert_eq!(d.app().graph.feeder(m, "time").map(|f| f.0), Some(s), "{}", d.msg());
+    let (r2, _, note2) = rows(&mut d);
+    println!("wired: {note2}");
+    for x in &r2 {
+        println!("{:28} {:18} teal {:?}", x.name, x.note, x.teal.map(|b| b.0 as i64));
+    }
+    assert!(note2.starts_with("time: phone 0"), "{note2}");
+    let app = d.app();
+    report(app, "time wired");
+    assert!(app.ev.clocks.contradictions.is_empty(), "a loose anchor makes no contradictions: {:?}", app.ev.clocks.contradictions.len());
+    let clock = uid(app, s);
+    assert_eq!(app.ev.clocks.get(&clock).kind, Ck::Absolute, "the group has real time");
+    let moved = r2.iter().map(|x| x.teal).zip(&before).filter(|(a, b)| a != *b).count();
+    println!("{moved} of 12 teal bars moved");
+    d.app().pick_only(m);
+    let area = d.app().canvas_rect;
+    d.app().frame_nodes(area);
+    d.app().pick_none();
+    d.frames(4);
+    d.shot("am_4_time_wired");
+
+    // The track: wheel zooms it and not the canvas, a drag pans it, hovering a row explains it.
+    let track = d.app().match_ui.tracks[0];
+    let zoom = d.app().zoom;
+    let at = Pos2::new(track.center().x, track.top() + 80.0);
+    d.scroll(at, 8.0);
+    let v = d.app().match_ui.views.get(&m).copied().expect("zoomed");
+    println!("zoomed to {:.0} s across", v.1 - v.0);
+    assert_eq!(d.app().zoom, zoom, "the wheel over the track is the track's");
+    d.shot("am_5_zoomed");
+    d.drag(at, at + Vec2::new(-120.0, 0.0));
+    let v2 = d.app().match_ui.views.get(&m).copied().unwrap();
+    assert!(v2.0 > v.0, "a drag to the left moves the view later");
+    let y = rows(&mut d).0[3].y;
+    d.h.hover_at(Pos2::new(track.center().x, y));
+    d.frames(10);
+    d.shot("am_6_hover");
+    d.app().stop_run();
 }
 
 /// The timeline on a big project, handled like a user would (a copy of the Jiku project in

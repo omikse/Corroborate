@@ -6,12 +6,31 @@
 //! links go into the clock solve from there like any link output. Files only for now: a stream or
 //! microphone wired in is named in the status and left out. Compiled into the `corroborate`
 //! program.
+//!
+//! On the node, one row per wired recording, level with its input: amber is where the file's own
+//! time stamp puts it (read as soon as it is wired, before any Run), teal where audio puts it once
+//! the match has ended. Audio says only how the recordings lie against each other, so a linked
+//! group is placed by real time when it has some (a time wired in), else by the best fit to its
+//! stamps (`audio_match::fit_stamps`), which also says whether each stamp is the recording's start
+//! or end. Wheel over the track zooms, a drag pans, a double-click fits it again.
 
 use super::*;
-use corroborate::audio_match::{self, Clip};
+use corroborate::audio_match::{self, Clip, Placed, Reading};
 use corroborate::data::{Data, Event};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
 use std::thread;
+
+/// How far one wired recording has got in a run.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stage {
+    /// Waiting for its source: seconds decoded so far.
+    Waiting(f64),
+    Fingerprinting,
+    Ready(usize),
+    Failed(String),
+}
 
 /// One wired recording: its source's label, clock and file, and the source's state with the run
 /// it was on before this run started (its audio is this run's once its run differs and is done).
@@ -25,11 +44,142 @@ pub struct Wired {
 static RUNS: AtomicU64 = AtomicU64::new(1);
 
 impl App {
+    /// The rows of node `i`'s timeline, with whether its axis is real time and what says so.
+    pub(crate) fn match_rows(&self, i: NodeId, ctx: &egui::Context) -> (Vec<Row>, bool, String) {
+        struct Raw {
+            y: f32,
+            name: String,
+            stage: Option<Stage>,
+            file: bool,
+            stamp: Option<FileStamp>,
+            len: f64,
+            info: Option<corroborate::clock::ClockInfo>,
+        }
+        let (done, stages) = {
+            let s = self.nodes[i].state.lock().unwrap();
+            (s.done, s.matching.clone())
+        };
+        let spec = &self.graph.nodes()[i].spec;
+        let mut raw: Vec<Raw> = Vec::new();
+        let mut file_k = 0;
+        for (port, p) in spec.inputs.iter().enumerate().filter(|(_, p)| p.kind == PortKind::Audio) {
+            let Some((f, _)) = self.graph.feeder(i, p.name) else { continue };
+            let path = match &self.nodes[f].kind {
+                Kind::Sourcer { input } => match sourcer_node::input(input) {
+                    Some(runtime::Input::File(path)) => Some(path),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let stage = path.as_ref().and_then(|_| {
+                file_k += 1;
+                stages.get(file_k - 1).cloned()
+            });
+            let stamp = path.as_ref().and_then(|p| self.match_ui.stamps.ask(p, ctx)).flatten();
+            let audio_s = self.nodes[f].state.lock().unwrap().audio_s;
+            let info = self.clock_of(f).map(|c| self.ev.clocks.get(&c));
+            raw.push(Raw {
+                y: self.port_place(self.canvas_origin, i, port, false).0.y,
+                name: self.nodes[f].label.clone(),
+                stage,
+                file: path.is_some(),
+                len: stamp.as_ref().and_then(|s| s.len).filter(|l| *l > 0.0).unwrap_or(audio_s),
+                stamp,
+                info,
+            });
+        }
+        // Linked groups, once the match has ended: two wired recordings or more on one group.
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        if done {
+            for (k, r) in raw.iter().enumerate() {
+                if let Some(info) = &r.info {
+                    groups.entry(info.group.clone()).or_default().push(k);
+                }
+            }
+        }
+        let mut placed: Vec<Option<(f64, Reading, f64, bool)>> = vec![None; raw.len()];
+        for members in groups.values().filter(|m| m.len() >= 2) {
+            let start = |k: usize| raw[k].info.as_ref().map_or(0.0, |c| c.at(0.0));
+            let absolute = raw[members[0]].info.as_ref().is_some_and(|c| c.kind == corroborate::clock::Kind::Absolute);
+            let recs: Vec<Placed> = members.iter().map(|&k| Placed { stamp: raw[k].stamp.as_ref().map(|s| s.t), len: raw[k].len, start: start(k), start_only: raw[k].stamp.as_ref().is_some_and(|s| s.sidecar) }).collect();
+            let fit = audio_match::fit_stamps(&recs, absolute.then_some(0.0));
+            let zero = fit.zero.unwrap_or(0.0);
+            for (j, &k) in members.iter().enumerate() {
+                placed[k] = Some((zero + start(k), fit.readings[j].0, fit.readings[j].1, absolute));
+            }
+        }
+        let any_time = raw.iter().any(|r| r.stamp.is_some()) || placed.iter().flatten().any(|p| p.3);
+        let any_fit = placed.iter().flatten().any(|p| !p.3 && p.1 != Reading::NoStamp);
+        let any_absolute = placed.iter().flatten().any(|p| p.3);
+        let time_note = match self.graph.feeder(i, "time") {
+            Some((f, _)) if self.nodes[f].kind.is_source() => format!("time: {}", self.nodes[f].label),
+            Some(_) => "time: only a recording's own time counts here".to_string(),
+            None if any_absolute => "real time from another source".to_string(),
+            None if any_fit => "audio placed by best fit".to_string(),
+            None => "time: not wired".to_string(),
+        };
+        let rows = raw
+            .iter()
+            .zip(&placed)
+            .map(|(r, p)| {
+                let tick = r.stamp.as_ref().map(|s| s.t);
+                let as_end = p.is_some_and(|p| p.1 == Reading::End);
+                let amber = tick.map(|t| if as_end { (t - r.len, t) } else { (t, t + r.len) });
+                let teal = p.map(|p| (p.0, p.0 + r.len));
+                let (note, warn) = match (p, &r.stage) {
+                    _ if !r.file => ("files only".to_string(), false),
+                    (Some((_, Reading::Start, d, _)), _) => (format!("start {d:+.1} s"), false),
+                    (Some((_, Reading::End, d, _)), _) => (format!("end {d:+.1} s"), false),
+                    (Some((_, Reading::Disagrees, d, _)), _) => (format!("off {}", gap_text(*d)), true),
+                    (Some((_, Reading::NoStamp, ..)), _) => ("no stamp".to_string(), false),
+                    (None, Some(Stage::Failed(_))) => ("failed".to_string(), true),
+                    (None, _) if done => ("not linked".to_string(), false),
+                    (None, Some(Stage::Waiting(s))) if *s > 0.0 => (format!("decoding {s:.0} s"), false),
+                    (None, Some(Stage::Waiting(_))) => ("waiting".to_string(), false),
+                    (None, Some(Stage::Fingerprinting)) => ("fingerprinting".to_string(), false),
+                    (None, Some(Stage::Ready(_))) => ("fingerprinted".to_string(), false),
+                    (None, None) => (if r.stamp.is_some() { String::new() } else { "no stamp".to_string() }, false),
+                };
+                let mut hover = vec![r.name.clone()];
+                match &r.stamp {
+                    Some(s) if s.sidecar => hover.push(format!("started at {} UTC (our recorder's own time)", timebase::fmt_utc(s.t))),
+                    Some(s) => hover.push(format!("file's time stamp: {} UTC", timebase::fmt_utc(s.t))),
+                    None => hover.push("no time stamp in the file".to_string()),
+                }
+                if r.len > 0.0 {
+                    hover.push(format!("length {:.2} s", r.len));
+                }
+                if let Some((at, reading, d, absolute)) = p {
+                    hover.push(match reading {
+                        Reading::Start => format!("the stamp is its start, {d:+.2} s from the group"),
+                        Reading::End => format!("the stamp is its end, {d:+.2} s from the group"),
+                        Reading::Disagrees => format!("the stamp fits neither its start nor its end: {} off", gap_text(*d)),
+                        Reading::NoStamp => "audio only".to_string(),
+                    });
+                    let e = r.info.as_ref().map_or(0.0, |c| c.error_at(0.0));
+                    if *absolute {
+                        hover.push(format!("audio: starts {} UTC ± {}", timebase::fmt_utc(*at), clock_view::err_text(e)));
+                    } else {
+                        hover.push(format!("audio: starts {} (best fit to the stamps); ± {} against the group", timebase::fmt_utc(*at), clock_view::err_text(e)));
+                    }
+                }
+                if let Some(Stage::Ready(h)) = &r.stage {
+                    hover.push(format!("{h} fingerprint hashes"));
+                }
+                if let Some(Stage::Failed(e)) = &r.stage {
+                    hover.push(e.clone());
+                }
+                Row { y: r.y, name: r.name.clone(), note, warn, amber, tick, teal, hover: hover.join("\n") }
+            })
+            .collect();
+        (rows, any_time, time_note)
+    }
+
     /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
     /// source's run before this run started.
     pub(crate) fn audio_match_inputs(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> (Vec<Wired>, Vec<String>) {
         let (mut files, mut other) = (Vec::new(), Vec::new());
-        for p in &self.graph.nodes()[i].spec.inputs {
+        for p in self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.kind == PortKind::Audio) {
             let Some((f, _)) = self.graph.feeder(i, p.name) else { continue };
             let label = self.nodes[f].label.clone();
             match &self.nodes[f].kind {
@@ -55,6 +205,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         let mut s = state.lock().unwrap();
         s.reset();
         s.run_id = run;
+        s.matching = vec![Stage::Waiting(0.0); files.len()];
     }
     let note = if other.is_empty() { String::new() } else { format!(" ({} left out: files only)", other.join(", ")) };
     let set = |f: &dyn Fn(&mut runtime::NodeState)| {
@@ -103,8 +254,15 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             if stop2.load(Ordering::Relaxed) {
                                 break;
                             }
+                            let stage = |to: Stage| {
+                                set(&|s| {
+                                    if let Some(x) = s.matching.get_mut(k) {
+                                        *x = to.clone();
+                                    }
+                                })
+                            };
                             let audio = match &w.source {
-                                Some((st, before)) => from_source(st, *before, &stop2),
+                                Some((st, before)) => from_source(st, *before, &stop2, &|secs| stage(Stage::Waiting(secs))),
                                 None => None,
                             };
                             let audio = match audio {
@@ -112,7 +270,15 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                                 _ if stop2.load(Ordering::Relaxed) => Err("stopped".to_string()),
                                 _ => decode(&w.path, &stop2),
                             };
-                            done.push((k, audio.map(Clip::new)));
+                            if audio.is_ok() {
+                                stage(Stage::Fingerprinting);
+                            }
+                            let clip = audio.map(Clip::new);
+                            stage(match &clip {
+                                Ok(c) => Stage::Ready(c.hashes()),
+                                Err(e) => Stage::Failed(e.clone()),
+                            });
+                            done.push((k, clip));
                             let n = ready.fetch_add(1, Ordering::Relaxed) + 1;
                             set(&|s| s.status = format!("fingerprinted {n} of {} recordings…", files.len()));
                         }
@@ -168,15 +334,19 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
 
 /// The audio source `st` decoded in this run (its run differs from `before` and is done), at the
 /// match's rate. None: stopped, or the source ended with no audio (the file is decoded here then).
-fn from_source(st: &Shared, before: u64, stop: &AtomicBool) -> Option<Vec<f32>> {
+/// `report` is told the seconds decoded so far.
+fn from_source(st: &Shared, before: u64, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Vec<f32>> {
     loop {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
         let audio = {
             let s = st.lock().unwrap();
-            (s.run_id != before && s.done && !s.running).then(|| s.source.audio.clone())
+            let secs = if s.run_id != before { s.audio_s } else { 0.0 };
+            ((s.run_id != before && s.done && !s.running).then(|| s.source.audio.clone()), secs)
         };
+        let (audio, secs) = audio;
+        report(secs);
         if let Some(a) = audio {
             let a = a.lock().unwrap();
             return (!a.is_empty()).then(|| audio_match::halve(&a));
@@ -378,7 +548,257 @@ pub fn json(s: &runtime::NodeState) -> String {
     format!(",\"outputs\":{{{}}}", outs.join(","))
 }
 
-/// How this node looks on the canvas: the standard look.
+// ---------------------------------------------------------------- the timeline in the node
+
+/// A file's time stamp, as read from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileStamp {
+    pub t: f64,
+    pub len: Option<f64>,
+    /// Our own recorder's time of the start, not the file's creation time.
+    pub sidecar: bool,
+}
+
+fn read_stamp(path: &str) -> Option<FileStamp> {
+    if let Some(a) = timebase::sidecar_anchor(path) {
+        return Some(FileStamp { t: a.utc0, len: None, sidecar: true });
+    }
+    let (t, len) = timebase::file_creation_time(path)?;
+    Some(FileStamp { t, len, sidecar: false })
+}
+
+#[derive(Default)]
+struct StampsInner {
+    read: HashMap<String, Option<FileStamp>>,
+    queue: VecDeque<String>,
+    busy: bool,
+}
+
+/// File stamps by path, read one file at a time on a thread of their own, once each.
+#[derive(Clone, Default)]
+pub struct Stamps(Arc<Mutex<StampsInner>>);
+
+impl Stamps {
+    /// What is known of `path`: None while it is being read, then the stamp or that it has none.
+    fn ask(&self, path: &str, ctx: &egui::Context) -> Option<Option<FileStamp>> {
+        let mut s = self.0.lock().unwrap();
+        if let Some(r) = s.read.get(path) {
+            return Some(r.clone());
+        }
+        if !s.queue.iter().any(|p| p == path) {
+            s.queue.push_back(path.to_string());
+        }
+        if !s.busy {
+            s.busy = true;
+            let (me, ctx) = (self.0.clone(), ctx.clone());
+            thread::spawn(move || loop {
+                let Some(p) = me.lock().unwrap().queue.pop_front() else {
+                    me.lock().unwrap().busy = false;
+                    return;
+                };
+                let r = read_stamp(&p);
+                me.lock().unwrap().read.insert(p, r);
+                ctx.request_repaint();
+            });
+        }
+        None
+    }
+}
+
+/// What the timelines keep between frames.
+#[derive(Default)]
+pub struct MatchUi {
+    stamps: Stamps,
+    /// Axes moved by hand, by node (else fitted to the bars).
+    pub views: HashMap<NodeId, (f64, f64)>,
+    /// The tracks on screen: the wheel over one is not the canvas's.
+    pub tracks: Vec<Rect>,
+}
+
+/// One recording's row, as drawn.
+pub struct Row {
+    pub y: f32,
+    pub name: String,
+    /// At the right: the stamp's reading and difference, or how far the recording has got.
+    pub note: String,
+    pub warn: bool,
+    /// Where the file's stamp puts it, the stamp itself, and where audio puts it.
+    pub amber: Option<(f64, f64)>,
+    pub tick: Option<f64>,
+    pub teal: Option<(f64, f64)>,
+    pub hover: String,
+}
+
+const AMBER: Color32 = Color32::from_rgb(235, 165, 55);
+const TEAL: Color32 = Color32::from_rgb(55, 190, 215);
+
+/// `+12 years`, `-3 min`, `+40 s`.
+fn gap_text(s: f64) -> String {
+    let a = s.abs();
+    let sign = if s < 0.0 { "-" } else { "+" };
+    if a < 120.0 {
+        format!("{sign}{a:.0} s")
+    } else if a < 7200.0 {
+        format!("{sign}{:.0} min", a / 60.0)
+    } else if a < 172_800.0 {
+        format!("{sign}{:.0} h", a / 3600.0)
+    } else if a < 63_072_000.0 {
+        format!("{sign}{:.0} days", a / 86_400.0)
+    } else {
+        format!("{sign}{:.0} years", a / 31_557_600.0)
+    }
+}
+
+/// The axis that fits the bars, leaving out any far from the rest (a clock years off).
+fn fit_axis(bars: &[(f64, f64)]) -> (f64, f64) {
+    if bars.is_empty() {
+        return (0.0, 600.0);
+    }
+    let mid = |b: &(f64, f64)| (b.0 + b.1) / 2.0;
+    let mut mids: Vec<f64> = bars.iter().map(mid).collect();
+    mids.sort_by(f64::total_cmp);
+    let m = mids[mids.len() / 2];
+    let mut devs: Vec<f64> = mids.iter().map(|x| (x - m).abs()).collect();
+    devs.sort_by(f64::total_cmp);
+    let far = (devs[devs.len() / 2] * 6.0).max(3600.0);
+    let near = || bars.iter().filter(|b| (mid(b) - m).abs() <= far);
+    let lo = near().map(|b| b.0).fold(f64::MAX, f64::min);
+    let hi = near().map(|b| b.1).fold(f64::MIN, f64::max);
+    let pad = ((hi - lo) * 0.04).max(1.0);
+    (lo - pad, hi + pad)
+}
+
+/// A round step giving about six ticks across `span` seconds.
+fn tick_step(span: f64) -> f64 {
+    let want = span / 6.0;
+    [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 21600.0, 86400.0].into_iter().find(|s| *s >= want).unwrap_or(want)
+}
+
+/// How this node looks on the canvas: its timeline of file stamps and audio sync.
 pub struct Look;
 
-impl crate::look::NodeLook for Look {}
+impl crate::look::NodeLook for Look {
+    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
+        Vec2::new(standard.x.max(860.0), standard.y.max(HEAD + 7.0 * ROW + 26.0))
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let r = crate::look::content(app, ui, i);
+        let (rows, real_time, time_note) = app.match_rows(i, ui.ctx());
+        let z = app.zoom;
+        let (name_w, note_w) = (135.0 * z, 86.0 * z);
+        let track = Rect::from_min_max(Pos2::new(r.left() + name_w, r.top()), Pos2::new(r.right() - note_w, r.bottom()));
+        if track.width() <= 10.0 {
+            return;
+        }
+        let bars: Vec<(f64, f64)> = rows.iter().flat_map(|w| [w.amber, w.teal]).flatten().collect();
+        let (v0, v1) = app.match_ui.views.get(&i).copied().unwrap_or_else(|| fit_axis(&bars));
+        let span = (v1 - v0).max(1e-3);
+        let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
+        let p = ui.painter().with_clip_rect(ui.clip_rect());
+        let font = |s: f32| FontId::proportional(s * z);
+        let row_h = ROW * z;
+        p.rect_filled(track, 2.0 * z, Color32::from_rgb(30, 33, 37));
+        // The ruler: the row of the time input, above the recordings.
+        let ruler = r.top() + 9.0 * z;
+        p.text(Pos2::new(r.left(), ruler), Align2::LEFT_CENTER, shorten(&time_note, 25), font(10.5), if time_note == "time: not wired" { DIM } else { TEXT });
+        let step = tick_step(span);
+        let mut k = (v0 / step).ceil();
+        while k * step <= v1 {
+            let x = tx(k * step);
+            p.line_segment([Pos2::new(x, track.top()), Pos2::new(x, track.bottom())], Stroke::new(1.0, alpha(LINE, 0.55)));
+            let label = if real_time { tick_text(k * step, step) } else { format!("{:+.0} s", k * step) };
+            p.text(Pos2::new(x + 3.0 * z, ruler), Align2::LEFT_CENTER, label, font(10.0), DIM);
+            k += 1.0;
+        }
+        for w in &rows {
+            p.text(Pos2::new(r.left(), w.y), Align2::LEFT_CENTER, shorten(&w.name, 22), font(11.0), TEXT);
+            let band = |b: (f64, f64)| {
+                let (a, c) = (tx(b.0).max(track.left()), tx(b.1).min(track.right()));
+                (c > a).then(|| Rect::from_min_max(Pos2::new(a, w.y - row_h * 0.36), Pos2::new(c.max(a + 2.0), w.y + row_h * 0.36)))
+            };
+            let (mut gone, mut shown) = (None, false);
+            for (bar, col) in [(w.amber, AMBER), (w.teal, TEAL)] {
+                let Some(b) = bar else { continue };
+                match band(b) {
+                    Some(rect) => {
+                        p.rect_filled(rect, 2.0 * z, alpha(col, 0.5));
+                        p.rect_stroke(rect, 2.0 * z, Stroke::new(z, alpha(col, 0.9)), StrokeKind::Inside);
+                        shown = true;
+                    }
+                    None => gone = Some(if b.1 < v0 { b.1 - v0 } else { b.0 - v1 }),
+                }
+            }
+            if let Some(t) = w.tick.filter(|t| *t >= v0 && *t <= v1) {
+                let x = tx(t);
+                p.line_segment([Pos2::new(x, w.y - row_h * 0.46), Pos2::new(x, w.y + row_h * 0.46)], Stroke::new(1.5 * z, AMBER));
+            }
+            if let Some(g) = gone.filter(|_| !shown) {
+                let (at, side, text) = if g < 0.0 { (track.left() + 4.0 * z, Align2::LEFT_CENTER, format!("< {}", gap_text(g))) } else { (track.right() - 4.0 * z, Align2::RIGHT_CENTER, format!("{} >", gap_text(g))) };
+                p.text(Pos2::new(at, w.y), side, text, font(10.0), DIM);
+            }
+            p.text(Pos2::new(track.right() + 6.0 * z, w.y), Align2::LEFT_CENTER, &w.note, font(10.5), if w.warn { WARN } else { DIM });
+        }
+        // The track: wheel zooms around the pointer, a drag pans, a double-click fits it again.
+        app.match_ui.tracks.push(track);
+        let resp = ui.interact(track, egui::Id::new(("match-track", i)), Sense::click_and_drag());
+        if let Some(h) = resp.hover_pos() {
+            let scroll = ui.input(|k| k.smooth_scroll_delta.y + k.smooth_scroll_delta.x);
+            if scroll != 0.0 {
+                let f = (-scroll as f64 * 0.002).exp();
+                let at = v0 + ((h.x - track.left()) / track.width()) as f64 * span;
+                app.match_ui.views.insert(i, (at - (at - v0) * f, at + (v1 - at) * f));
+            }
+        }
+        if resp.dragged() {
+            let dt = (resp.drag_delta().x / track.width()) as f64 * span;
+            let (a, b) = app.match_ui.views.get(&i).copied().unwrap_or((v0, v1));
+            app.match_ui.views.insert(i, (a - dt, b - dt));
+        }
+        if resp.double_clicked() {
+            app.match_ui.views.remove(&i);
+        }
+        let hovered = resp.hover_pos().and_then(|h| rows.iter().find(|w| (w.y - h.y).abs() <= row_h / 2.0));
+        if let Some(w) = hovered {
+            resp.on_hover_text(w.hover.clone());
+        }
+    }
+}
+
+fn shorten(s: &str, n: usize) -> String {
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n - 1).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
+/// A tick's time of day: seconds shown only when the ticks are closer than a minute.
+fn tick_text(t: f64, step: f64) -> String {
+    let c = timebase::fmt_utc_clock(t);
+    if step >= 60.0 && c.len() >= 5 {
+        c[..5].to_string()
+    } else {
+        c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn axis_leaves_out_a_clock_years_off() {
+        let t = 1_347_000_000.0;
+        let (a, b) = fit_axis(&[(t, t + 100.0), (t + 50.0, t + 200.0), (t + 40.0, t + 90.0), (t + 4e8, t + 4e8 + 60.0)]);
+        assert!(a < t && a > t - 60.0 && b > t + 200.0 && b < t + 260.0, "{a} {b}");
+        assert_eq!(fit_axis(&[]), (0.0, 600.0));
+    }
+
+    #[test]
+    fn gaps_read_plainly() {
+        assert_eq!(gap_text(40.2), "+40 s");
+        assert_eq!(gap_text(-180.0), "-3 min");
+        assert_eq!(gap_text(4e8), "+13 years");
+    }
+}

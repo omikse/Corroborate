@@ -4,9 +4,15 @@ category = "Detectors"
 order = 3
 role = "detector"
 
+# A recording's time, wired in: trusting that file's time stamp gives the linked recordings real
+# time (the clock solve carries it along the links).
+[[input]]
+name = "time"
+kind = "time"
+
 # Grows as it is wired: "audio 1", "audio 2", … Every pair of the wired recordings is matched.
-# Files only for now: each is decoded again here at 8 kHz once the graph runs, then all are
-# matched at once.
+# Files only for now: each source's own decoded audio is taken once it ends, then all are matched
+# at once.
 [[input]]
 name = "audio"
 kind = "audio"
