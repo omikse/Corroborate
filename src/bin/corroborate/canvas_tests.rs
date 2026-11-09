@@ -517,6 +517,33 @@ fn clean_up_lays_out_the_nodes_by_their_wires() {
     assert_eq!(back, before, "one Ctrl+Z puts them back");
 }
 
+/// Nodes off screen have run no script, so their size is stale until Clean up asks for it: they
+/// must not overlap once they come into view.
+#[test]
+fn clean_up_knows_the_size_of_nodes_off_screen() {
+    use corroborate::timebase::FileFacts;
+    let mut d = Drive::new();
+    d.app().facts.put("a.mp4", FileFacts { stamp: Some(1000.0), len: Some(100.0), source: "the file's creation_time".into() });
+    let app = d.app();
+    let srcs: Vec<NodeId> = (0..4).map(|k| app.add(Kind::Sourcer { input: "a.mp4".into() }, Pos2::new(40_000.0, 40_000.0 + k as f32 * 200.0))).collect();
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(50.0, 120.0));
+    for (k, &s) in srcs.iter().enumerate() {
+        app.wire(s, "audio", m, &format!("audio {}", k + 1));
+        app.sync_many_ports();
+    }
+    d.frames(3);
+    d.click("Clean up");
+    d.frames(4);
+    let app = d.app();
+    let o = app.canvas_origin;
+    let ids: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| app.on_canvas(i)).collect();
+    for (k, &a) in ids.iter().enumerate() {
+        for &b in &ids[k + 1..] {
+            assert!(!app.node_rect(o, a).intersects(app.node_rect(o, b)), "{a} and {b} overlap");
+        }
+    }
+}
+
 /// Audio match's top bar and thin rows: Scale to all fits once, its circle makes it live; the row
 /// height slider is one size at any canvas zoom; the thinnest row is its name with both ports
 /// still apart.

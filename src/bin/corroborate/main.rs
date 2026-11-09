@@ -28,6 +28,8 @@ mod look_tests;
 #[cfg(test)]
 mod canvas_tests;
 #[cfg(test)]
+mod cleanup_lab;
+#[cfg(test)]
 mod recordings_tests;
 #[cfg(test)]
 mod groups_tests;
@@ -1473,7 +1475,7 @@ impl App {
                     }
                 });
                 if ui.button("Clean up").on_hover_text("lay out the nodes on this level by their wires; Ctrl+Z puts them back").clicked() {
-                    self.clean_up();
+                    self.clean_up(ui.input(|i| i.time));
                 }
             }
             ui.colored_label(DIM, &self.msg);

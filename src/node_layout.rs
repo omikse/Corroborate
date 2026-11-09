@@ -6,17 +6,27 @@
 //! keeping the best seen), then each node slides to where its wires run straightest, without
 //! overlapping its neighbours or changing the order (pool adjacent violators).
 //!
-//! Separate pieces of the graph are stacked; nodes with no wires are parked in rows underneath.
+//! A column far taller than the rest of its piece is dealt out into several side by side, so that
+//! fifty recordings stand next to the rows they feed. Separate pieces of the graph are packed in
+//! rows the shape of a screen; nodes with no wires are parked in rows underneath.
 //! Pure geometry, in canvas units: no state, and the same input gives the same answer.
 
 /// Space between columns.
 const COLUMN_GAP: f32 = 140.0;
 /// Space between nodes in a column.
 const NODE_GAP: f32 = 40.0;
+/// Space between the columns one tall column was dealt into.
+const DEALT_GAP: f32 = 40.0;
 /// Space between separate pieces of the graph.
 const PIECE_GAP: f32 = 120.0;
-/// Parked nodes wrap at this width, or at the widest piece if that is wider.
+/// Parked nodes wrap at this width, or at the width of the pieces if that is wider.
 const PARK_WIDTH: f32 = 1600.0;
+/// The shape aimed for, width over height.
+const SCREEN: f32 = 1.8;
+/// A column no taller than this is always left whole.
+const WRAP_FROM: f32 = 2600.0;
+/// Nor one less than this many times the height the piece needs.
+const WRAP_OVER: f32 = 1.4;
 const ORDER_SWEEPS: usize = 24;
 const PLACE_SWEEPS: usize = 40;
 
@@ -38,23 +48,94 @@ pub struct Link {
     pub to_y: f32,
 }
 
+/// How a layout came out: what the Clean up scenes compare.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Report {
+    pub width: f32,
+    pub height: f32,
+    /// Pairs of nodes overlapping.
+    pub overlaps: usize,
+    /// Pairs of wires crossing, each wire straight from end to end.
+    pub crossings: usize,
+    /// Wires running behind a node that is not one of their ends.
+    pub behind: usize,
+    /// Total wire length.
+    pub wire: f32,
+    /// Wires that run right to left.
+    pub backward: usize,
+}
+
+/// Measures a layout. `at`: each item's top left.
+pub fn measure(items: &[Item], links: &[Link], at: &[(f32, f32)]) -> Report {
+    let mut r = Report::default();
+    let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+    for (n, i) in items.iter().enumerate() {
+        lo = (lo.0.min(at[n].0), lo.1.min(at[n].1));
+        hi = (hi.0.max(at[n].0 + i.w), hi.1.max(at[n].1 + i.h));
+        for m in n + 1..items.len() {
+            if at[n].0 < at[m].0 + items[m].w && at[m].0 < at[n].0 + i.w && at[n].1 < at[m].1 + items[m].h && at[m].1 < at[n].1 + i.h {
+                r.overlaps += 1;
+            }
+        }
+    }
+    (r.width, r.height) = (hi.0 - lo.0, hi.1 - lo.1);
+    let ends: Vec<((f32, f32), (f32, f32))> = links.iter().map(|l| ((at[l.from].0 + items[l.from].w, at[l.from].1 + l.from_y), (at[l.to].0, at[l.to].1 + l.to_y))).collect();
+    for (k, l) in links.iter().enumerate() {
+        let (a, b) = ends[k];
+        r.wire += ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+        r.backward += (b.0 < a.0) as usize;
+        for (n, i) in items.iter().enumerate() {
+            if n == l.from || n == l.to {
+                continue;
+            }
+            r.behind += (0..=24).any(|s| {
+                let t = s as f32 / 24.0;
+                let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                x > at[n].0 && x < at[n].0 + i.w && y > at[n].1 && y < at[n].1 + i.h
+            }) as usize;
+        }
+        for &(c, d) in &ends[k + 1..] {
+            let side = |p: (f32, f32), q: (f32, f32), s: (f32, f32)| (q.0 - p.0) * (s.1 - p.1) - (q.1 - p.1) * (s.0 - p.0);
+            r.crossings += (side(a, b, c) * side(a, b, d) < 0.0 && side(c, d, a) * side(c, d, b) < 0.0) as usize;
+        }
+    }
+    r
+}
+
 /// Where each item goes (top left corners), the whole staying where the items' top left was.
 pub fn place(items: &[Item], links: &[Link]) -> Vec<(f32, f32)> {
     let mut out = vec![(0.0, 0.0); items.len()];
     if items.is_empty() {
         return out;
     }
-    let links: Vec<Link> = links.iter().copied().filter(|l| l.from != l.to && l.from < items.len() && l.to < items.len()).collect();
+    // Whole units: a size off by rounding noise (427.99994) must not tip a tie the other way.
+    let items: &[Item] = &items.iter().map(|i| Item { w: i.w.round(), h: i.h.round(), ..*i }).collect::<Vec<_>>();
+    let links: Vec<Link> = links.iter().filter(|l| l.from != l.to && l.from < items.len() && l.to < items.len()).map(|l| Link { from_y: l.from_y.round(), to_y: l.to_y.round(), ..*l }).collect();
     let (pieces, parked) = pieces(items, &links);
-    let mut top = 0.0f32;
-    let mut widest = 0.0f32;
-    for piece in &pieces {
-        let (w, h) = place_piece(piece, items, &links, top, &mut out);
-        top += h + PIECE_GAP;
-        widest = widest.max(w);
+    let sizes: Vec<(f32, f32)> = pieces.iter().map(|piece| place_piece(piece, items, &links, &mut out)).collect();
+    // The pieces in rows, as wide as makes the whole about the shape of a screen.
+    let area: f32 = sizes.iter().map(|s| (s.0 + PIECE_GAP) * (s.1 + PIECE_GAP)).sum();
+    let widest = sizes.iter().map(|s| s.0).fold(0.0, f32::max);
+    let limit = widest.max((area * SCREEN).sqrt());
+    let (mut x, mut top, mut row) = (0.0f32, 0.0f32, 0.0f32);
+    let mut used = 0.0f32;
+    for (piece, size) in pieces.iter().zip(&sizes) {
+        if x > 0.0 && x + size.0 > limit {
+            top += row + PIECE_GAP;
+            (x, row) = (0.0, 0.0);
+        }
+        for &n in piece {
+            out[n] = (out[n].0 + x, out[n].1 + top);
+        }
+        used = used.max(x + size.0);
+        x += size.0 + PIECE_GAP;
+        row = row.max(size.1);
+    }
+    if row > 0.0 {
+        top += row + PIECE_GAP;
     }
     // Rows of parked nodes.
-    let limit = widest.max(PARK_WIDTH);
+    let limit = used.max(PARK_WIDTH);
     let (mut x, mut row) = (0.0f32, 0.0f32);
     for &n in &parked {
         if x > 0.0 && x + items[n].w > limit {
@@ -146,8 +227,31 @@ fn columns(piece: &[usize], links: &[Link], count: usize) -> Vec<usize> {
     column
 }
 
-/// Lays out one piece with its top at `top`; returns its width and height.
-fn place_piece(piece: &[usize], items: &[Item], links: &[Link], top: f32, out: &mut [(f32, f32)]) -> (f32, f32) {
+/// Deals a column taller than `limit` into several, each node to the shortest so far: the order
+/// down each one stays the column's.
+fn deal(col: &[usize], items: &[Item], limit: f32) -> Vec<Vec<usize>> {
+    let height: f32 = col.iter().map(|&n| items[n].h + NODE_GAP).sum();
+    if height <= (limit * WRAP_OVER).max(WRAP_FROM) {
+        return vec![col.to_vec()];
+    }
+    let k = (height / limit).ceil() as usize;
+    let mut out = vec![Vec::new(); k];
+    let mut used = vec![0.0f32; k];
+    for &n in col {
+        let s = (0..k).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
+        out[s].push(n);
+        used[s] += items[n].h + NODE_GAP;
+    }
+    out
+}
+
+/// Lays out one piece from (0, 0); returns its width and height.
+fn place_piece(piece: &[usize], items: &[Item], links: &[Link], out: &mut [(f32, f32)]) -> (f32, f32) {
+    // By id, not by where they stand: the layout depends on the graph alone, so a second press
+    // changes nothing.
+    let mut piece = piece.to_vec();
+    piece.sort_unstable();
+    let piece = &piece[..];
     let column = columns(piece, links, items.len());
     let last = piece.iter().map(|&n| column[n]).max().unwrap_or(0);
     let mut cols: Vec<Vec<usize>> = vec![Vec::new(); last + 1];
@@ -160,15 +264,11 @@ fn place_piece(piece: &[usize], items: &[Item], links: &[Link], top: f32, out: &
         touching[l.to].push(k);
     }
     let mut y = vec![0.0f32; items.len()];
-    for col in &cols {
-        let mut at = 0.0;
-        for &n in col {
-            y[n] = at;
-            at += items[n].h + NODE_GAP;
-        }
-    }
+    stack(&cols, items, &mut y);
+    relax(&cols, items, links, &touching, &mut y, ORDER_SWEEPS);
 
-    // The order of each column: sweep both ways and keep the fewest crossings.
+    // The order of each column: sweep both ways and keep the fewest crossings. Measured settled,
+    // so that a layout already at its best is not traded for an equal one.
     let mut best = cols.clone();
     let mut fewest = crossings(links, &column, &y);
     for sweep in 0..ORDER_SWEEPS {
@@ -187,34 +287,59 @@ fn place_piece(piece: &[usize], items: &[Item], links: &[Link], top: f32, out: &
         }
     }
 
-    // The heights, in the best order found.
+    // Columns much taller than the piece needs are dealt out, then the heights are found.
+    let area: f32 = piece.iter().map(|&n| (items[n].w + COLUMN_GAP) * (items[n].h + NODE_GAP)).sum();
+    let tallest = piece.iter().map(|&n| items[n].h).fold(0.0, f32::max);
+    let limit = tallest.max((area / SCREEN).sqrt());
+    // (nodes, the gap after them)
+    let mut stacks: Vec<(Vec<usize>, f32)> = Vec::new();
     for col in &best {
+        let dealt = deal(col, items, limit);
+        let last = dealt.len() - 1;
+        stacks.extend(dealt.into_iter().enumerate().map(|(k, c)| (c, if k == last { COLUMN_GAP } else { DEALT_GAP })));
+    }
+    let placed: Vec<Vec<usize>> = stacks.iter().map(|s| s.0.clone()).collect();
+    stack(&placed, items, &mut y);
+    relax(&placed, items, links, &touching, &mut y, PLACE_SWEEPS);
+
+    let up = piece.iter().map(|&n| y[n]).fold(f32::INFINITY, f32::min);
+    let down = piece.iter().map(|&n| y[n] + items[n].h).fold(f32::NEG_INFINITY, f32::max);
+    let (mut x, mut right) = (0.0f32, 0.0f32);
+    for (col, gap) in &stacks {
+        for &n in col {
+            out[n] = (x, y[n] - up);
+        }
+        let w = col.iter().map(|&n| items[n].w).fold(0.0, f32::max);
+        right = x + w;
+        x += w + gap;
+    }
+    (right, down - up)
+}
+
+/// Every column stacked from the top.
+fn stack(cols: &[Vec<usize>], items: &[Item], y: &mut [f32]) {
+    for col in cols {
         let mut at = 0.0;
         for &n in col {
             y[n] = at;
             at += items[n].h + NODE_GAP;
         }
     }
-    for sweep in 0..PLACE_SWEEPS {
-        let k = best.len();
-        for c in 0..k {
-            settle(&best[if sweep % 2 == 0 { c } else { k - 1 - c }], items, links, &touching, &mut y);
-        }
-    }
-
-    let up = piece.iter().map(|&n| y[n]).fold(f32::INFINITY, f32::min);
-    let down = piece.iter().map(|&n| y[n] + items[n].h).fold(f32::NEG_INFINITY, f32::max);
-    let mut x = 0.0f32;
-    for col in &best {
-        for &n in col {
-            out[n] = (x, y[n] - up + top);
-        }
-        x += col.iter().map(|&n| items[n].w).fold(0.0, f32::max) + COLUMN_GAP;
-    }
-    (x - COLUMN_GAP, down - up)
 }
 
-/// Where node `n`'s top would make its wires level, on average, and how many wires say so.
+/// Sweeps the columns one way and the other, each node going where its wires want it.
+fn relax(cols: &[Vec<usize>], items: &[Item], links: &[Link], touching: &[Vec<usize>], y: &mut [f32], sweeps: usize) {
+    for sweep in 0..sweeps {
+        let k = cols.len();
+        for c in 0..k {
+            settle(&cols[if sweep % 2 == 0 { c } else { k - 1 - c }], items, links, touching, y);
+        }
+    }
+}
+
+/// Where node `n`'s top would make its wires level, on average, and how many wires say so. The
+/// mean, not the median: a recording and the Time node it feeds would otherwise agree with each
+/// other and drift away from the row they both lead to.
 fn wanted(n: usize, links: &[Link], touching: &[Vec<usize>], y: &[f32]) -> (f32, f32) {
     let mut sum = 0.0;
     for &k in &touching[n] {
@@ -390,6 +515,60 @@ mod tests {
         assert!(apart(&items, &a), "{a:?}");
         assert_eq!(a, place(&items, &links));
         assert!(place(&[], &[]).is_empty());
+    }
+
+    /// A column far taller than what it feeds is dealt into several, in the order of the rows, and
+    /// each node stands level with its row.
+    #[test]
+    fn a_very_tall_column_is_dealt_beside_what_it_feeds() {
+        let mut items: Vec<Item> = (0..40).map(|k| item(k as f32 * 7.0, 170.0)).collect();
+        items.push(Item { x: 0.0, y: 0.0, w: 980.0, h: 2600.0 });
+        let links: Vec<Link> = (0..40).map(|k| link(k, 40, 60.0, 30.0 + k as f32 * 64.0)).collect();
+        let at = place(&items, &links);
+        assert!(apart(&items, &at), "{at:?}");
+        let mut lefts: Vec<i32> = at[..40].iter().map(|p| p.0 as i32).collect();
+        lefts.sort_unstable();
+        lefts.dedup();
+        assert!(lefts.len() >= 3, "{lefts:?}");
+        let r = measure(&items, &links, &at);
+        assert!(r.height <= 3000.0 && r.backward == 0, "{r:?}");
+        for k in 0..40 {
+            assert!((at[k].1 + 60.0 - (at[40].1 + 30.0 + k as f32 * 64.0)).abs() < 200.0, "node {k} is near its row: {at:?}");
+        }
+    }
+
+    /// An ordinary column is left whole, even when it is a few nodes tall.
+    #[test]
+    fn a_small_column_is_left_whole() {
+        let mut items: Vec<Item> = (0..8).map(|k| item(k as f32, 230.0)).collect();
+        items.push(item(0.0, 400.0));
+        let links: Vec<Link> = (0..8).map(|k| link(k, 8, 60.0, 30.0 + k as f32 * 40.0)).collect();
+        let at = place(&items, &links);
+        assert!(at[..8].iter().all(|p| p.0 == at[0].0), "{at:?}");
+    }
+
+    /// Where the nodes stood does not matter: the same graph comes out the same.
+    #[test]
+    fn the_layout_depends_on_the_graph_alone() {
+        let build = |shift: f32| -> Vec<Item> { (0..7).map(|k| Item { x: 0.0, y: ((k as f32 + 1.0) * 977.0 * shift) % 1500.0, w: 200.0, h: 120.0 }).collect() };
+        let links = [link(0, 3, 30.0, 40.0), link(1, 3, 30.0, 80.0), link(2, 4, 30.0, 40.0), link(3, 5, 60.0, 30.0), link(4, 5, 60.0, 90.0), link(5, 6, 60.0, 60.0)];
+        let (a, b) = (place(&build(1.0), &links), place(&build(3.7), &links));
+        let origin = |p: &[(f32, f32)]| p.iter().fold((f32::MAX, f32::MAX), |m, q| (m.0.min(q.0), m.1.min(q.1)));
+        let (oa, ob) = (origin(&a), origin(&b));
+        for (p, q) in a.iter().zip(&b) {
+            assert!((p.0 - oa.0 - q.0 + ob.0).abs() < 0.01 && (p.1 - oa.1 - q.1 + ob.1).abs() < 0.01, "{a:?}\n{b:?}");
+        }
+    }
+
+    /// Small separate pieces share a row instead of making one long stack.
+    #[test]
+    fn small_pieces_share_a_row() {
+        let items: Vec<Item> = (0..12).map(|k| item(k as f32 * 200.0, 100.0)).collect();
+        let links: Vec<Link> = (0..6).map(|k| link(2 * k, 2 * k + 1, 50.0, 50.0)).collect();
+        let at = place(&items, &links);
+        assert!(apart(&items, &at), "{at:?}");
+        let r = measure(&items, &links, &at);
+        assert!(r.width / r.height > 1.0, "{r:?}");
     }
 
     /// Tidying what is already tidy changes nothing more.

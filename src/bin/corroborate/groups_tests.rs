@@ -39,6 +39,32 @@ fn key(d: &mut Drive, m: Modifiers, k: Key) {
     d.frames(3);
 }
 
+/// Inside a group, Clean up moves only what is inside it, and the Group Input stands before what
+/// it feeds.
+#[test]
+fn clean_up_inside_a_group_stays_inside() {
+    let Scene { mut d, a, b, inv, comb, map } = scene();
+    d.app().pick_only(inv);
+    d.app().sel.picked.insert(comb);
+    d.frames(1);
+    key(&mut d, Modifiers::COMMAND, Key::G);
+    let outside: Vec<Pos2> = [a, b, map].iter().map(|&n| d.app().nodes[n].pos).collect();
+    key(&mut d, Modifiers::NONE, Key::Tab);
+    assert!(d.app().view.is_some(), "inside the group");
+    d.app().nodes[inv].pos = Pos2::new(900.0, 900.0);
+    d.frames(2);
+    d.click("Clean up");
+    d.frames(3);
+    d.shot("groups_clean_up");
+    let app = d.app();
+    assert!(app.nodes[inv].pos.x < app.nodes[comb].pos.x, "{:?} {:?}", app.nodes[inv].pos, app.nodes[comb].pos);
+    for w in app.shown_lines() {
+        assert!(app.nodes[w.from].pos.x < app.nodes[w.to].pos.x, "wires run left to right: {w:?}");
+    }
+    let now: Vec<Pos2> = [a, b, map].iter().map(|&n| d.app().nodes[n].pos).collect();
+    assert_eq!(now, outside, "nothing outside the group moved");
+}
+
 /// The real wires, as (from, out, to, in), sorted.
 fn wires(app: &App) -> Vec<(NodeId, String, NodeId, String)> {
     let g = app.graph.nodes();

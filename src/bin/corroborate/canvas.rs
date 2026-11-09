@@ -430,7 +430,7 @@ impl App {
 
     /// Lays out the nodes on this level by their wires (`node_layout`) and shows them all. One
     /// undo step.
-    pub(crate) fn clean_up(&mut self) {
+    pub(crate) fn clean_up(&mut self, t: f64) {
         use corroborate::node_layout::{place, Item, Link};
         let ids: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect();
         if ids.is_empty() {
@@ -441,6 +441,11 @@ impl App {
         // Sizes and ports in canvas units (no pan, no zoom).
         let (pan, zoom) = (self.pan, self.zoom);
         (self.pan, self.zoom) = (Vec2::ZERO, 1.0);
+        // Scripts run only for the nodes on screen: the rest would give a stale size. Twice,
+        // because a script is told the size its node had.
+        for _ in 0..2 {
+            self.run_scripts(Pos2::ZERO, Rect::EVERYTHING, t);
+        }
         let items: Vec<Item> = ids
             .iter()
             .map(|&i| {
