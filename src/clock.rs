@@ -390,6 +390,32 @@ fn text_or(j: &crate::plugin::Json, k: &str, default: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A real date's size must not cost precision: one loose anchor at today's UTC and many tight
+    /// links give the same clocks as the anchor at 0, moved by that much.
+    #[test]
+    fn a_real_date_does_not_cost_precision() {
+        const DATE: f64 = 1_347_196_681.0;
+        let ids: Vec<String> = (0..12).map(|k| format!("c{k:02}")).collect();
+        let mut links = Vec::new();
+        for a in 0..12 {
+            for b in a + 1..12 {
+                for k in 0..8 {
+                    let t = 10.0 + 20.0 * k as f64;
+                    let wobble = ((a * 7 + b * 13 + k * 3) % 11) as f64 * 5e-4;
+                    links.push(Link { a: ids[a].clone(), t_a: t, b: ids[b].clone(), t_b: t + (a as f64 - b as f64) * 17.0 + wobble, error_s: 0.004, from: "m".into(), enabled: true });
+                }
+            }
+        }
+        let anchor = |utc: f64| vec![Anchor { clock: ids[0].clone(), t: 0.0, utc, error_s: 149.0, from: "s".into(), enabled: true }];
+        let (near, far) = (solve(&anchor(0.0), &links), solve(&anchor(DATE), &links));
+        assert_eq!(far.contradictions.len(), near.contradictions.len(), "the same evidence agrees just as well");
+        for id in &ids {
+            let (n, f) = (near.get(id), far.get(id));
+            assert!((f.at(0.0) - DATE - n.at(0.0)).abs() < 1e-3, "{id}: {} against {}", f.at(0.0) - DATE, n.at(0.0));
+            assert!((f.rate - n.rate).abs() < 1e-9, "{id}: rate {} against {}", f.rate, n.rate);
+        }
+    }
+
     fn link(a: &str, t_a: f64, b: &str, t_b: f64, e: f64) -> Link {
         Link { a: a.into(), t_a, b: b.into(), t_b, error_s: e, from: "test".into(), enabled: true }
     }

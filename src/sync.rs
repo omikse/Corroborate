@@ -231,10 +231,13 @@ pub fn solve_shared(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_p
         }
         elim.push((u, v, ww));
     }
+    // Solved near zero and moved back: a real date is 1.3e9 seconds, and beside link errors of
+    // milliseconds the rounding of numbers that size came out as hours.
+    let base = if absolute { anchors.iter().map(|a| a.offset).sum::<f64>() / anchors.len() as f64 } else { 0.0 };
     if absolute {
         for an in anchors {
             if solvable[an.stream] {
-                add(&terms(an.stream, an.t), an.offset, 1.0 / (an.error_s * an.error_s));
+                add(&terms(an.stream, an.t), an.offset - base, 1.0 / (an.error_s * an.error_s));
             }
         }
     }
@@ -244,9 +247,22 @@ pub fn solve_shared(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_p
         add(&[(ri, 1.0)], 0.0, w_rate);
     }
 
+    let system = a.clone();
     let inv = invert(a);
     let x: Vec<f64> = match &inv {
-        Some(m) => (0..n).map(|i| (0..n).map(|j| m[i][j] * b[j]).sum()).collect(),
+        Some(m) => {
+            let times = |v: &[f64]| -> Vec<f64> { (0..n).map(|i| (0..n).map(|j| m[i][j] * v[j]).sum()).collect() };
+            let mut x = times(&b);
+            // Refined: a loose anchor beside links of milliseconds is close to what doubles hold,
+            // and the rounding of the plain solution showed as contradictions between the links.
+            for _ in 0..4 {
+                let rest: Vec<f64> = (0..n).map(|i| b[i] - (0..n).map(|j| system[i][j] * x[j]).sum::<f64>()).collect();
+                for (xi, d) in x.iter_mut().zip(times(&rest)) {
+                    *xi += d;
+                }
+            }
+            x
+        }
         None => vec![f64::NAN; n],
     };
     let offsets = (0..n_streams)
@@ -254,7 +270,7 @@ pub fn solve_shared(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_p
             Some(m) if solvable[i] => {
                 let get = |k: Option<usize>, l: Option<usize>| k.zip(l).map_or(0.0, |(k, l)| m[k][l]);
                 Offset::Solved(Fit {
-                    offset: o_idx[i].map_or(0.0, |k| x[k]),
+                    offset: o_idx[i].map_or(0.0, |k| x[k] + base),
                     rate: r_idx[i].map_or(0.0, |k| x[k]),
                     center: center[i],
                     var_offset: get(o_idx[i], o_idx[i]).max(0.0),
@@ -266,12 +282,12 @@ pub fn solve_shared(n_streams: usize, obs: &[Obs], anchors: &[AnchorObs], rate_p
         })
         .collect();
     let at = |s: usize, t: f64| -> Option<f64> {
-        (inv.is_some() && solvable[s]).then(|| t + terms(s, t).iter().map(|&(k, c)| c * x[k]).sum::<f64>())
+        (inv.is_some() && solvable[s]).then(|| t + base + terms(s, t).iter().map(|&(k, c)| c * x[k]).sum::<f64>())
     };
     // Event times, back from the eliminated rows.
     let event_t: Vec<Option<f64>> = elim
         .iter()
-        .map(|(u, v, ww)| (*ww > 0.0 && inv.is_some()).then(|| (u.iter().map(|&(i, ui)| ui * x[i]).sum::<f64>() - v) / ww))
+        .map(|(u, v, ww)| (*ww > 0.0 && inv.is_some()).then(|| base + (u.iter().map(|&(i, ui)| ui * x[i]).sum::<f64>() - v) / ww))
         .collect();
     let residuals = obs
         .iter()
