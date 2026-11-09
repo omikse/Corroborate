@@ -28,6 +28,11 @@ pub trait NodeLook: Sync {
     fn status(&self) -> bool {
         true
     }
+
+    /// What changes in how port `name` looks: where it sits follows what the node draws.
+    fn port_look(&self, _app: &App, _i: NodeId, _name: &str) -> Option<corroborate::module_manifest::PortLook> {
+        None
+    }
 }
 
 /// The look of a node kind: its folder's `Look`.
@@ -36,7 +41,8 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Sourcer { .. } => &sourcer_node::Look,
         Kind::Value { .. } => &value_node::Look,
         Kind::Planes => &planes_node::Look,
-        Kind::AudioMatch => &audio_match_node::Look,
+        Kind::AudioMatch { .. } => &audio_match_node::Look,
+        Kind::Time { .. } => &time_node::Look,
         Kind::Enf { .. } => &enf_node::Look,
         Kind::GridFrequencies { .. } => &grid_frequencies_node::Look,
         Kind::Plugin { .. } => &plugin_node::Look,

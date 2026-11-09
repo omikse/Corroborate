@@ -9,7 +9,8 @@
 //! Also here: which required inputs are still missing, a run order (upstream first), and the
 //! evidence trail of a node (everything it depends on, transitively).
 
-use crate::core::NodeSpec;
+use crate::core::{NodeSpec, Port, PortKind};
+use crate::module_manifest::Many;
 
 pub type NodeId = usize;
 
@@ -151,26 +152,112 @@ impl Graph {
         self.wires.retain(|w| w.to != id);
     }
 
+    /// As `set_inputs`, but wires keep their input by name; wires into an input that is gone are
+    /// removed.
+    pub fn set_inputs_keep(&mut self, id: NodeId, inputs: Vec<crate::core::Port>) {
+        let Some(node) = self.nodes.get_mut(id) else { return };
+        if node.spec.inputs == inputs {
+            return;
+        }
+        let old = std::mem::replace(&mut node.spec.inputs, inputs);
+        let new = &node.spec.inputs;
+        self.wires.retain_mut(|w| {
+            if w.to != id {
+                return true;
+            }
+            match new.iter().position(|p| p.name == old[w.to_port].name) {
+                Some(k) => {
+                    w.to_port = k;
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+
     /// Pack node `id`'s `many` input (its last inputs, named `names` in order): its wired ports
     /// first, in order, then one free port, at most `names.len()`. Other inputs stay as they are.
     pub fn pack_many(&mut self, id: NodeId, names: &[&'static str]) {
-        let Some(node) = self.nodes.get_mut(id) else { return };
-        let fixed = node.spec.inputs.iter().position(|p| names.contains(&p.name)).unwrap_or(node.spec.inputs.len());
-        let kind = node.spec.inputs.get(fixed).map_or(crate::core::PortKind::Any, |p| p.kind);
-        let mut mine: Vec<usize> = self.wires.iter().enumerate().filter(|(_, w)| w.to == id && w.to_port >= fixed).map(|(k, _)| k).collect();
-        mine.sort_by_key(|&k| self.wires[k].to_port);
-        mine.truncate(names.len());
-        for (slot, &k) in mine.iter().enumerate() {
-            self.wires[k].to_port = fixed + slot;
+        self.pack_rows(id, &Many { inputs: names.to_vec(), per_row: 1, outputs: Vec::new() });
+    }
+
+    /// Where node `id`'s growing ports start: its first `many` input and its first per-row output.
+    fn many_start(&self, id: NodeId, m: &Many) -> Option<(usize, usize)> {
+        let node = self.nodes.get(id)?;
+        let fixed = node.spec.inputs.iter().position(|p| m.inputs.contains(&p.name)).unwrap_or(node.spec.inputs.len());
+        let fixed_out = node.spec.outputs.iter().position(|p| m.outputs.contains(&p.name)).unwrap_or(node.spec.outputs.len());
+        Some((fixed, fixed_out))
+    }
+
+    /// Node `id`'s first `rows` rows of growing ports, kinds taken from its first row.
+    fn rows_ports(&self, id: NodeId, m: &Many, rows: usize) -> Option<(Vec<Port>, Vec<Port>)> {
+        let (fixed, fixed_out) = self.many_start(id, m)?;
+        let spec = &self.nodes.get(id)?.spec;
+        let w = m.per_row.max(1);
+        let mut inputs = spec.inputs[..fixed].to_vec();
+        inputs.extend(m.inputs[..rows * w].iter().enumerate().map(|(k, s)| Port::opt(s, spec.inputs.get(fixed + k % w).map_or(PortKind::Any, |p| p.kind))));
+        let mut outputs = spec.outputs[..fixed_out].to_vec();
+        let kind = spec.outputs.get(fixed_out).map_or(PortKind::Any, |p| p.kind);
+        outputs.extend(m.outputs[..rows.min(m.outputs.len())].iter().map(|s| Port::req(s, kind)));
+        Some((inputs, outputs))
+    }
+
+    /// Pack node `id`'s rows of growing ports: the rows with a wire, input or output, first, in
+    /// order, their ports moving together, then one free row, at most as many as `m` names.
+    pub fn pack_rows(&mut self, id: NodeId, m: &Many) {
+        let Some((fixed, fixed_out)) = self.many_start(id, m) else { return };
+        let w = m.per_row.max(1);
+        let max_rows = m.inputs.len() / w;
+        let has_out = !m.outputs.is_empty();
+        let mut used: Vec<usize> = self
+            .wires
+            .iter()
+            .filter_map(|x| {
+                if x.to == id && x.to_port >= fixed {
+                    Some((x.to_port - fixed) / w)
+                } else if has_out && x.from == id && x.from_port >= fixed_out {
+                    Some(x.from_port - fixed_out)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        used.truncate(max_rows);
+        self.wires.retain_mut(|x| {
+            if x.to == id && x.to_port >= fixed {
+                let Ok(slot) = used.binary_search(&((x.to_port - fixed) / w)) else { return false };
+                x.to_port = fixed + slot * w + (x.to_port - fixed) % w;
+            }
+            if has_out && x.from == id && x.from_port >= fixed_out {
+                let Ok(slot) = used.binary_search(&(x.from_port - fixed_out)) else { return false };
+                x.from_port = fixed_out + slot;
+            }
+            true
+        });
+        let n = (used.len() + 1).min(max_rows);
+        let Some((inputs, outputs)) = self.rows_ports(id, m, n) else { return };
+        let node = &mut self.nodes[id];
+        node.spec.inputs = inputs;
+        node.spec.outputs = outputs;
+    }
+
+    /// Make sure node `id` has the row its growing port `name` (input, or output when `out`) is
+    /// in, so a wire saved by name can go back. `pack_rows` closes any gap afterwards.
+    pub fn grow_to(&mut self, id: NodeId, m: &Many, name: &str, out: bool) {
+        let w = m.per_row.max(1);
+        let row = if out { m.outputs.iter().position(|s| *s == name) } else { m.inputs.iter().position(|s| *s == name).map(|k| k / w) };
+        let Some(row) = row else { return };
+        let Some((fixed, _)) = self.many_start(id, m) else { return };
+        let have = (self.nodes[id].spec.inputs.len() - fixed) / w;
+        if row < have {
+            return;
         }
-        let n = (mine.len() + 1).min(names.len());
-        let mut inputs: Vec<crate::core::Port> = node.spec.inputs[..fixed].to_vec();
-        inputs.extend(names[..n].iter().map(|s| crate::core::Port::opt(s, kind)));
-        if node.spec.inputs != inputs {
-            node.spec.inputs = inputs;
-        }
-        let keep = node.spec.inputs.len();
-        self.wires.retain(|w| w.to != id || w.to_port < keep);
+        let Some((inputs, outputs)) = self.rows_ports(id, m, row + 1) else { return };
+        let node = &mut self.nodes[id];
+        node.spec.inputs = inputs;
+        node.spec.outputs = outputs;
     }
 
     /// Names of the inputs of `id` that have a wire.
@@ -277,7 +364,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Port, PortKind, Role, SourceKind};
+    use crate::core::{Role, SourceKind};
 
     fn source() -> NodeSpec {
         NodeSpec {
@@ -386,6 +473,44 @@ mod tests {
         g.isolate(f);
         assert!(g.wires().is_empty());
         assert_eq!(g.feeder(p, "time"), None);
+    }
+
+    /// Rows of growing ports stay together when one is emptied: the audio and time of a row, and
+    /// the wire out of its output, all move up.
+    #[test]
+    fn rows_of_ports_move_together() {
+        let m = Many { inputs: vec!["audio 1", "time 1", "audio 2", "time 2", "audio 3", "time 3"], per_row: 2, outputs: vec!["out 1", "out 2", "out 3"] };
+        let mut g = Graph::new();
+        let f = g.add("file", source());
+        let n = g.add("match", NodeSpec { name: "m", role: Role::Detector, inputs: vec![Port::opt("audio 1", PortKind::Audio), Port::opt("time 1", PortKind::Time)], outputs: vec![Port::req("links", PortKind::Event), Port::req("out 1", PortKind::Time)] });
+        let p = g.add("planes", detector());
+        g.pack_rows(n, &m);
+        g.connect(f, "audio", n, "audio 1").unwrap();
+        g.pack_rows(n, &m);
+        assert_eq!(g.nodes()[n].spec.inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["audio 1", "time 1", "audio 2", "time 2"]);
+        assert_eq!(g.nodes()[n].spec.outputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["links", "out 1", "out 2"]);
+        let f2 = g.add("file 2", source());
+        g.connect(f2, "audio", n, "audio 2").unwrap();
+        g.connect(f2, "time", n, "time 2").unwrap();
+        g.pack_rows(n, &m);
+        g.connect(n, "out 2", p, "time").unwrap();
+        g.pack_rows(n, &m);
+        // Row 1 emptied: row 2 and the wire out of it become row 1.
+        assert!(g.disconnect(n, "audio 1"));
+        g.pack_rows(n, &m);
+        assert_eq!(g.feeder(n, "audio 1"), Some((f2, "audio")));
+        assert_eq!(g.feeder(n, "time 1"), Some((f2, "time")));
+        assert_eq!(g.feeder(p, "time"), Some((n, "out 1")));
+        assert_eq!(g.nodes()[n].spec.inputs.len(), 4, "one row wired and a free one");
+        // A row whose only wire goes out stays.
+        assert!(g.disconnect(n, "audio 1") && g.disconnect(n, "time 1"));
+        g.pack_rows(n, &m);
+        assert_eq!(g.feeder(p, "time"), Some((n, "out 1")));
+        // A row saved further on can be wired after growing to it.
+        g.grow_to(n, &m, "time 3", false);
+        g.connect(f, "time", n, "time 3").unwrap();
+        g.pack_rows(n, &m);
+        assert_eq!(g.feeder(n, "time 2"), Some((f, "time")), "the gap closes");
     }
 
     #[test]

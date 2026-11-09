@@ -68,6 +68,10 @@ impl App {
     /// How port `p` of node `i` looks: module.toml, under what its script says now.
     pub(crate) fn port_look(&self, i: NodeId, p: &Port) -> PortLook {
         let base = self.manifest_of(i).map(|m| m.port_look(p.name)).unwrap_or_default();
+        let base = match look::of(&self.nodes[i].kind).port_look(self, i, p.name) {
+            Some(over) => base.with(&over),
+            None => base,
+        };
         match self.script_port(i, p.name) {
             Some(over) => base.with(&over),
             None => base,

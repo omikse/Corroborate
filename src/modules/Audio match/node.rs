@@ -1,26 +1,29 @@
-//! The Audio match node in the workbench. Once the graph runs it takes the audio each wired
-//! source decodes (16 kHz, kept by the SOURCER) as soon as that source is done, brings it to
-//! 8 kHz (the fingerprints' rate, `audio_match::halve`), and fingerprints it, a core per
-//! recording; a source that gave no audio has its file decoded here instead. Then it matches every
-//! pair (`corroborate::audio_match`) on its own thread, and puts the links (with both clocks named) and their quality on its outputs; the
-//! links go into the clock solve from there like any link output. Files only for now: a stream or
-//! microphone wired in is named in the status and left out. Compiled into the `corroborate`
-//! program.
+//! The Audio match node in the workbench: the time module. Each row takes one recording's audio and
+//! the time its metadata claims, and gives a better time on its yellow output.
 //!
-//! On the node, one row per wired recording, level with its input: amber is where the file's own
-//! time stamp puts it (read as soon as it is wired, before any Run), teal where audio puts it once
-//! the match has ended. Audio says only how the recordings lie against each other, so a linked
-//! group is placed by real time when it has some (a time wired in), else by the best fit to its
-//! stamps (`audio_match::fit_stamps`). Whether a stamp marks a recording's start or its end is the
-//! person's decision, made from this view: a click on a row's note changes it, the buttons change
-//! them all, and the line beside the buttons says how far the stamps disagree under each reading.
-//! A wired time follows the decision. Wheel over the track zooms, a drag pans, a double-click fits
-//! it again.
+//! Once the graph runs it takes the audio each wired source decodes (16 kHz, kept by the SOURCER) as
+//! soon as that source is done, brings it to 8 kHz (the fingerprints' rate, `audio_match::halve`), and
+//! fingerprints it, a core per recording; a source that gave no audio has its file decoded here
+//! instead. Then it matches every pair (`corroborate::audio_match`) on its own thread, and puts the
+//! links (with both clocks named) and their quality on its outputs; the links go into the clock solve
+//! from there like any link output. Files only for now: a stream or microphone wired in is named in
+//! the status and left out. Compiled into the `corroborate` program.
+//!
+//! On the node, one row per recording: blue is where its time input puts it, amber where audio puts
+//! it. Recordings linked by audio are a synced group, which exists only here. Audio says only how a
+//! group's recordings lie against each other, so until the group has an anchor its amber bars are
+//! merely shown with the middle of the bars on the middle of its blue ones, and the person may drag
+//! them; nothing comes out. A person picks one row's time as the group's anchor: the audio's start
+//! snaps to it, every other row keeps its real offset, and the group's times leave on the yellow
+//! outputs through the clock solve. Nothing is ever hidden or left out for being far off: a time 200
+//! years away stays in view until a person corrects it in a Time node.
 
 use super::*;
-use corroborate::audio_match::{self, Clip, Placed, STAMP_CAP_S};
+use corroborate::audio_match::{self, Clip, Placed};
 use corroborate::data::{Data, Event};
-use std::collections::BTreeMap;
+use corroborate::module_manifest::{PortLabel, PortLook, Side};
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::thread;
 
@@ -45,150 +48,363 @@ pub struct Wired {
 
 static RUNS: AtomicU64 = AtomicU64::new(1);
 
+/// One recording's row. Times are seconds since 1970 when `MatchView::real`.
+#[derive(Clone, Debug, Default)]
+pub struct Row {
+    /// Its number: the row of ports `audio n` and `time n`.
+    pub n: usize,
+    pub name: String,
+    /// The source's stable id and clock, when audio is wired in.
+    pub uid: Option<String>,
+    pub clock: Option<String>,
+    pub file: bool,
+    /// A wire goes into its audio or time port (else: the free row at the end).
+    pub wired: bool,
+    /// The media's length, seconds.
+    pub len: f64,
+    /// What its time input says: the moment, its error and where it comes from.
+    pub meta: Option<f64>,
+    pub meta_err: f64,
+    pub meta_source: String,
+    /// The time input is wired to a Time node that has an error, and the error.
+    pub time_err: Option<String>,
+    pub time_wired: bool,
+    /// Where audio puts its start (shown after a match), and how far from there the time input is.
+    pub start: Option<f64>,
+    pub off: Option<f64>,
+    /// In `MatchView::groups`.
+    pub group: usize,
+    pub stage: Option<Stage>,
+    /// The offset is about the recording's own length.
+    pub hint: bool,
+    /// It was in an anchored group before this run and is not any more.
+    pub lost: bool,
+}
+
+/// Recordings audio links together, or one alone.
+#[derive(Clone, Debug, Default)]
+pub struct Group {
+    /// What names it while it lives: the smallest clock id in it.
+    pub key: String,
+    /// Shown on its border; 0: one recording alone, which has no border.
+    pub number: usize,
+    pub rows: Vec<usize>,
+    /// The row holding its anchor.
+    pub anchor: Option<usize>,
+}
+
+/// What a node's rows are this frame.
+#[derive(Debug, Default)]
+pub struct MatchView {
+    pub rows: Vec<Row>,
+    pub groups: Vec<Group>,
+    pub done: bool,
+    pub running: bool,
+    /// Its axis is real time: some row has a time.
+    pub real: bool,
+    /// The stamps of the group the hint is about agree better read as ends: how far they disagree
+    /// as starts and as ends, by group.
+    pub spreads: Vec<Option<(f64, f64)>>,
+}
+
+impl MatchView {
+    pub fn anchored(&self, r: &Row) -> bool {
+        self.groups.get(r.group).is_some_and(|g| g.anchor.is_some())
+    }
+}
+
+/// How close to the recording's own length an offset must be to hint at it, seconds (5 s for now).
+const HINT_S: f64 = 5.0;
+
+/// A node's saved rows: which row holds an anchor is kept by the recording's id.
+fn anchor_key(uid: &str) -> String {
+    format!("anchor {uid}")
+}
+
+/// The middle of a recording.
+fn mid(t: f64, len: f64) -> f64 {
+    t + len / 2.0
+}
+
+fn mean(v: &[f64]) -> Option<f64> {
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+}
+
+/// Its file's name, when the node still has the module's name.
+fn row_name(label: &str, path: Option<&str>) -> String {
+    match path {
+        Some(p) if label == "SOURCER" => p.rsplit(['\\', '/']).next().unwrap_or(p).to_string(),
+        _ => label.to_string(),
+    }
+}
+
 impl App {
-    /// The rows of node `i`'s timeline, with whether its axis is real time and what says so.
-    pub(crate) fn match_rows(&self, i: NodeId, ctx: &egui::Context) -> (Vec<Row>, bool, String, Option<(f64, f64)>) {
-        struct Raw {
-            y: f32,
-            name: String,
-            stage: Option<Stage>,
-            file: bool,
-            stamp: Option<FileStamp>,
-            len: f64,
-            info: Option<corroborate::clock::ClockInfo>,
-            uid: String,
+    /// What node `i`'s rows are now. Worked out once a frame (the outputs, the node and the clock
+    /// evidence all ask).
+    pub(crate) fn match_view(&self, i: NodeId) -> Rc<MatchView> {
+        #[cfg(not(test))]
+        if let Some(v) = self.match_ui.cache.borrow().get(&i) {
+            return v.clone();
         }
-        let (done, stages) = {
+        let v = Rc::new(self.match_view_now(i));
+        #[cfg(not(test))]
+        self.match_ui.cache.borrow_mut().insert(i, v.clone());
+        v
+    }
+
+    fn match_view_now(&self, i: NodeId) -> MatchView {
+        let (done, running, stages) = {
             let s = self.nodes[i].state.lock().unwrap();
-            (s.done, s.matching.clone())
+            (s.done, s.running, s.matching.clone())
         };
+        let saved: BTreeSet<&str> = self.nodes[i].kind.rows().iter().filter_map(|(k, _)| k.strip_prefix("anchor ")).collect();
         let spec = &self.graph.nodes()[i].spec;
-        let mut raw: Vec<Raw> = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
         let mut file_k = 0;
-        for (port, p) in spec.inputs.iter().enumerate().filter(|(_, p)| p.kind == PortKind::Audio) {
-            let Some((f, _)) = self.graph.feeder(i, p.name) else { continue };
-            let path = match &self.nodes[f].kind {
-                Kind::Sourcer { input } => match sourcer_node::input(input) {
-                    Some(runtime::Input::File(path)) => Some(path),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let stage = path.as_ref().and_then(|_| {
-                file_k += 1;
-                stages.get(file_k - 1).cloned()
-            });
-            let _ = ctx;
-            let stamp = self.facts_of(f).and_then(|x| x.stamp.map(|t| FileStamp { t, len: x.len, sidecar: x.source.starts_with("recording sidecar") }));
-            let audio_s = self.nodes[f].state.lock().unwrap().audio_s;
-            let info = self.clock_of(f).map(|c| self.ev.clocks.get(&c));
-            raw.push(Raw {
-                y: self.port_place(self.canvas_origin, i, port, false).0.y,
-                name: self.nodes[f].label.clone(),
-                stage,
-                file: path.is_some(),
-                len: stamp.as_ref().and_then(|s| s.len).filter(|l| *l > 0.0).unwrap_or(audio_s),
-                stamp,
-                info,
-                uid: self.nodes[f].uid.clone(),
-            });
+        for (k, pair) in spec.inputs.chunks(2).enumerate() {
+            let mut r = Row { n: k + 1, ..Default::default() };
+            let [audio, time] = pair else { continue };
+            if let Some((f, _)) = self.graph.feeder(i, audio.name) {
+                let path = self.source_file(f);
+                r.name = row_name(&self.nodes[f].label, path.as_deref());
+                r.uid = Some(self.nodes[f].uid.clone());
+                r.clock = self.clock_of(f);
+                r.file = path.is_some();
+                r.len = self.source_length(f).unwrap_or_else(|| self.nodes[f].state.lock().unwrap().audio_s);
+                if r.file {
+                    r.stage = stages.get(file_k).cloned();
+                    file_k += 1;
+                }
+                r.wired = true;
+            }
+            if let Some((f, o)) = self.graph.feeder(i, time.name) {
+                r.time_wired = true;
+                r.wired = true;
+                match self.value_from(f, o) {
+                    Ok(Data::Time { utc: Some(u), error_s, source, .. }) => (r.meta, r.meta_err, r.meta_source) = (Some(u), error_s, source),
+                    Ok(_) => {}
+                    Err(e) if matches!(self.nodes[f].kind, Kind::Time { .. }) => r.time_err = Some(e),
+                    Err(_) => {}
+                }
+            }
+            rows.push(r);
         }
-        // Linked groups, once the match has ended: two wired recordings or more on one group.
-        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        // Synced groups: rows on one clock, and rows this node's links join.
+        let mut parent: Vec<usize> = (0..rows.len()).collect();
+        fn root(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            x
+        }
+        let by_clock: BTreeMap<String, usize> = rows.iter().enumerate().rev().filter_map(|(k, r)| Some((r.clock.clone()?, k))).collect();
+        for (k, r) in rows.iter().enumerate() {
+            if let Some(&o) = r.clock.as_ref().and_then(|c| by_clock.get(c)) {
+                let (a, b) = (root(&mut parent, k), root(&mut parent, o));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
         if done {
-            for (k, r) in raw.iter().enumerate() {
-                if let Some(info) = &r.info {
-                    groups.entry(info.group.clone()).or_default().push(k);
+            let uid = &self.nodes[i].uid;
+            for l in self.ev.links.iter().filter(|l| l.enabled && l.from == *uid) {
+                if let (Some(&a), Some(&b)) = (by_clock.get(l.a.as_str()), by_clock.get(l.b.as_str())) {
+                    let (a, b) = (root(&mut parent, a), root(&mut parent, b));
+                    parent[a.max(b)] = a.min(b);
                 }
             }
         }
-        let as_end = |_: &Raw| false;
-        // Per row, once placed: where audio puts it, its stamp's difference, whether real time.
-        let mut placed: Vec<Option<(f64, Option<f64>, bool)>> = vec![None; raw.len()];
-        let mut spreads: Option<(usize, f64, f64)> = None;
-        for members in groups.values().filter(|m| m.len() >= 2) {
-            let start = |k: usize| raw[k].info.as_ref().map_or(0.0, |c| c.at(0.0));
-            let absolute = raw[members[0]].info.as_ref().is_some_and(|c| c.kind == corroborate::clock::Kind::Absolute);
-            let recs: Vec<Placed> = members.iter().map(|&k| Placed { stamp: raw[k].stamp.as_ref().map(|s| s.t), len: raw[k].len, start: start(k), as_end: as_end(&raw[k]) }).collect();
-            let fit = audio_match::fit_stamps(&recs, absolute.then_some(0.0));
-            let zero = fit.zero.unwrap_or(0.0);
-            for (j, &k) in members.iter().enumerate() {
-                placed[k] = Some((zero + start(k), fit.diffs[j], absolute));
-            }
-            // The group with most stamps is the one the two readings are compared on.
-            if let (Some(s), Some(e)) = (audio_match::stamp_spread(&recs, false), audio_match::stamp_spread(&recs, true)) {
-                let n = recs.iter().filter(|r| r.stamp.is_some()).count();
-                if spreads.is_none_or(|b| n > b.0) {
-                    spreads = Some((n, s, e));
-                }
-            }
+        let mut groups: Vec<Group> = Vec::new();
+        let mut at_root: BTreeMap<usize, usize> = BTreeMap::new();
+        for k in 0..rows.len() {
+            let g = *at_root.entry(root(&mut parent, k)).or_insert_with(|| {
+                groups.push(Group::default());
+                groups.len() - 1
+            });
+            groups[g].rows.push(k);
+            rows[k].group = g;
         }
-        let any_time = raw.iter().any(|r| r.stamp.is_some()) || placed.iter().flatten().any(|p| p.2);
-        let any_fit = placed.iter().flatten().any(|p| !p.2 && p.1.is_some());
-        let any_absolute = placed.iter().flatten().any(|p| p.2);
-        let time_note = match self.graph.feeder(i, "time") {
-            Some((f, _)) if self.nodes[f].kind.is_source() => format!("time: {}", self.nodes[f].label),
-            Some(_) => "time: only a recording's own time counts here".to_string(),
-            None if any_absolute => "real time from another source".to_string(),
-            None if any_fit => "audio placed by best fit".to_string(),
-            None => "time: not wired".to_string(),
-        };
-        let rows = raw
-            .iter()
-            .zip(&placed)
-            .map(|(r, p)| {
-                let tick = r.stamp.as_ref().map(|s| s.t);
-                let end = as_end(r);
-                let word = if end { "end" } else { "start" };
-                let amber = tick.map(|t| if end { (t - r.len, t) } else { (t, t + r.len) });
-                let teal = p.map(|p| (p.0, p.0 + r.len));
-                let (note, warn) = match (p, &r.stage) {
-                    _ if !r.file => ("files only".to_string(), false),
-                    (Some((_, Some(d), _)), _) if d.abs() < 3600.0 => (format!("{word} {d:+.1} s"), d.abs() > STAMP_CAP_S),
-                    (Some((_, Some(d), _)), _) => (format!("{word} {}", gap_text(*d)), true),
-                    (Some((_, None, _)), _) => ("no stamp".to_string(), false),
-                    (None, Some(Stage::Failed(_))) => ("failed".to_string(), true),
-                    (None, _) if done => ("not linked".to_string(), false),
-                    (None, Some(Stage::Waiting(s))) if *s > 0.0 => (format!("decoding {s:.0} s"), false),
-                    (None, Some(Stage::Waiting(_))) => ("waiting".to_string(), false),
-                    (None, Some(Stage::Fingerprinting)) => ("fingerprinting".to_string(), false),
-                    (None, Some(Stage::Ready(_))) => ("fingerprinted".to_string(), false),
-                    (None, None) => (if r.stamp.is_some() { word.to_string() } else { "no stamp".to_string() }, false),
+        let mut number = 0;
+        for g in &mut groups {
+            g.key = g.rows.iter().filter_map(|&k| rows[k].clock.clone()).min().unwrap_or_default();
+            if g.rows.iter().filter(|&&k| rows[k].wired).count() >= 2 && done {
+                number += 1;
+                g.number = number;
+            }
+            g.anchor = g.rows.iter().copied().find(|&k| rows[k].meta.is_some() && rows[k].uid.as_deref().is_some_and(|u| saved.contains(u)));
+        }
+        let shift_of = |g: &Group| self.match_ui.shift.get(&(i, g.key.clone())).copied().unwrap_or(0.0);
+        let real = rows.iter().any(|r| r.meta.is_some());
+        // The middle of every time there is: where a group with no time at all is shown.
+        let all_mids: Vec<f64> = rows.iter().filter_map(|r| r.meta.map(|t| mid(t, r.len))).collect();
+        let mut spreads = vec![None; groups.len()];
+        if done {
+            for (gi, g) in groups.iter().enumerate() {
+                let starts: Vec<f64> = rows.iter().map(|r| r.clock.as_deref().map_or(0.0, |c| self.ev.clocks.get(c).at(0.0))).collect();
+                let start = |k: usize| starts[k];
+                let audio_rows: Vec<usize> = g.rows.iter().copied().filter(|&k| rows[k].clock.is_some()).collect();
+                let timed: Vec<usize> = audio_rows.iter().copied().filter(|&k| rows[k].meta.is_some()).collect();
+                let linked = audio_rows.len() >= 2;
+                if !linked && timed.is_empty() {
+                    continue; // alone, with no time: nowhere to show it
+                }
+                let shift = match g.anchor {
+                    Some(a) if rows[a].clock.as_deref().is_some_and(|c| self.ev.clocks.get(c).kind == corroborate::clock::Kind::Absolute) => 0.0,
+                    Some(a) => rows[a].meta.unwrap_or(0.0) - start(a),
+                    None => {
+                        let metas: Vec<f64> = timed.iter().map(|&k| mid(rows[k].meta.unwrap_or(0.0), rows[k].len)).collect();
+                        let over: &[usize] = if timed.is_empty() { &audio_rows } else { &timed };
+                        let audios: Vec<f64> = over.iter().map(|&k| mid(start(k), rows[k].len)).collect();
+                        let centre = mean(&metas).or(mean(&all_mids)).unwrap_or(0.0);
+                        centre - mean(&audios).unwrap_or(0.0) + shift_of(g)
+                    }
                 };
-                let mut hover = vec![r.name.clone()];
-                match &r.stamp {
-                    Some(s) if s.sidecar => hover.push(format!("started at {} UTC (our recorder's own time)", timebase::fmt_utc(s.t))),
-                    Some(s) => hover.push(format!("file's time stamp: {} UTC", timebase::fmt_utc(s.t))),
-                    None => hover.push("no time stamp in the file".to_string()),
+                for &k in &audio_rows {
+                    let at = start(k) + shift;
+                    rows[k].start = Some(at);
+                    rows[k].off = rows[k].meta.map(|t| t - at);
                 }
-                if r.len > 0.0 {
-                    hover.push(format!("length {:.2} s", r.len));
+                if linked && g.anchor.is_none() {
+                    let recs: Vec<Placed> = audio_rows.iter().map(|&k| Placed { stamp: rows[k].meta, len: rows[k].len, start: start(k) }).collect();
+                    spreads[gi] = audio_match::stamp_spread(&recs, false).zip(audio_match::stamp_spread(&recs, true));
                 }
-                if let Some((at, d, absolute)) = p {
-                    if let Some(d) = d {
-                        let other = if end { d + r.len } else { d - r.len };
-                        let (first, second) = if end { (other, *d) } else { (*d, other) };
-                        hover.push(format!("from the group: {first:+.2} s if the stamp is its start, {second:+.2} s if its end"));
-                        hover.push(format!("read as its {word} (click the note on the right to change it)"));
-                    }
-                    let e = r.info.as_ref().map_or(0.0, |c| c.error_at(0.0));
-                    if *absolute {
-                        hover.push(format!("audio: starts {} UTC ± {}", timebase::fmt_utc(*at), clock_view::err_text(e)));
-                    } else {
-                        hover.push(format!("audio: starts {} (best fit to the stamps); ± {} against the group", timebase::fmt_utc(*at), clock_view::err_text(e)));
-                    }
+                // How far off is about its own length: compared directly once anchored; before an
+                // anchor the average has absorbed it, so the stamps' agreement decides.
+                let as_ends = spreads[gi].is_some_and(|(s, e): (f64, f64)| s - e > 1.0 && e * 2.0 < s);
+                for &k in &audio_rows {
+                    rows[k].hint = rows[k].meta.is_some() && if g.anchor.is_some() { rows[k].off.is_some_and(|d| (d.abs() - rows[k].len).abs() <= HINT_S) } else { as_ends };
                 }
-                if let Some(Stage::Ready(h)) = &r.stage {
-                    hover.push(format!("{h} fingerprint hashes"));
+            }
+            if let Some(lost) = self.match_ui.lost.get(&i) {
+                for r in rows.iter_mut() {
+                    r.lost = r.uid.as_ref().is_some_and(|u| lost.contains(u));
                 }
-                if let Some(Stage::Failed(e)) = &r.stage {
-                    hover.push(e.clone());
-                }
-                let uid = r.stamp.as_ref().filter(|s| !s.sidecar).map(|_| r.uid.clone());
-                Row { y: r.y, name: r.name.clone(), note, warn, amber, tick, teal, hover: hover.join("\n"), uid, as_end: end }
+            }
+        }
+        MatchView { rows, groups, done, running, real, spreads }
+    }
+
+    /// The anchors node `i`'s groups have: the audio's start is at that row's time.
+    pub(crate) fn match_anchors(&self, i: NodeId) -> Vec<corroborate::clock::Anchor> {
+        let v = self.match_view(i);
+        let uid = self.nodes[i].uid.clone();
+        v.groups
+            .iter()
+            .filter_map(|g| {
+                let r = &v.rows[g.anchor?];
+                Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.meta?, error_s: r.meta_err, from: uid.clone(), enabled: true })
             })
-            .collect();
-        (rows, any_time, time_note, spreads.map(|s| (s.1, s.2)))
+            .collect()
+    }
+
+    /// The better time on output `out` ("synced 3"): none until its group has an anchor.
+    pub(crate) fn synced_time(&self, i: NodeId, out: &str) -> Result<Data, String> {
+        let n: usize = out.strip_prefix("synced ").and_then(|n| n.parse().ok()).ok_or("no such output")?;
+        let v = self.match_view(i);
+        let r = v.rows.get(n - 1).ok_or("no such row")?;
+        let clock = r.clock.clone().ok_or("no audio wired into this row")?;
+        let g = &v.groups[r.group];
+        let a = g.anchor.ok_or("its synced group has no anchor")?;
+        let (utc, error_s) = self.ev.clocks.to_utc(&clock, 0.0).ok_or("its synced group has no anchor")?;
+        Ok(Data::Time { clock, t: 0.0, utc: Some(utc), error_s, source: format!("Audio match, anchored on the time of {}", v.rows[a].name) })
+    }
+
+    /// Row `row` becomes its group's anchor, or stops being it. Kept by the recording, so it stays
+    /// with the recording after a new run. Logged like any setting.
+    pub(crate) fn toggle_anchor(&mut self, i: NodeId, row: usize) {
+        let v = self.match_view(i);
+        let Some(r) = v.rows.get(row) else { return };
+        let Some(uid) = r.uid.clone().filter(|_| r.meta.is_some()) else { return };
+        let g = &v.groups[r.group];
+        let was = g.anchor;
+        let members: Vec<String> = g.rows.iter().filter_map(|&k| v.rows[k].uid.clone()).collect();
+        let name = r.name.clone();
+        let old = was.map_or("none".to_string(), |a| v.rows[a].name.clone());
+        let on = was != Some(row);
+        let Kind::AudioMatch { rows } = &mut self.nodes[i].kind else { return };
+        rows.retain(|(k, _)| !k.strip_prefix("anchor ").is_some_and(|u| members.iter().any(|m| m == u)));
+        if on {
+            rows.push((anchor_key(&uid), "on".to_string()));
+            self.match_ui.members.insert((i, uid.clone()), members.iter().cloned().collect());
+        }
+        if let Some(l) = self.match_ui.lost.get_mut(&i) {
+            l.retain(|u| !members.contains(u));
+        }
+        let label = self.nodes[i].label.clone();
+        self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name: format!("anchor of the group with {name}"), old, new: if on { name.clone() } else { "none".to_string() } });
+        self.match_ui.cache.borrow_mut().remove(&i);
+        self.save_project();
+    }
+
+    /// A new result: what left an anchored group since the last one has lost its anchor.
+    fn note_lost_anchors(&mut self, i: NodeId, v: &MatchView) {
+        let run = self.nodes[i].state.lock().unwrap().run_id;
+        if !v.done || self.match_ui.seen_run.get(&i) == Some(&run) {
+            return;
+        }
+        self.match_ui.seen_run.insert(i, run);
+        let mut lost: BTreeSet<String> = BTreeSet::new();
+        for g in v.groups.iter().filter(|g| g.anchor.is_some()) {
+            let holder = v.rows[g.anchor.unwrap_or(0)].uid.clone().unwrap_or_default();
+            let now: BTreeSet<String> = g.rows.iter().filter_map(|&k| v.rows[k].uid.clone()).collect();
+            if let Some(before) = self.match_ui.members.get(&(i, holder.clone())) {
+                lost.extend(before.difference(&now).cloned());
+            }
+            self.match_ui.members.insert((i, holder), now);
+        }
+        self.match_ui.lost.insert(i, lost);
+        self.match_ui.cache.borrow_mut().remove(&i);
+    }
+
+    /// Dropping a SOURCER's audio on a row also draws its time wire, when that row has none.
+    pub(crate) fn also_wire_time(&mut self, from: NodeId, fk: usize, to: NodeId, tk: usize) {
+        if !matches!(self.nodes[to].kind, Kind::AudioMatch { .. }) || !matches!(self.nodes[from].kind, Kind::Sourcer { .. }) {
+            return;
+        }
+        let (out, inp) = (self.graph.nodes()[from].spec.outputs[fk].name, self.graph.nodes()[to].spec.inputs[tk].name);
+        let Some(n) = inp.strip_prefix("audio ") else { return };
+        let time = format!("time {n}");
+        if out == "audio" && self.graph.feeder(to, &time).is_none() {
+            self.wire(from, "time", to, &time);
+        }
+    }
+
+    /// A project saved before rows had a time each: every recording's time is wired to its row
+    /// (through a Time node taking its length away when the person read its stamp as the end), and
+    /// the recording whose time was wired into the old time input holds the anchor.
+    pub(crate) fn migrate_match(&mut self, i: NodeId, old_time: &[NodeId]) {
+        let inputs = self.graph.nodes()[i].spec.inputs.clone();
+        let origin = self.nodes[i].pos;
+        let mut made = 0.0;
+        for pair in inputs.chunks(2) {
+            let [audio, time] = pair else { continue };
+            let Some((f, _)) = self.graph.feeder(i, audio.name) else { continue };
+            if !matches!(self.nodes[f].kind, Kind::Sourcer { .. }) {
+                continue;
+            }
+            let uid = self.nodes[f].uid.clone();
+            if self.ev.stamp_end.contains(&uid) {
+                let mut rows = corroborate::modules::time::defaults();
+                corroborate::modules::time::add_row(&mut rows);
+                made += 1.0;
+                let view = self.view;
+                self.view = self.nodes[i].parent;
+                let t = self.add(Kind::Time { rows }, origin - Vec2::new(0.0, made * 200.0));
+                self.view = view;
+                self.nodes[t].label = format!("Time: end of {}", self.nodes[f].label);
+                let inputs = self.nodes[t].kind.spec().inputs;
+                self.graph.set_inputs_keep(t, inputs);
+                self.wire(f, "time", t, "time");
+                self.wire(f, "length", t, "row 1");
+                self.wire(t, "result", i, time.name);
+            } else {
+                self.wire(f, "time", i, time.name);
+            }
+        }
+        let anchors: Vec<String> = old_time.iter().map(|&s| anchor_key(&self.nodes[s].uid)).collect();
+        if let Kind::AudioMatch { rows } = &mut self.nodes[i].kind {
+            rows.extend(anchors.into_iter().map(|k| (k, "on".to_string())));
+        }
     }
 
     /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
@@ -558,210 +774,269 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
     Results { links: format!("[{}]", links.join(",")), quality, drift: format!("[{}]", drifts.join(",")), same, speed, gaps, status }
 }
 
-/// The node's part of the result file: what it gave on each output.
-pub fn json(s: &runtime::NodeState) -> String {
-    let outs: Vec<String> = s.outbox.iter().map(|(n, d)| format!("\"{}\":{}", json_escape(n), d.to_json())).collect();
-    format!(",\"outputs\":{{{}}}", outs.join(","))
+/// The node's part of the result file: what it gave on each output, and each row's better time.
+pub fn json(app: &App, i: NodeId) -> String {
+    let outs: Vec<String> = app.nodes[i].state.lock().unwrap().outbox.iter().map(|(n, d)| format!("\"{}\":{}", json_escape(n), d.to_json())).collect();
+    let v = app.match_view(i);
+    let rows: Vec<String> = v
+        .rows
+        .iter()
+        .filter(|r| r.wired)
+        .map(|r| {
+            let meta = r.meta.map_or("null".to_string(), |t| format!("\"{}\"", timebase::fmt_utc(t)));
+            let synced = app.synced_time(i, &format!("synced {}", r.n)).map_or("null".to_string(), |d| d.to_json());
+            let g = &v.groups[r.group];
+            format!("{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"synced\":{synced}}}", r.n, json_escape(&r.name), g.number, g.anchor == Some(r.n - 1))
+        })
+        .collect();
+    format!(",\"outputs\":{{{}}},\"rows\":[{}]", outs.join(","), rows.join(","))
 }
 
-// ---------------------------------------------------------------- the timeline in the node
+// ---------------------------------------------------------------- the rows on the node
 
-/// A file's time stamp, as read from it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FileStamp {
-    pub t: f64,
-    pub len: Option<f64>,
-    /// Our own recorder's time of the start, not the file's creation time.
-    pub sidecar: bool,
-}
-
-/// What the timelines keep between frames.
+/// What the rows keep between frames.
 #[derive(Default)]
 pub struct MatchUi {
-    /// Axes moved by hand, by node (else fitted to the bars).
+    /// Axes moved by hand, by node. None: Always fit, the axis follows the bars.
     pub views: HashMap<NodeId, (f64, f64)>,
     /// The tracks on screen: the wheel over one is not the canvas's.
     pub tracks: Vec<Rect>,
+    /// How far each unanchored group was dragged, by node and group. It changes no data.
+    pub shift: HashMap<(NodeId, String), f64>,
+    /// The group being dragged and the axis held still meanwhile.
+    grab: Option<(NodeId, String, (f64, f64))>,
+    /// Which row is drawn where (row → place), by node, as last drawn.
+    slots: HashMap<NodeId, Vec<usize>>,
+    /// Who was in each anchored group at the last result, by node and anchor; who has left it since.
+    members: HashMap<(NodeId, String), BTreeSet<String>>,
+    lost: HashMap<NodeId, BTreeSet<String>>,
+    seen_run: HashMap<NodeId, u64>,
+    /// Where each row's anchor button is on screen, as last drawn.
+    pub anchor_at: HashMap<(NodeId, usize), Rect>,
+    /// Each node's rows this frame (cleared at the start of the canvas).
+    pub cache: std::cell::RefCell<HashMap<NodeId, Rc<MatchView>>>,
 }
 
-/// One recording's row, as drawn.
-pub struct Row {
-    pub y: f32,
-    pub name: String,
-    /// At the right: the stamp's reading and difference, or how far the recording has got.
-    pub note: String,
-    pub warn: bool,
-    /// Where the file's stamp puts it, the stamp itself, and where audio puts it.
-    pub amber: Option<(f64, f64)>,
-    pub tick: Option<f64>,
-    pub teal: Option<(f64, f64)>,
-    pub hover: String,
-    /// The source's id when its stamp can be read either way (the file's creation time), and how
-    /// it is read.
-    pub uid: Option<String>,
-    pub as_end: bool,
+// Unzoomed, from the top of the node.
+const NODE_W: f32 = 980.0;
+const TOP: f32 = HEAD + 4.0;
+const BAR_H: f32 = 30.0;
+const RULER_H: f32 = 26.0;
+const FOOT_H: f32 = 46.0;
+const LEFT_W: f32 = 170.0;
+const STATUS_W: f32 = 116.0;
+const RIGHT_W: f32 = 116.0;
+const ROW_DEFAULT: f32 = 64.0;
+const ROW_MIN: f32 = 20.0;
+const ROW_MAX: f32 = 96.0;
+/// Rows at least this tall show the file name over their ports.
+const STRIP_FROM: f32 = 64.0;
+const STRIP_H: f32 = 20.0;
+/// Rows at least this tall write "audio" and "time" on their ports.
+const WORDS_FROM: f32 = 40.0;
+
+const AMBER: Color32 = Color32::from_rgb(233, 168, 76);
+const BLUE: Color32 = Color32::from_rgb(125, 180, 230);
+const BOTH: Color32 = Color32::from_rgb(246, 236, 217);
+const ANCHOR_BLUE: Color32 = Color32::from_rgb(34, 89, 143);
+const OFF: Color32 = Color32::from_rgb(65, 70, 78);
+const STRIP: Color32 = Color32::from_rgb(53, 58, 66);
+const TRACK: Color32 = Color32::from_rgb(29, 32, 37);
+const INK: Color32 = Color32::from_rgb(16, 18, 20);
+const SEAM: Color32 = Color32::from_rgb(16, 18, 21);
+const GRID: Color32 = Color32::from_rgb(49, 53, 60);
+const RED: Color32 = Color32::from_rgb(224, 82, 79);
+/// Group borders, in the order of their numbers.
+const GROUP_COLORS: [Color32; 8] = [
+    Color32::from_rgb(181, 140, 255),
+    Color32::from_rgb(240, 139, 192),
+    Color32::from_rgb(92, 200, 176),
+    Color32::from_rgb(230, 200, 90),
+    Color32::from_rgb(120, 190, 250),
+    Color32::from_rgb(250, 150, 100),
+    Color32::from_rgb(170, 220, 110),
+    Color32::from_rgb(210, 170, 230),
+];
+
+const YEAR: f64 = 31_557_600.0;
+
+fn row_height(kind: &Kind) -> f32 {
+    kind.rows().iter().find(|(k, _)| k == "row height").and_then(|(_, v)| v.parse().ok()).unwrap_or(ROW_DEFAULT).clamp(ROW_MIN, ROW_MAX)
 }
 
-const AMBER: Color32 = Color32::from_rgb(235, 165, 55);
-const TEAL: Color32 = Color32::from_rgb(55, 190, 215);
+fn by_group(kind: &Kind) -> bool {
+    kind.rows().iter().any(|(k, v)| k == "order by group" && v == "true")
+}
 
-/// `+12 years`, `-3 min`, `+40 s`.
+/// Where a row's parts are, unzoomed from the top of its place.
+struct RowGeom {
+    strip: f32,
+    half: f32,
+}
+
+fn geom(rh: f32) -> RowGeom {
+    let strip = if rh >= STRIP_FROM { STRIP_H } else { 0.0 };
+    RowGeom { strip, half: (rh - 2.0 - strip) / 2.0 }
+}
+
+fn place_y(slot: usize, rh: f32) -> f32 {
+    TOP + BAR_H + RULER_H + slot as f32 * rh
+}
+
+/// `+12 years`, `-3 min`, `+40.2 s`.
 fn gap_text(s: f64) -> String {
     let a = s.abs();
     let sign = if s < 0.0 { "-" } else { "+" };
     if a < 120.0 {
-        format!("{sign}{a:.0} s")
+        format!("{sign}{a:.1} s")
     } else if a < 7200.0 {
         format!("{sign}{:.0} min", a / 60.0)
     } else if a < 172_800.0 {
         format!("{sign}{:.0} h", a / 3600.0)
-    } else if a < 63_072_000.0 {
+    } else if a < 2.0 * 30.44 * 86_400.0 {
         format!("{sign}{:.0} days", a / 86_400.0)
+    } else if a < YEAR {
+        format!("{sign}{:.0} months", a / (30.44 * 86_400.0))
     } else {
-        format!("{sign}{:.0} years", a / 31_557_600.0)
+        format!("{sign}{:.1} years", a / YEAR)
     }
 }
 
-/// The axis that fits the bars, leaving out any far from the rest (a clock years off).
+fn hsl(h: f32, s: f32, l: f32) -> Color32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let u = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(u(r), u(g), u(b))
+}
+
+/// Green at 0 s, fully red at 30 s, going black by a year: the cell's fill and text.
+fn off_color(d: f64) -> (Color32, Color32) {
+    let a = d.abs();
+    if a <= 30.0 {
+        return (hsl(130.0 * (1.0 - a as f32 / 30.0), 0.62, 0.46), INK);
+    }
+    let f = ((a / 30.0).ln() / (YEAR / 30.0).ln()).min(1.0) as f32;
+    (hsl(0.0, 0.65, 0.46 * (1.0 - f)), if f > 0.3 { Color32::WHITE } else { INK })
+}
+
+/// What a row's status cell says.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cell {
+    Plain(String),
+    Bad(String),
+    /// Seconds off, and whether that is about its own length.
+    Off(f64, bool),
+    /// The row holding its group's anchor.
+    Anchor,
+    Empty,
+}
+
+/// The status cell of row `k`, and whether the whole row is greyed.
+pub fn cell(v: &MatchView, k: usize) -> (Cell, bool) {
+    let r = &v.rows[k];
+    if !r.wired {
+        return (Cell::Empty, false);
+    }
+    if r.time_err.is_some() {
+        return (Cell::Bad("Time node error".into()), false);
+    }
+    if let Some(Stage::Failed(_)) = &r.stage {
+        return (Cell::Bad("failed".into()), false);
+    }
+    if r.uid.is_some() && !r.file {
+        return (Cell::Plain("files only".into()), false);
+    }
+    if v.running && !v.done {
+        return (
+            match &r.stage {
+                Some(Stage::Waiting(s)) if *s > 0.0 => Cell::Plain(format!("decoding {s:.0} s")),
+                Some(Stage::Waiting(_)) => Cell::Plain("waiting".into()),
+                Some(Stage::Fingerprinting) => Cell::Plain("fingerprinting".into()),
+                Some(Stage::Ready(_)) => Cell::Plain("fingerprinted".into()),
+                _ => Cell::Plain("waiting".into()),
+            },
+            false,
+        );
+    }
+    if !v.done {
+        return (Cell::Plain(r.meta.map_or("no time metadata".to_string(), day_and_time)), false);
+    }
+    let g = &v.groups[r.group];
+    if g.anchor == Some(k) {
+        return (Cell::Anchor, false);
+    }
+    let linked = g.rows.iter().filter(|&&q| v.rows[q].uid.is_some()).count() >= 2;
+    if !linked {
+        return (Cell::Plain("no links found".into()), r.meta.is_none());
+    }
+    if r.lost && g.anchor.is_none() {
+        return (Cell::Plain("lost its anchor".into()), false);
+    }
+    match r.off {
+        Some(d) => (Cell::Off(d, r.hint), false),
+        None => (Cell::Plain("no time metadata".into()), false),
+    }
+}
+
+fn day_and_time(t: f64) -> String {
+    let s = timebase::fmt_utc(t);
+    format!("{}\n{}", &s[..10.min(s.len())], timebase::fmt_utc_clock(t))
+}
+
+/// The axis that fits every bar, however far apart they are.
 fn fit_axis(bars: &[(f64, f64)]) -> (f64, f64) {
     if bars.is_empty() {
         return (0.0, 600.0);
     }
-    let mid = |b: &(f64, f64)| (b.0 + b.1) / 2.0;
-    let mut mids: Vec<f64> = bars.iter().map(mid).collect();
-    mids.sort_by(f64::total_cmp);
-    let m = mids[mids.len() / 2];
-    let mut devs: Vec<f64> = mids.iter().map(|x| (x - m).abs()).collect();
-    devs.sort_by(f64::total_cmp);
-    let far = (devs[devs.len() / 2] * 6.0).max(3600.0);
-    let near = || bars.iter().filter(|b| (mid(b) - m).abs() <= far);
-    let lo = near().map(|b| b.0).fold(f64::MAX, f64::min);
-    let hi = near().map(|b| b.1).fold(f64::MIN, f64::max);
-    let pad = ((hi - lo) * 0.04).max(1.0);
+    let lo = bars.iter().map(|b| b.0).fold(f64::MAX, f64::min);
+    let hi = bars.iter().map(|b| b.1).fold(f64::MIN, f64::max);
+    let pad = ((hi - lo) * 0.05).max(1.0);
     (lo - pad, hi + pad)
 }
 
 /// A round step giving about six ticks across `span` seconds.
 fn tick_step(span: f64) -> f64 {
     let want = span / 6.0;
-    [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 21600.0, 86400.0].into_iter().find(|s| *s >= want).unwrap_or(want)
+    [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 21600.0, 86400.0, 604800.0, 2629800.0, 7889400.0, YEAR, 2.0 * YEAR, 5.0 * YEAR, 10.0 * YEAR, 50.0 * YEAR, 100.0 * YEAR, 500.0 * YEAR].into_iter().find(|s| *s >= want).unwrap_or(want)
 }
 
-/// How this node looks on the canvas: its timeline of file stamps and audio sync.
-pub struct Look;
-
-impl crate::look::NodeLook for Look {
-    fn size(&self, _app: &App, _i: NodeId, standard: Vec2) -> Vec2 {
-        Vec2::new(standard.x.max(860.0), standard.y.max(HEAD + 7.0 * ROW + 26.0))
+/// A tick's label: time of day, then the date, then the year as the ticks grow apart.
+fn tick_text(t: f64, step: f64) -> String {
+    let (c, d) = (timebase::fmt_utc_clock(t), timebase::fmt_utc(t));
+    if step < 60.0 {
+        c
+    } else if step < 86400.0 {
+        c[..5.min(c.len())].to_string()
+    } else if step < YEAR {
+        d[..10.min(d.len())].to_string()
+    } else {
+        d[..4.min(d.len())].to_string()
     }
+}
 
-    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
-        let r = crate::look::content(app, ui, i);
-        let (rows, real_time, time_note, spreads) = app.match_rows(i, ui.ctx());
-        let z = app.zoom;
-        let (name_w, note_w) = (135.0 * z, 86.0 * z);
-        let track = Rect::from_min_max(Pos2::new(r.left() + name_w, r.top()), Pos2::new(r.right() - note_w, r.bottom()));
-        if track.width() <= 10.0 {
-            return;
-        }
-        let bars: Vec<(f64, f64)> = rows.iter().flat_map(|w| [w.amber, w.teal]).flatten().collect();
-        let (v0, v1) = app.match_ui.views.get(&i).copied().unwrap_or_else(|| fit_axis(&bars));
-        let span = (v1 - v0).max(1e-3);
-        let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
-        let p = ui.painter().with_clip_rect(ui.clip_rect());
-        let font = |s: f32| FontId::proportional(s * z);
-        let row_h = ROW * z;
-        p.rect_filled(track, 2.0 * z, Color32::from_rgb(30, 33, 37));
-        // The ruler: the row of the time input, above the recordings.
-        let ruler = r.top() + 9.0 * z;
-        p.text(Pos2::new(r.left(), ruler), Align2::LEFT_CENTER, shorten(&time_note, 25), font(10.5), if time_note == "time: not wired" { DIM } else { TEXT });
-        let step = tick_step(span);
-        let mut k = (v0 / step).ceil();
-        while k * step <= v1 {
-            let x = tx(k * step);
-            p.line_segment([Pos2::new(x, track.top()), Pos2::new(x, track.bottom())], Stroke::new(1.0, alpha(LINE, 0.55)));
-            let label = if real_time { tick_text(k * step, step) } else { format!("{:+.0} s", k * step) };
-            p.text(Pos2::new(x + 3.0 * z, ruler), Align2::LEFT_CENTER, label, font(10.0), DIM);
-            k += 1.0;
-        }
-        for w in &rows {
-            p.text(Pos2::new(r.left(), w.y), Align2::LEFT_CENTER, shorten(&w.name, 22), font(11.0), TEXT);
-            let band = |b: (f64, f64)| {
-                let (a, c) = (tx(b.0).max(track.left()), tx(b.1).min(track.right()));
-                (c > a).then(|| Rect::from_min_max(Pos2::new(a, w.y - row_h * 0.36), Pos2::new(c.max(a + 2.0), w.y + row_h * 0.36)))
-            };
-            let (mut gone, mut shown) = (None, false);
-            for (bar, col) in [(w.amber, AMBER), (w.teal, TEAL)] {
-                let Some(b) = bar else { continue };
-                match band(b) {
-                    Some(rect) => {
-                        p.rect_filled(rect, 2.0 * z, alpha(col, 0.5));
-                        p.rect_stroke(rect, 2.0 * z, Stroke::new(z, alpha(col, 0.9)), StrokeKind::Inside);
-                        shown = true;
-                    }
-                    None => gone = Some(if b.1 < v0 { b.1 - v0 } else { b.0 - v1 }),
-                }
-            }
-            if let Some(t) = w.tick.filter(|t| *t >= v0 && *t <= v1) {
-                let x = tx(t);
-                p.line_segment([Pos2::new(x, w.y - row_h * 0.46), Pos2::new(x, w.y + row_h * 0.46)], Stroke::new(1.5 * z, AMBER));
-            }
-            if let Some(g) = gone.filter(|_| !shown) {
-                let (at, side, text) = if g < 0.0 { (track.left() + 4.0 * z, Align2::LEFT_CENTER, format!("< {}", gap_text(g))) } else { (track.right() - 4.0 * z, Align2::RIGHT_CENTER, format!("{} >", gap_text(g))) };
-                p.text(Pos2::new(at, w.y), side, text, font(10.0), DIM);
-            }
-            p.text(Pos2::new(track.right() + 6.0 * z, w.y), Align2::LEFT_CENTER, &w.note, font(10.5), if w.warn { WARN } else { DIM });
-        }
-        // The person's decision: a click on a note changes that row's reading.
-        let mut read: Vec<(Vec<String>, bool)> = Vec::new();
-        for (k, w) in rows.iter().enumerate() {
-            let Some(uid) = &w.uid else { continue };
-            let rect = Rect::from_min_max(Pos2::new(track.right() + 2.0 * z, w.y - row_h / 2.0), Pos2::new(r.right(), w.y + row_h / 2.0));
-            let them = if w.as_end { "start" } else { "end" };
-            if ui.interact(rect, egui::Id::new(("match-note", i, k)), Sense::click()).on_hover_text(format!("click: this stamp marks the recording's {them}")).clicked() {
-                read.push((vec![uid.clone()], !w.as_end));
-            }
-        }
-        // Under the rows: every stamp at once, and how far they disagree under each reading.
-        let all: Vec<String> = rows.iter().filter_map(|w| w.uid.clone()).collect();
-        if let (false, Some(last)) = (all.is_empty(), rows.last()) {
-            let y = last.y + row_h;
-            let button = |ui: &mut egui::Ui, x: f32, text: &str| ui.put(Rect::from_center_size(Pos2::new(x, y), Vec2::new(58.0 * z, 16.0 * z)), egui::Button::new(egui::RichText::new(text).size(10.0 * z))).clicked();
-            if button(ui, r.left() + 30.0 * z, "all start") {
-                read.push((all.clone(), false));
-            }
-            if button(ui, r.left() + 94.0 * z, "all end") {
-                read.push((all.clone(), true));
-            }
-            if let Some((s, e)) = spreads {
-                p.text(Pos2::new(track.left() + 6.0 * z, y), Align2::LEFT_CENTER, format!("stamps disagree by about {s:.1} s if all mark the start, {e:.1} s if all mark the end"), font(10.5), TEXT);
-            }
-        }
-        let _ = read;
-        // The track: wheel zooms around the pointer, a drag pans, a double-click fits it again.
-        app.match_ui.tracks.push(track);
-        let resp = ui.interact(track, egui::Id::new(("match-track", i)), Sense::click_and_drag());
-        if let Some(h) = resp.hover_pos() {
-            let scroll = ui.input(|k| k.smooth_scroll_delta.y + k.smooth_scroll_delta.x);
-            if scroll != 0.0 {
-                let f = (-scroll as f64 * 0.002).exp();
-                let at = v0 + ((h.x - track.left()) / track.width()) as f64 * span;
-                app.match_ui.views.insert(i, (at - (at - v0) * f, at + (v1 - at) * f));
-            }
-        }
-        if resp.dragged() {
-            let dt = (resp.drag_delta().x / track.width()) as f64 * span;
-            let (a, b) = app.match_ui.views.get(&i).copied().unwrap_or((v0, v1));
-            app.match_ui.views.insert(i, (a - dt, b - dt));
-        }
-        if resp.double_clicked() {
-            app.match_ui.views.remove(&i);
-        }
-        let hovered = resp.hover_pos().and_then(|h| rows.iter().find(|w| (w.y - h.y).abs() <= row_h / 2.0));
-        if let Some(w) = hovered {
-            resp.on_hover_text(w.hover.clone());
-        }
-    }
+/// An anchor, drawn in `r`.
+fn anchor_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let at = |x: f32, y: f32| r.min + Vec2::new(x / 16.0 * r.width(), y / 16.0 * r.height());
+    let st = Stroke::new((r.width() * 0.11).max(1.0), col);
+    p.circle_stroke(at(8.0, 3.2), r.width() * 0.11, st);
+    p.line_segment([at(8.0, 5.0), at(8.0, 14.0)], st);
+    p.line_segment([at(5.0, 7.5), at(11.0, 7.5)], st);
+    let arc: Vec<Pos2> = (0..=12)
+        .map(|k| {
+            let a = std::f32::consts::PI * (k as f32 / 12.0);
+            at(8.0 - 4.8 * a.cos(), 10.4 + 3.4 * a.sin())
+        })
+        .collect();
+    p.add(egui::Shape::line(arc, st));
 }
 
 fn shorten(s: &str, n: usize) -> String {
@@ -772,13 +1047,405 @@ fn shorten(s: &str, n: usize) -> String {
     }
 }
 
-/// A tick's time of day: seconds shown only when the ticks are closer than a minute.
-fn tick_text(t: f64, step: f64) -> String {
-    let c = timebase::fmt_utc_clock(t);
-    if step >= 60.0 && c.len() >= 5 {
-        c[..5].to_string()
-    } else {
-        c
+/// The bits of a row's hover text.
+fn row_hover(v: &MatchView, r: &Row) -> String {
+    let mut h = vec![r.name.clone()];
+    match r.meta {
+        Some(t) => h.push(format!("time input: {} UTC ± {} s, {}", timebase::fmt_utc(t), r.meta_err, r.meta_source)),
+        None if r.time_wired => h.push("the time input gives no time".to_string()),
+        None => h.push("nothing wired into the time input".to_string()),
+    }
+    if let Some(e) = &r.time_err {
+        h.push(e.clone());
+    }
+    if r.len > 0.0 {
+        h.push(format!("length {:.2} s", r.len));
+    }
+    if let Some(t) = r.start {
+        let word = if v.anchored(r) { "audio starts" } else { "audio shown at" };
+        h.push(format!("{word} {} UTC", timebase::fmt_utc(t)));
+    }
+    if let Some((s, e)) = v.spreads.get(r.group).copied().flatten() {
+        h.push(format!("this group's times disagree by about {s:.1} s read as starts, {e:.1} s read as ends"));
+    }
+    if r.hint {
+        h.push("off by about its own length: the time may mark the end of the recording. A Time node can subtract the length".to_string());
+    }
+    if let Some(Stage::Ready(n)) = &r.stage {
+        h.push(format!("{n} fingerprint hashes"));
+    }
+    if let Some(Stage::Failed(e)) = &r.stage {
+        h.push(e.clone());
+    }
+    h.join("\n")
+}
+
+/// How this node looks on the canvas: a row per recording, a timeline in each, a status column and
+/// the rows' yellow outputs.
+pub struct Look;
+
+impl crate::look::NodeLook for Look {
+    fn size(&self, app: &App, i: NodeId, _standard: Vec2) -> Vec2 {
+        let n = app.graph.nodes()[i].spec.inputs.len() / 2;
+        Vec2::new(NODE_W, place_y(n, row_height(&app.nodes[i].kind)) + FOOT_H + 6.0)
+    }
+
+    fn port_look(&self, app: &App, i: NodeId, name: &str) -> Option<PortLook> {
+        let rh = row_height(&app.nodes[i].kind);
+        let g = geom(rh);
+        let number = |base: &str| name.strip_prefix(base).and_then(|n| n.parse::<usize>().ok());
+        let row = |n: usize| {
+            let k = n.saturating_sub(1);
+            let slot = app.match_ui.slots.get(&i).and_then(|s| s.get(k)).copied().unwrap_or(k);
+            place_y(slot, rh) + 2.0 + g.strip
+        };
+        let dot = (g.half * 0.42).clamp(2.5, 5.0);
+        let at = |side: Side, y: f32| Some(PortLook { side: Some(side), at: Some(y), label: Some(PortLabel::Hidden), dot_size: Some(dot), ..Default::default() });
+        if let Some(n) = number("audio ") {
+            return at(Side::Left, row(n) + g.half * 0.5);
+        }
+        if let Some(n) = number("time ") {
+            return at(Side::Left, row(n) + g.half * 1.5);
+        }
+        if let Some(n) = number("synced ") {
+            return at(Side::Right, row(n) + g.half);
+        }
+        // The other outputs: along the bottom edge, at the right.
+        let fixed = ["links", "quality", "clock drift", "same recording", "speed change", "gaps"];
+        let k = fixed.iter().position(|f| *f == name)?;
+        Some(PortLook { side: Some(Side::Bottom), at: Some(NODE_W - 50.0 - (fixed.len() - 1 - k) as f32 * 102.0), ..Default::default() })
+    }
+
+    fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
+        let body = ui.max_rect();
+        let z = app.zoom;
+        let v = app.match_view(i);
+        app.note_lost_anchors(i, &v);
+        let v = app.match_view(i);
+        let rh = row_height(&app.nodes[i].kind);
+        let g = geom(rh);
+        let font = |s: f32| FontId::proportional(s * z);
+        let mono = |s: f32| FontId::monospace(s * z);
+        let p = ui.painter().with_clip_rect(ui.clip_rect());
+
+        // Draw order: by group when asked and known, the free row always last.
+        let mut order: Vec<usize> = (0..v.rows.len()).collect();
+        if by_group(&app.nodes[i].kind) && v.done {
+            let rank = |k: usize| {
+                let n = v.groups[v.rows[k].group].number;
+                (!v.rows[k].wired, if n == 0 { usize::MAX } else { n }, k)
+            };
+            order.sort_by_key(|&k| rank(k));
+        }
+        let mut slots = vec![0; order.len()];
+        for (s, &k) in order.iter().enumerate() {
+            slots[k] = s;
+        }
+        app.match_ui.slots.insert(i, slots);
+
+        let x0 = body.left();
+        let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + RIGHT_W) * z);
+        let rows_top = body.top() + (BAR_H + RULER_H) * z;
+        let row_top = |slot: usize| rows_top + slot as f32 * rh * z;
+        let rows_bottom = row_top(order.len());
+        let track = Rect::from_min_max(Pos2::new(track_x.0, rows_top - RULER_H * z), Pos2::new(track_x.1, rows_bottom));
+        if track.width() <= 10.0 {
+            return;
+        }
+
+        // The axis.
+        let bars: Vec<(f64, f64)> = v.rows.iter().flat_map(|r| [r.meta.map(|t| (t, t + r.len)), r.start.map(|t| (t, t + r.len))]).flatten().collect();
+        let fit = fit_axis(&bars);
+        let held = app.match_ui.grab.as_ref().filter(|g| g.0 == i).map(|g| g.2);
+        let (v0, v1) = held.or(app.match_ui.views.get(&i).copied()).unwrap_or(fit);
+        let span = (v1 - v0).max(1e-3);
+        let tx = |t: f64| track.left() + ((t - v0) / span) as f32 * track.width();
+
+        // The bar along the top.
+        let always = !app.match_ui.views.contains_key(&i);
+        let by = by_group(&app.nodes[i].kind);
+        let (mut do_fit, mut toggle_always, mut toggle_by) = (false, false, false);
+        let mut new_rh = rh;
+        let y = body.top() + BAR_H * 0.5 * z;
+        let button = |ui: &mut egui::Ui, x: f32, w: f32, text: &str, on: bool| {
+            let b = egui::Button::new(egui::RichText::new(text).size(11.5 * z)).fill(if on { Color32::from_rgb(81, 88, 98) } else { Color32::from_rgb(58, 63, 71) });
+            ui.put(Rect::from_min_size(Pos2::new(x, y - 10.0 * z), Vec2::new(w * z, 20.0 * z)), b).clicked()
+        };
+        if button(ui, x0 + 4.0 * z, 54.0, "Fit all", false) {
+            do_fit = true;
+        }
+        if button(ui, x0 + 62.0 * z, 72.0, "Always fit", always) {
+            toggle_always = true;
+        }
+        if button(ui, x0 + 138.0 * z, 96.0, "Order by group", by) {
+            toggle_by = true;
+        }
+        p.text(Pos2::new(x0 + 250.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
+        ui.put(Rect::from_min_size(Pos2::new(x0 + 312.0 * z, y - 9.0 * z), Vec2::new(120.0 * z, 18.0 * z)), egui::Slider::new(&mut new_rh, ROW_MIN..=ROW_MAX).show_value(false));
+        let scale = if span < 86400.0 { format!("{} to {}", timebase::fmt_utc_clock(v0), timebase::fmt_utc_clock(v1)) } else { format!("{} to {}", &timebase::fmt_utc(v0)[..10], &timebase::fmt_utc(v1)[..10]) };
+        if v.real {
+            p.text(Pos2::new(body.right() - 8.0 * z, y), Align2::RIGHT_CENTER, scale, mono(11.5), DIM);
+        }
+        p.line_segment([Pos2::new(body.left(), body.top() + BAR_H * z), Pos2::new(body.right(), body.top() + BAR_H * z)], Stroke::new(z, SEAM));
+
+        // The ruler, and the grid down the rows.
+        p.rect_filled(Rect::from_min_max(track.min, Pos2::new(track.right(), rows_top)), 0.0, TRACK);
+        p.rect_filled(Rect::from_min_max(Pos2::new(track.left(), rows_top), track.max), 0.0, TRACK);
+        let step = tick_step(span);
+        let mut q = (v0 / step).ceil();
+        let mut ticks = 0;
+        while q * step <= v1 && ticks < 30 {
+            let x = tx(q * step);
+            p.line_segment([Pos2::new(x, track.top()), Pos2::new(x, track.bottom())], Stroke::new(z.max(1.0), GRID));
+            let label = if v.real { tick_text(q * step, step) } else { format!("{:+.0} s", q * step) };
+            p.text(Pos2::new(x + 4.0 * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, label, mono(11.0), DIM);
+            q += 1.0;
+            ticks += 1;
+        }
+        p.text(Pos2::new(track.right() + STATUS_W * 0.5 * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "status", font(11.0), DIM);
+
+        // The rows.
+        let mut press_anchor: Option<usize> = None;
+        for (slot, &k) in order.iter().enumerate() {
+            let r = &v.rows[k];
+            let top = row_top(slot);
+            let (status, dead) = cell(&v, k);
+            let fade = |c: Color32| if dead { c.gamma_multiply(0.45) } else { c };
+            p.rect_filled(Rect::from_min_max(Pos2::new(body.left(), top), Pos2::new(body.right(), top + 2.0 * z)), 0.0, SEAM);
+            let inner = top + 2.0 * z;
+            let strip_h = g.strip * z;
+            let half = g.half * z;
+            let left_col = Rect::from_min_max(Pos2::new(x0, inner), Pos2::new(track.left(), top + rh * z));
+            if !r.wired {
+                // The free row waits for a wire.
+                let d = alpha(DIM, 0.8);
+                p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 0.5), Align2::LEFT_CENTER, format!("audio {}", r.n), font(12.0), d);
+                p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 1.5), Align2::LEFT_CENTER, format!("time {}", r.n), font(12.0), d);
+                continue;
+            }
+            if strip_h > 0.0 {
+                p.rect_filled(Rect::from_min_size(left_col.min, Vec2::new(left_col.width(), strip_h)), 0.0, fade(STRIP));
+                p.text(left_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 25), mono(11.5), fade(TEXT));
+            }
+            let words = rh >= WORDS_FROM;
+            // The port swatches: audio over time.
+            let sw_x = x0 + 12.0 * z;
+            let audio_sw = Rect::from_min_max(Pos2::new(sw_x, inner + strip_h), Pos2::new(track.left() - z, inner + strip_h + half));
+            let time_sw = Rect::from_min_max(Pos2::new(sw_x, audio_sw.bottom()), Pos2::new(track.left() - z, audio_sw.bottom() + half));
+            p.rect_filled(audio_sw, 0.0, fade(if r.uid.is_some() { AMBER } else { OFF }));
+            p.rect_filled(time_sw, 0.0, fade(if r.meta.is_some() { BLUE } else { OFF }));
+            if words {
+                p.text(audio_sw.left_center() + Vec2::new(9.0 * z, 0.0), Align2::LEFT_CENTER, "audio", font(12.0), if r.uid.is_some() { INK } else { DIM });
+                p.text(time_sw.left_center() + Vec2::new(9.0 * z, 0.0), Align2::LEFT_CENTER, "time", font(12.0), if r.meta.is_some() { INK } else { DIM });
+            }
+            // The anchor button, on a time, once the audio has placed the row.
+            if r.meta.is_some() {
+                let s = (half - 3.0 * z).min(20.0 * z).max(8.0 * z);
+                let br = Rect::from_center_size(Pos2::new(time_sw.right() - s * 0.5 - 5.0 * z, time_sw.center().y), Vec2::splat(s));
+                app.match_ui.anchor_at.insert((i, k), br);
+                let on = v.groups[r.group].anchor == Some(k);
+                if v.done {
+                    let tip = if on { "this time is the anchor of its synced group: click to take it away" } else { "anchor this synced group on this time" };
+                    let resp = ui.interact(br, egui::Id::new(("match-anchor", i, r.n)), Sense::click()).on_hover_text(tip);
+                    if resp.clicked() {
+                        press_anchor = Some(k);
+                    }
+                }
+                if on {
+                    p.rect_filled(br, 0.0, INK);
+                }
+                p.rect_stroke(br, 0.0, Stroke::new(1.5 * z, if v.done { INK } else { alpha(INK, 0.4) }), StrokeKind::Inside);
+                anchor_icon(&p, br.shrink(s * 0.14), if on { BOTH } else if v.done { INK } else { alpha(INK, 0.4) });
+            }
+
+            // The timeline.
+            let lane = Rect::from_min_max(Pos2::new(track.left(), inner), Pos2::new(track.right(), top + rh * z));
+            let band = |b: (f64, f64)| {
+                let (a, c) = (tx(b.0).max(lane.left()), tx(b.1).min(lane.right()));
+                (c > a || (b.0 <= v1 && b.1 >= v0)).then(|| Rect::from_min_max(Pos2::new(a, lane.top()), Pos2::new(c.max(a + 2.0 * z), lane.bottom())))
+            };
+            let blue = r.meta.map(|t| (t, t + r.len));
+            let amber = r.start.map(|t| (t, t + r.len));
+            let (mut gone, mut shown) = (None, false);
+            for (bar, col) in [(blue, BLUE), (amber, AMBER)] {
+                let Some(b) = bar else { continue };
+                match band(b).filter(|_| b.1 >= v0 && b.0 <= v1) {
+                    Some(rect) => {
+                        p.rect_filled(rect, 0.0, fade(alpha(col, 0.88)));
+                        shown = true;
+                    }
+                    None => {
+                        let g = if b.1 < v0 { b.1 - v0 } else { b.0 - v1 };
+                        gone = Some(gone.map_or(g, |o: f64| if g.abs() < o.abs() { g } else { o }));
+                    }
+                }
+            }
+            if let (Some(a), Some(b)) = (blue, amber) {
+                let both = (a.0.max(b.0), a.1.min(b.1));
+                if both.1 > both.0 {
+                    if let Some(rect) = band(both).filter(|_| both.1 >= v0 && both.0 <= v1) {
+                        p.rect_filled(rect, 0.0, fade(alpha(BOTH, 0.96)));
+                    }
+                }
+            }
+            if let Some(t) = r.meta.filter(|t| *t >= v0 && *t <= v1) {
+                let x = tx(t);
+                p.rect_filled(Rect::from_min_max(Pos2::new(x - 2.5 * z, lane.top()), Pos2::new(x + 2.5 * z, lane.bottom())), 0.0, fade(ANCHOR_BLUE));
+            }
+            if let (Some(b), true) = (amber, v.anchored(r)) {
+                let x = tx(b.1);
+                if x > lane.left() + 16.0 * z && x <= lane.right() + 16.0 * z {
+                    let s = (13.0 * z).min(lane.height() - 4.0 * z).max(6.0 * z);
+                    anchor_icon(&p, Rect::from_min_size(Pos2::new(x - s - 3.0 * z, lane.top() + 2.0 * z), Vec2::splat(s)), INK);
+                }
+            }
+            if let Some(g) = gone.filter(|_| !shown) {
+                let (at, side, text) = if g < 0.0 { (lane.left() + 6.0 * z, Align2::LEFT_CENTER, format!("< {}", gap_text(g))) } else { (lane.right() - 6.0 * z, Align2::RIGHT_CENTER, format!("{} >", gap_text(g))) };
+                p.text(Pos2::new(at, lane.center().y), side, text, mono(11.0), DIM);
+            }
+
+            // The status cell.
+            let cell_r = Rect::from_min_max(Pos2::new(track.right() + z, inner), Pos2::new(track.right() + STATUS_W * z, top + rh * z));
+            match &status {
+                Cell::Plain(t) => {
+                    let t = if rh < 44.0 { t.lines().last().unwrap_or(t).to_string() } else { t.clone() };
+                    p.text(cell_r.center(), Align2::CENTER_CENTER, t, mono(12.0), fade(DIM));
+                }
+                Cell::Bad(t) => {
+                    p.text(cell_r.center(), Align2::CENTER_CENTER, t, mono(12.0), RED);
+                }
+                Cell::Off(d, hint) => {
+                    let (bg, fg) = off_color(*d);
+                    p.rect_filled(cell_r, 0.0, bg);
+                    let text = if *hint && rh >= 44.0 { format!("{}\nabout its length", gap_text(*d)) } else { gap_text(*d) };
+                    p.text(cell_r.center(), Align2::CENTER_CENTER, text, mono(if *hint { 11.5 } else { 13.0 }), fg);
+                }
+                Cell::Anchor => {
+                    let s = (22.0 * z).min(cell_r.height() - 2.0 * z);
+                    anchor_icon(&p, Rect::from_center_size(cell_r.center(), Vec2::splat(s)), TEXT);
+                }
+                Cell::Empty => {}
+            }
+
+            // The output.
+            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(body.right(), top + rh * z));
+            if strip_h > 0.0 {
+                p.rect_filled(Rect::from_min_size(out_col.min, Vec2::new(out_col.width(), strip_h)), 0.0, fade(STRIP));
+                p.text(out_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 15), mono(11.5), fade(TEXT));
+            }
+            let on = v.anchored(r) && r.uid.is_some();
+            let out_sw = Rect::from_min_max(Pos2::new(out_col.left(), inner + strip_h), Pos2::new(out_col.right() - 12.0 * z, top + rh * z));
+            p.rect_filled(out_sw, 0.0, fade(if on { AMBER } else { OFF }));
+            if words {
+                p.text(out_sw.right_center() - Vec2::new(9.0 * z, 0.0), Align2::RIGHT_CENTER, "time", font(12.0), if on { INK } else { DIM });
+            }
+        }
+        p.rect_filled(Rect::from_min_size(Pos2::new(body.left(), rows_bottom), Vec2::new(body.width(), 2.0 * z)), 0.0, SEAM);
+
+        // Group borders: one round each run of neighbouring rows of a group.
+        for (gi, grp) in v.groups.iter().enumerate().filter(|(_, g)| g.number > 0) {
+            let col = GROUP_COLORS[(grp.number - 1) % GROUP_COLORS.len()];
+            let _ = gi;
+            let mut s = 0;
+            while s < order.len() {
+                if !grp.rows.contains(&order[s]) {
+                    s += 1;
+                    continue;
+                }
+                let mut e = s;
+                while e + 1 < order.len() && grp.rows.contains(&order[e + 1]) {
+                    e += 1;
+                }
+                let rect = Rect::from_min_max(Pos2::new(track.left(), row_top(s) + 2.0 * z), Pos2::new(track.right(), row_top(e + 1)));
+                p.rect_stroke(rect, 0.0, Stroke::new(2.0 * z, col), StrokeKind::Inside);
+                let tab = Rect::from_min_size(rect.min, Vec2::new(20.0 * z, 16.0 * z).min(rect.size()));
+                p.rect_filled(tab, 0.0, col);
+                p.text(tab.center(), Align2::CENTER_CENTER, grp.number.to_string(), mono(11.0), INK);
+                s = e + 1;
+            }
+        }
+
+        // The foot: what the node is doing.
+        let status_text = app.nodes[i].state.lock().unwrap().status.clone();
+        let text = if status_text.is_empty() { "not run".to_string() } else { status_text };
+        p.text(Pos2::new(body.left() + 8.0 * z, rows_bottom + 24.0 * z), Align2::LEFT_CENTER, shorten(&text, 70), font(11.5), DIM);
+
+        // The track: the wheel zooms around the pointer, a drag on an unanchored group's amber bar
+        // moves the group, any other drag pans, a double-click fits everything.
+        app.match_ui.tracks.push(track);
+        let resp = ui.interact(Rect::from_min_max(track.min, Pos2::new(track.right(), rows_bottom)), egui::Id::new(("match-track", i)), Sense::click_and_drag());
+        let view_now = |app: &App| app.match_ui.views.get(&i).copied().unwrap_or(fit);
+        if let Some(h) = resp.hover_pos() {
+            let scroll = ui.input(|k| k.smooth_scroll_delta.y + k.smooth_scroll_delta.x);
+            if scroll != 0.0 {
+                let f = (-scroll as f64 * 0.002).exp();
+                let at = v0 + ((h.x - track.left()) / track.width()) as f64 * span;
+                app.match_ui.views.insert(i, (at - (at - v0) * f, at + (v1 - at) * f));
+            }
+        }
+        let row_at = |y: f32| -> Option<&Row> {
+            let s = ((y - rows_top) / (rh * z)).floor();
+            (s >= 0.0).then(|| order.get(s as usize).map(|&k| &v.rows[k])).flatten()
+        };
+        if resp.drag_started() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let t = v0 + ((pos.x - track.left()) / track.width()) as f64 * span;
+                if let Some(r) = row_at(pos.y).filter(|r| r.start.is_some_and(|s| t >= s && t <= s + r.len) && !v.anchored(r)) {
+                    let key = v.groups[r.group].key.clone();
+                    app.match_ui.grab = Some((i, key, (v0, v1)));
+                }
+            }
+        }
+        if resp.dragged() {
+            let dt = (resp.drag_delta().x / track.width()) as f64 * span;
+            match app.match_ui.grab.clone().filter(|g| g.0 == i) {
+                Some((_, key, _)) => *app.match_ui.shift.entry((i, key)).or_default() += dt,
+                None => {
+                    let (a, b) = view_now(app);
+                    app.match_ui.views.insert(i, (a - dt, b - dt));
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            app.match_ui.grab = None;
+        }
+        if resp.double_clicked() {
+            do_fit = true;
+        }
+        if let Some(r) = resp.hover_pos().and_then(|h| row_at(h.y)).filter(|r| r.wired) {
+            resp.on_hover_text(row_hover(&v, r));
+        }
+        if do_fit {
+            app.match_ui.views.insert(i, fit);
+        }
+        if toggle_always {
+            if always {
+                app.match_ui.views.insert(i, (v0, v1));
+            } else {
+                app.match_ui.views.remove(&i);
+            }
+        }
+        let mut changed = false;
+        if let Kind::AudioMatch { rows } = &mut app.nodes[i].kind {
+            let set = |rows: &mut Vec<(String, String)>, k: &str, val: String| match rows.iter_mut().find(|(q, _)| q == k) {
+                Some((_, x)) => *x = val,
+                None => rows.push((k.to_string(), val)),
+            };
+            if toggle_by {
+                set(rows, "order by group", (!by).to_string());
+                changed = true;
+            }
+            if (new_rh - rh).abs() >= 0.5 {
+                set(rows, "row height", format!("{new_rh:.0}"));
+                changed = true;
+            }
+        }
+        if changed {
+            app.save_project();
+        }
+        if let Some(k) = press_anchor {
+            app.toggle_anchor(i, k);
+        }
     }
 }
 
@@ -787,17 +1454,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn axis_leaves_out_a_clock_years_off() {
+    fn axis_keeps_a_clock_years_off() {
         let t = 1_347_000_000.0;
-        let (a, b) = fit_axis(&[(t, t + 100.0), (t + 50.0, t + 200.0), (t + 40.0, t + 90.0), (t + 4e8, t + 4e8 + 60.0)]);
-        assert!(a < t && a > t - 60.0 && b > t + 200.0 && b < t + 260.0, "{a} {b}");
+        let (a, b) = fit_axis(&[(t, t + 100.0), (t + 50.0, t + 200.0), (t + 4e8, t + 4e8 + 60.0)]);
+        assert!(a < t && b > t + 4e8 + 60.0, "{a} {b}");
         assert_eq!(fit_axis(&[]), (0.0, 600.0));
     }
 
     #[test]
     fn gaps_read_plainly() {
-        assert_eq!(gap_text(40.2), "+40 s");
+        assert_eq!(gap_text(40.2), "+40.2 s");
         assert_eq!(gap_text(-180.0), "-3 min");
-        assert_eq!(gap_text(4e8), "+13 years");
+        assert_eq!(gap_text(4e8), "+12.7 years");
+    }
+
+    #[test]
+    fn the_status_colour_goes_from_green_through_red_to_black() {
+        let (zero, _) = off_color(0.0);
+        assert!(zero.g() > zero.r(), "{zero:?}");
+        let (thirty, _) = off_color(30.0);
+        assert!(thirty.r() > 2 * thirty.g(), "{thirty:?}");
+        let (years, fg) = off_color(YEAR * 3.0);
+        assert_eq!((years, fg), (Color32::BLACK, Color32::WHITE));
     }
 }

@@ -7,6 +7,7 @@
 //! - **Evidence**, gathered every frame and solved again when it changes:
 //!   - each live source's own anchor (stream times, this PC's clock); a time written in a file is
 //!     never evidence by itself;
+//!   - the time of the row a person anchored an Audio match group on;
 //!   - a time wired into an input that module.toml marks `anchors = "audio"`: the audio starts at
 //!     that time (an anchor when the time is UTC, a link when it is on another clock);
 //!   - every `anchor` and `link` output in the project, wired or not;
@@ -28,7 +29,8 @@ pub struct Evidence {
     pub share: BTreeMap<String, String>,
     /// Keys of the evidence switched off.
     pub off: BTreeSet<String>,
-    /// Sources whose file time stamp the person reads as the recording's end, not its start.
+    /// While loading a project saved before there were Time nodes: the sources whose stamp was read
+    /// as the recording's end.
     pub stamp_end: BTreeSet<String>,
     /// Anchors and links made by hand (the timeline).
     pub manual_anchors: Vec<ClockAnchor>,
@@ -94,6 +96,10 @@ impl App {
                 if let (Some(a), Some(c)) = (a, self.clock_of(i)) {
                     an.push(ClockAnchor { clock: c, t: 0.0, utc: a.utc0, error_s: a.error_s, from: n.uid.clone(), enabled: true });
                 }
+            }
+            // A row an Audio match node's person picked: its audio starts at that row's time.
+            if matches!(n.kind, Kind::AudioMatch { .. }) {
+                an.extend(self.match_anchors(i));
             }
             // A time wired into an anchoring input: the audio starts at that time.
             for (tin, ain) in self.anchoring_inputs(i) {
@@ -241,10 +247,8 @@ impl App {
 
     /// The project lines for clocks and evidence (see the top of this file).
     pub(crate) fn evidence_text(&self) -> String {
-        let mut t = String::new();
-        for u in &self.ev.stamp_end {
-            t.push_str(&format!("stamp-end|{}\n", clean(u)));
-        }
+        // `format|2`: Audio match's rows have a time each (older files are converted on loading).
+        let mut t = String::from("format|2\n");
         for (n, c) in &self.ev.share {
             t.push_str(&format!("clock|{}|{}\n", clean(n), clean(c)));
         }
@@ -270,6 +274,7 @@ impl App {
             ["off", k] => {
                 self.ev.off.insert(k.to_string());
             }
+            ["format", _] => {}
             ["stamp-end", u] => {
                 self.ev.stamp_end.insert(u.to_string());
             }

@@ -4,18 +4,17 @@ category = "Detectors"
 order = 3
 role = "detector"
 
-# A recording's time, wired in: trusting that file's time stamp gives the linked recordings real
-# time (the clock solve carries it along the links).
-[[input]]
-name = "time"
-kind = "time"
-
-# Grows as it is wired: "audio 1", "audio 2", … Every pair of the wired recordings is matched.
-# Files only for now: each source's own decoded audio is taken once it ends, then all are matched
-# at once.
+# Each row is one recording: its audio and the time its metadata claims, "audio 1" and "time 1",
+# "audio 2" and "time 2", … Every pair of the wired recordings is matched. Files only for now: each
+# source's own decoded audio is taken once it ends, then all are matched at once.
 [[input]]
 name = "audio"
 kind = "audio"
+many = true
+
+[[input]]
+name = "time"
+kind = "time"
 many = true
 
 [[output]]
@@ -100,3 +99,14 @@ about = "Where a pair's offset jumps by 0.1 s or more (and 5 sigma) between two 
 needs = ["audio", "audio 2"]
 when = "overlapping recordings, one paused or cut"
 min_quality = "weak"
+
+# One per row: the recording's better time. Nothing until its synced group has an anchor; then the
+# group's anchored time, with the anchor's error and the audio links' error.
+[[output]]
+name = "synced"
+kind = "time"
+many = true
+tint = "#e9a84c"
+
+[look]
+status = false

@@ -209,6 +209,7 @@ fn layout_of(d: Dynamic) -> Result<(FrameLook, Vec<(String, PortLook)>), String>
                     _ => None,
                 },
                 dot_size: p.get("dot_size").map(num),
+                tint: None,
                 hidden: p.get("hidden").and_then(|v| v.as_bool().ok()).unwrap_or(false),
             },
         ));

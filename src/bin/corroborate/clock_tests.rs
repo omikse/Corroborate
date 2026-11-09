@@ -638,21 +638,50 @@ fn audio_match_links_two_recordings() {
     let a = app.add(Kind::Sourcer { input: pa }, Pos2::new(30.0, 40.0));
     let b = app.add(Kind::Sourcer { input: pb }, Pos2::new(30.0, 300.0));
     let c = app.add(Kind::Sourcer { input: pc }, Pos2::new(30.0, 560.0));
-    let m = app.add(Kind::AudioMatch, Pos2::new(460.0, 120.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(460.0, 120.0));
     app.wire_many(a, "audio", m);
     app.wire_many(b, "audio", m);
-    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 4, "the time input, two wired and one free");
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 6, "rows of audio and time: two wired and one free");
+    assert_eq!(app.graph.nodes()[m].spec.outputs.iter().filter(|p| p.name.starts_with("synced")).count(), 3, "a yellow output per row");
     app.wire_many(c, "audio", m);
     app.run();
     assert!(d.wait_until(30.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.frames(5);
     d.shot("audio_match");
     // On the node: each row placed by audio once the match has ended. These files have no stamp.
-    let ctx = d.h.ctx.clone();
-    let (rows, _, note, _) = d.app().match_rows(m, &ctx);
-    assert_eq!(rows.iter().filter(|r| r.teal.is_some()).count(), 3, "{:?}", rows.iter().map(|r| r.note.clone()).collect::<Vec<_>>());
-    assert!(rows.iter().all(|r| r.amber.is_none() && r.note == "no stamp"));
-    assert_eq!(note, "time: not wired");
+    d.app().update_clocks();
+    d.frames(2);
+    let view = d.app().match_view(m);
+    let wired: Vec<_> = view.rows.iter().filter(|r| r.wired).collect();
+    assert_eq!(wired.len(), 3);
+    assert!(wired.iter().all(|r| r.start.is_some() && r.meta.is_none()), "{wired:?}");
+    assert_eq!(view.groups.iter().filter(|g| g.number > 0).count(), 1, "one synced group");
+    assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Plain("no time metadata".into()));
+    assert!(d.app().value_from(m, "synced 2").is_err(), "no anchor: nothing comes out");
+    assert!(d.app().output_held(m, "synced 2").is_some(), "greyed");
+    // A time on row 1, then the group anchored on it: every recording of the group has real time.
+    let v = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01T00:16:40Z".into()), ("error_s".into(), "2".into())] }, Pos2::new(30.0, 800.0));
+    d.app().wire(v, "value", m, "time 1");
+    d.frames(2);
+    let ub = uid(d.app(), b);
+    assert_ne!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "a time on a row is a claim only");
+    d.app().toggle_anchor(m, 0);
+    d.app().update_clocks();
+    d.frames(3);
+    assert_eq!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "anchored: the linked recording has real time");
+    let Ok(Data::Time { utc: Some(ub_utc), error_s, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time out of row 2") };
+    assert!((ub_utc - 1020.5).abs() < 0.01 && error_s >= 2.0, "b starts 20.5 s after a: {ub_utc} ± {error_s}");
+    let Ok(Data::Time { utc: Some(ua_utc), .. }) = d.app().value_from(m, "synced 1") else { panic!("no time out of row 1") };
+    assert!((ua_utc - 1000.0).abs() < 0.01, "{ua_utc}");
+    let view = d.app().match_view(m);
+    assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Anchor);
+    assert!(d.app().project_text().contains(&format!("anchor {}", uid(d.app(), a))), "kept with the project");
+    d.shot("audio_match_anchored");
+    d.app().toggle_anchor(m, 0);
+    d.app().graph.disconnect(m, "time 1");
+    d.app().sync_many_ports();
+    d.app().update_clocks();
+    d.frames(2);
     assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
@@ -678,6 +707,122 @@ fn audio_match_links_two_recordings() {
     let on_a = ca.back(cb.at(10.0));
     assert!((on_a - 30.5).abs() < 0.002, "b's 10 s is a's {on_a}");
     app.stop_all();
+}
+
+/// A row's audio and time, and the wire out of its yellow output, survive save and load by name;
+/// a project saved before rows had a time each gets each recording's time wired to its row, a Time
+/// node where the stamp was read as the end, and the anchor on the recording whose time was wired.
+#[test]
+fn audio_match_rows_are_saved_and_old_projects_converted() {
+    let mut app = App::empty();
+    let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(460.0, 120.0));
+    let tl = app.add(Kind::Planes, Pos2::new(1600.0, 120.0));
+    app.wire_many(a, "audio", m);
+    app.wire_many(b, "audio", m);
+    app.wire(b, "time", m, "time 2");
+    app.wire(m, "synced 2", tl, "time");
+    app.sync_many_ports();
+    let text = app.project_text();
+    assert!(text.contains("format|2"));
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    assert_eq!(back.graph.feeder(m, "audio 1").map(|f| f.0), Some(a));
+    assert_eq!(back.graph.feeder(m, "audio 2").map(|f| f.0), Some(b));
+    assert_eq!(back.graph.feeder(m, "time 2"), Some((b, "time")));
+    assert_eq!(back.graph.feeder(m, "time 1"), None, "not wired, not added");
+    assert_eq!(back.graph.feeder(tl, "time"), Some((m, "synced 2")));
+
+    let ids = [uid(&app, a), uid(&app, b)];
+    let old = format!(
+        "node|sourcer|30|40|one|a.mp4|id={}\nnode|sourcer|30|300|two|b.mp4|id={}\nnode|audio-match|460|120|Audio match||id=n9\nnext|10\nwire|0|audio|2|audio 1\nwire|1|audio|2|audio 2\nwire|1|time|2|time\nstamp-end|{}\n",
+        ids[0], ids[1], ids[0]
+    );
+    let mut conv = App::empty();
+    assert!(conv.load_project_text(&old));
+    assert_eq!(conv.graph.feeder(2, "time 2"), Some((1, "time")), "a stamp read as the start: wired straight");
+    let (t, o) = conv.graph.feeder(2, "time 1").expect("the end stamp goes through a Time node");
+    assert!(matches!(conv.nodes[t].kind, Kind::Time { .. }) && o == "result");
+    assert_eq!(conv.graph.feeder(t, "time"), Some((0, "time")));
+    assert_eq!(conv.graph.feeder(t, "row 1"), Some((0, "length")));
+    assert!(conv.nodes[2].kind.rows().iter().any(|(k, _)| *k == format!("anchor {}", ids[1])), "the old time input's recording holds the anchor");
+    assert!(conv.ev.stamp_end.is_empty());
+    assert!(!conv.project_text().contains("stamp-end"));
+}
+
+/// Dropping a SOURCER's audio on a row draws its time wire too, as a normal wire.
+#[test]
+fn dropping_audio_on_a_row_draws_its_time_wire() {
+    let mut d = crate::drive::Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: "clip.mp4".into() }, Pos2::new(30.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(520.0, 40.0));
+    d.frames(3);
+    let app = d.app();
+    let o = app.canvas_origin;
+    let (from, to) = (app.port_place(o, s, 0, true).0, app.port_place(o, m, 0, false).0);
+    d.drag(from, to);
+    let app = d.app();
+    assert_eq!(app.graph.feeder(m, "audio 1"), Some((s, "audio")), "{}", app.msg);
+    assert_eq!(app.graph.feeder(m, "time 1"), Some((s, "time")));
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 4, "and a free row");
+    let (a, t) = (app.port_place(o, m, 0, false).0, app.port_place(o, m, 1, false).0);
+    assert!(a.y < t.y && (a.x - t.x).abs() < 0.01, "audio above time: {a:?} {t:?}");
+}
+
+/// The Time node: a wired time shows and locks; a row wired to the recording's length takes it
+/// away, turning an end stamp into a start; the error box replaces the error; a date that does
+/// not exist greys the output, and the Audio match row says so.
+#[test]
+fn time_node_corrects_a_time() {
+    use corroborate::timebase::{parse_iso8601, FileFacts};
+    let mut d = crate::drive::Drive::new();
+    let t0 = parse_iso8601("2012-02-29T13:18:01Z").unwrap();
+    d.app().facts.put("clip.mp4", FileFacts { stamp: Some(t0), len: Some(150.0), source: "the file's creation_time".into() });
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: "clip.mp4".into() }, Pos2::new(30.0, 40.0));
+    let t = app.add(Kind::Time { rows: corroborate::modules::time::defaults() }, Pos2::new(520.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(1080.0, 40.0));
+    app.wire(s, "time", t, "time");
+    app.wire(t, "result", m, "time 1");
+    app.wire(s, "audio", m, "audio 1");
+    app.sync_many_ports();
+    d.frames(3);
+    let out = |d: &mut crate::drive::Drive| d.app().value_from(t, "result");
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if u == t0 && error_s == 0.0));
+    d.click("+");
+    assert_eq!(d.app().graph.nodes()[t].spec.inputs.len(), 2, "a row and its port");
+    d.app().wire(s, "length", t, "row 1");
+    d.frames(3);
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), .. }) if (u - (t0 - 150.0)).abs() < 1e-3));
+    assert_eq!(d.app().match_view(m).rows[0].meta, Some(t0 - 150.0), "the row follows the edit");
+    d.shot("time_node");
+    // Two years back from 29 February is a date that does not exist.
+    if let Kind::Time { rows } = &mut d.app().nodes[t].kind {
+        corroborate::modules::time::add_row(rows);
+        rows.push(("2.year".into(), "2".into()));
+    }
+    let inputs = d.app().nodes[t].kind.spec().inputs;
+    d.app().graph.set_inputs_keep(t, inputs);
+    d.app().graph.disconnect(t, "row 1");
+    if let Kind::Time { rows } = &mut d.app().nodes[t].kind {
+        corroborate::modules::time::remove_row(rows, 1);
+    }
+    let inputs = d.app().nodes[t].kind.spec().inputs;
+    d.app().graph.set_inputs_keep(t, inputs);
+    d.frames(3);
+    let e = out(&mut d).unwrap_err();
+    assert!(e.contains("2010-02-29"), "{e}");
+    assert!(d.app().output_held(t, "result").is_some(), "greyed");
+    let view = d.app().match_view(m);
+    assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Bad("Time node error".into()));
+    d.shot("time_node_error");
+    // Saved and loaded with its rows and wires.
+    let text = d.app().project_text();
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    assert_eq!(back.nodes[t].kind.rows(), d.app().nodes[t].kind.rows());
+    assert_eq!(back.graph.nodes()[t].spec.inputs.len(), 2);
 }
 
 /// Makes the Jiku project in the app folder: app\projects\Jiku GT_090912\Jiku GT_090912.txt, one
@@ -709,7 +854,7 @@ fn make_jiku_project() {
         app.nodes[s].collapsed = true;
         sources.push(s);
     }
-    let m = app.add(Kind::AudioMatch, Pos2::new(30.0 + 470.0 * cols as f32 + 80.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(30.0 + 470.0 * cols as f32 + 80.0, 40.0));
     for &s in &sources {
         app.wire_many(s, "audio", m);
     }
@@ -851,7 +996,7 @@ fn make_jiku_group6() {
     for &s in &sources {
         app.nodes[s].collapsed = true;
     }
-    let m = app.add(Kind::AudioMatch, Pos2::ZERO);
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::ZERO);
     for &s in &sources {
         app.wire_many(s, "audio", m);
     }
@@ -879,7 +1024,7 @@ fn make_jiku_group6() {
         app.nodes[s].collapsed = true;
         made.push(s);
     }
-    let a = app.add(Kind::AudioMatch, Pos2::new(30.0 + 290.0 * cols as f32 + 120.0, 40.0));
+    let a = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(30.0 + 290.0 * cols as f32 + 120.0, 40.0));
     for &s in &made {
         app.wire_many(s, "audio", a);
     }
@@ -891,13 +1036,15 @@ fn make_jiku_group6() {
     println!("saved {}", file.display());
 }
 
-/// The Audio match timeline on the 12 recordings, handled like a user would (a copy of the project
-/// in target\drive): file stamps shown before Run, the audio sync laid over them after, a
-/// recording's time wired in with a drag, the track zoomed and panned, a row hovered. PNGs am_1 to am_6.
+/// The Audio match rows on the 12 recordings, handled like a user would (a copy of the project in
+/// target\drive, saved before rows had a time each, so converted on opening): times shown before
+/// Run, the audio sync over them after, a group dragged, a group anchored by a click on a row's
+/// anchor, thin rows, the track zoomed and panned, a row hovered. PNGs am_1 to am_7.
 /// Run: cargo test --profile fast --bin corroborate audio_match_timeline -- --ignored --nocapture
 #[test]
 #[ignore]
 fn audio_match_timeline() {
+    use crate::audio_match_node::{cell, Cell};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let made = root.join("app").join("projects").join("Jiku group 6").join("Jiku group 6.txt");
     assert!(made.is_file(), "make it first: make_jiku_group6");
@@ -909,12 +1056,10 @@ fn audio_match_timeline() {
     let mut d = crate::drive::Drive::new();
     d.app().open_project(file);
     d.frames(3);
-    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
-    let ctx = d.h.ctx.clone();
-    let rows = |d: &mut crate::drive::Drive| d.app().match_rows(m, &ctx);
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch { .. })).unwrap();
     assert!(d.app().stopped && !d.app().running(), "opens stopped");
     let end = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < end && rows(&mut d).0.iter().filter(|r| r.amber.is_some()).count() < 6 {
+    while Instant::now() < end && d.app().match_view(m).rows.iter().filter(|r| r.meta.is_some()).count() < 5 {
         d.h.step();
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -924,106 +1069,89 @@ fn audio_match_timeline() {
     d.app().frame_nodes(area);
     d.app().pick_none();
     d.frames(4);
-    let (r, _, _, _) = rows(&mut d);
-    let stamped = r.iter().filter(|x| x.amber.is_some()).count();
-    println!("before Run: {} rows, {stamped} with a file stamp", r.len());
-    assert_eq!(r.len(), 12);
-    assert!(r.iter().all(|x| x.teal.is_none()), "no audio result before Run");
-    assert!(!d.app().running(), "reading stamps decodes nothing");
-    d.shot("am_1_stamps_before_run");
+    let v = d.app().match_view(m);
+    let stamped = v.rows.iter().filter(|x| x.meta.is_some()).count();
+    println!("before Run: {} rows, {stamped} with a time", v.rows.iter().filter(|r| r.wired).count());
+    assert_eq!(v.rows.iter().filter(|r| r.wired).count(), 12);
+    assert!(v.rows.iter().all(|x| x.start.is_none()), "no audio result before Run");
+    assert!(!d.app().running(), "reading the times decodes nothing");
+    d.shot("am_1_before_run");
 
     d.click("▶ Run");
     d.wait(1.5);
     d.shot("am_2_running");
     assert!(d.wait_until(120.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.wait(1.0);
-    let (r, _, note, spreads) = rows(&mut d);
-    for x in &r {
-        println!("{:28} {:18} amber {:?} teal {:?}", x.name, x.note, x.amber.map(|b| b.0 as i64), x.teal.map(|b| b.0 as i64));
-    }
-    println!("{note}");
-    assert_eq!(r.iter().filter(|x| x.teal.is_some()).count(), 12, "every row has its audio position");
-    assert_eq!(note, "audio placed by best fit");
-    assert!(r.iter().filter(|x| x.amber.is_some()).all(|x| !x.as_end && x.note.starts_with("start")), "nothing decides but the person");
-    let (s_start, s_end) = spreads.expect("both readings measured");
-    println!("stamps disagree by {s_start:.1} s as starts, {s_end:.1} s as ends");
-    assert!(s_end < 2.0 && s_start > 10.0 * s_end, "the numbers show which reading fits");
-    d.shot("am_3_overlay_as_start");
-    // One row by a click on its note, then all of them with the button.
-    let track = d.app().match_ui.tracks[0];
-    let y0 = r[0].y;
-    d.click_at(track.right() + 30.0, y0);
-    assert!(rows(&mut d).0[0].as_end, "a click on the note reads that stamp as the end");
-    d.click("all end");
-    d.wait(0.5);
-    let (r, _, _, _) = rows(&mut d);
-    for x in &r {
-        println!("{:28} {:18} amber {:?} teal {:?}", x.name, x.note, x.amber.map(|b| b.0 as i64), x.teal.map(|b| b.0 as i64));
-    }
-    assert!(r.iter().filter(|x| x.amber.is_some()).all(|x| x.as_end && !x.warn), "as ends they all agree");
-    d.shot("am_3_overlay");
-    let report = |app: &App, when: &str| {
-        let c = &app.ev.clocks;
-        let z: Vec<f64> = c.contradictions.iter().map(|x| x.1).collect();
-        let worst = z.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let rates: Vec<i64> = app.nodes.iter().filter(|n| n.kind.is_source()).map(|n| (c.get(&n.uid).rate * 1e6) as i64).collect();
-        println!("{when}: {} contradictions, worst {worst:.1} sigma; rates ppm {rates:?}", z.len());
-    };
-    report(d.app(), "best fit");
-
-    // Wire a stamped recording's time into the node: frame everything, drag dot to dot.
-    let area = d.app().canvas_rect;
-    d.app().frame_nodes(area);
+    d.app().update_clocks();
     d.frames(3);
-    let app = d.app();
-    let s = (0..app.nodes.len()).find(|&i| app.nodes[i].label == "phone 0 1347196530871").expect("the recording");
-    let out_k = app.graph.nodes()[s].spec.outputs.iter().position(|p| p.name == "time").unwrap();
-    let o = app.canvas_origin;
-    let (from, to) = (app.port_place(o, s, out_k, true).0, app.port_place(o, m, 0, false).0);
-    let before: Vec<Option<(f64, f64)>> = r.iter().map(|x| x.teal).collect();
-    d.drag(from, to);
-    d.wait(1.0);
-    assert_eq!(d.app().graph.feeder(m, "time").map(|f| f.0), Some(s), "{}", d.msg());
-    let (r2, _, note2, _) = rows(&mut d);
-    println!("wired: {note2}");
-    for x in &r2 {
-        println!("{:28} {:18} teal {:?}", x.name, x.note, x.teal.map(|b| b.0 as i64));
+    let v = d.app().match_view(m);
+    for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
+        println!("{:28} {:?} meta {:?} start {:?} hint {}", x.name, cell(&v, k).0, x.meta.map(|b| b as i64), x.start.map(|b| b as i64), x.hint);
     }
-    assert!(note2.starts_with("time: phone 0"), "{note2}");
-    assert!(r2.iter().filter(|x| x.amber.is_some()).all(|x| !x.warn), "a wired end stamp fits the rest: {:?}", r2.iter().map(|x| x.note.clone()).collect::<Vec<_>>());
-    let jump = (r2[0].teal.unwrap().0 - r[0].teal.unwrap().0).abs();
-    println!("wiring the time moved the group by {jump:.2} s");
-    assert!(jump < 5.0, "the wired time follows the reading: {jump}");
-    let app = d.app();
-    report(app, "time wired");
-    assert!(app.ev.clocks.contradictions.is_empty(), "a loose anchor makes no contradictions: {:?}", app.ev.clocks.contradictions.len());
-    let clock = uid(app, s);
-    assert_eq!(app.ev.clocks.get(&clock).kind, Ck::Absolute, "the group has real time");
-    let moved = r2.iter().map(|x| x.teal).zip(&before).filter(|(a, b)| a != *b).count();
-    println!("{moved} of 12 teal bars moved");
-    d.app().pick_only(m);
-    let area = d.app().canvas_rect;
-    d.app().frame_nodes(area);
-    d.app().pick_none();
-    d.frames(4);
-    d.shot("am_4_time_wired");
+    assert_eq!(v.rows.iter().filter(|x| x.start.is_some()).count(), 12, "every row has its audio position");
+    assert_eq!(v.groups.iter().filter(|g| g.number > 0).count(), 1, "one synced group");
+    d.shot("am_3_after_the_match");
+    assert!(d.app().value_from(m, "synced 1").is_err(), "no anchor: nothing comes out");
 
-    // The track: wheel zooms it and not the canvas, a drag pans it, hovering a row explains it.
+    // A drag on an amber bar moves the group and changes no data.
     let track = d.app().match_ui.tracks[0];
+    let k = v.rows.iter().position(|r| r.meta.is_some()).expect("a row with a time");
+    let on = d.app().match_ui.anchor_at[&(m, k)];
+    let (t0, links0) = (v.rows[k].start.unwrap(), d.app().ev.links.len());
+    let (v0, v1) = d.app().match_ui.views.get(&m).copied().unwrap_or((0.0, 1.0));
+    let _ = (v0, v1);
+    let y = on.center().y;
+    let bar_x = {
+        let v = d.app().match_view(m);
+        let bars: Vec<(f64, f64)> = v.rows.iter().flat_map(|r| [r.meta.map(|t| (t, t + r.len)), r.start.map(|t| (t, t + r.len))]).flatten().collect();
+        let lo = bars.iter().map(|b| b.0).fold(f64::MAX, f64::min);
+        let hi = bars.iter().map(|b| b.1).fold(f64::MIN, f64::max);
+        let pad = ((hi - lo) * 0.05).max(1.0);
+        let (a, b) = (lo - pad, hi + pad);
+        let r = &v.rows[k];
+        track.left() + (((r.start.unwrap() + r.len / 2.0 - a) / (b - a)) as f32) * track.width()
+    };
+    d.drag(Pos2::new(bar_x, y), Pos2::new(bar_x + 60.0, y));
+    let v = d.app().match_view(m);
+    println!("dragged the group by {:.1} s", v.rows[k].start.unwrap() - t0);
+    assert!(v.rows[k].start.unwrap() > t0, "the group moved");
+    assert_eq!(d.app().ev.links.len(), links0, "and no data did");
+    d.shot("am_4_group_dragged");
+
+    // A click on a row's anchor: the group has real time and the yellow outputs give it.
+    d.click_at(on.center().x, on.center().y);
+    d.frames(3);
+    d.app().update_clocks();
+    d.frames(3);
+    let v = d.app().match_view(m);
+    assert_eq!(cell(&v, k).0, Cell::Anchor, "{}", d.msg());
+    assert!((v.rows[k].start.unwrap() - v.rows[k].meta.unwrap()).abs() < 0.01, "the audio's start snaps to the time");
+    for r in v.rows.iter().filter(|r| r.wired) {
+        assert!(d.app().value_from(m, &format!("synced {}", r.n)).is_ok(), "row {} gives a time", r.n);
+    }
+    assert!(d.app().ev.clocks.contradictions.is_empty(), "{:?}", d.app().ev.clocks.contradictions.len());
+    for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
+        println!("{:28} {:?}", x.name, cell(&v, k).0);
+    }
+    d.shot("am_5_anchored");
+
+    // The track: wheel zooms it and not the canvas, a drag pans it.
     let zoom = d.app().zoom;
     let at = Pos2::new(track.center().x, track.top() + 80.0);
     d.scroll(at, 8.0);
-    let v = d.app().match_ui.views.get(&m).copied().expect("zoomed");
-    println!("zoomed to {:.0} s across", v.1 - v.0);
+    let w = d.app().match_ui.views.get(&m).copied().expect("zoomed");
+    println!("zoomed to {:.0} s across", w.1 - w.0);
     assert_eq!(d.app().zoom, zoom, "the wheel over the track is the track's");
-    d.shot("am_5_zoomed");
-    d.drag(at, at + Vec2::new(-120.0, 0.0));
-    let v2 = d.app().match_ui.views.get(&m).copied().unwrap();
-    assert!(v2.0 > v.0, "a drag to the left moves the view later");
-    let y = rows(&mut d).0[3].y;
+    d.shot("am_6_zoomed");
     d.h.hover_at(Pos2::new(track.center().x, y));
     d.frames(10);
-    d.shot("am_6_hover");
+    d.shot("am_7_hover");
+    if let Kind::AudioMatch { rows } = &mut d.app().nodes[m].kind {
+        rows.push(("row height".into(), "24".into()));
+    }
+    d.app().match_ui.views.remove(&m);
+    d.frames(4);
+    d.shot("am_8_thin_rows");
     d.app().stop_run();
 }
 
@@ -1048,7 +1176,7 @@ fn timeline_on_a_big_project() {
     d.app().open_project(file);
     d.frames(3);
     assert!(d.app().nodes.iter().filter(|n| n.kind.is_source()).all(|n| n.collapsed), "the sources start collapsed");
-    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch { .. })).unwrap();
     d.click("▶ Run");
     assert!(d.wait_until(180.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.wait(1.0);

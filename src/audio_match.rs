@@ -138,52 +138,22 @@ pub fn halve(x: &[i16]) -> Vec<f32> {
         .collect()
 }
 
-/// How far from the group's time a file's stamp may be and still count, seconds: phones' clocks
-/// are off by seconds, and a stamp further out says nothing about when the group happened.
-pub const STAMP_CAP_S: f64 = 30.0;
-
-/// One recording of a linked group, for `fit_stamps`.
+/// One recording of a linked group, for `stamp_spread`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placed {
-    /// The file's time stamp (seconds since 1970), if it has one.
+    /// The time claimed for it (seconds since 1970), if it has one.
     pub stamp: Option<f64>,
     /// Its length, seconds.
     pub len: f64,
     /// Where audio puts its start on the group's clock.
     pub start: f64,
-    /// The person's reading: the stamp marks the recording's end, not its start.
-    pub as_end: bool,
 }
 
 impl Placed {
-    /// The group's clock 0 in real time, if this stamp is read as `as_end` says.
+    /// The group's clock 0 in real time, if this stamp is read as the start, or as the end.
     fn zero(&self, as_end: bool) -> Option<f64> {
         self.stamp.map(|s| s - self.start - if as_end { self.len } else { 0.0 })
     }
-}
-
-/// Where the group's clock 0 is in real time, as the stamps have it (None: no stamp), and how many
-/// seconds later than that each recording's stamp says (None: it has no stamp).
-#[derive(Clone, Debug, PartialEq)]
-pub struct StampFit {
-    pub zero: Option<f64>,
-    pub diffs: Vec<Option<f64>>,
-}
-
-/// Lines a linked group up with its files' stamps, each read as the person chose. The zero is the
-/// one most recordings agree on, each counting at most `STAMP_CAP_S`, so a clock years off cannot
-/// drag it, then the median of the stamps that fit. `fixed`: the zero is already known (the group
-/// has real time), and the stamps are only measured against it.
-pub fn fit_stamps(recs: &[Placed], fixed: Option<f64>) -> StampFit {
-    let zeros: Vec<Option<f64>> = recs.iter().map(|r| r.zero(r.as_end)).collect();
-    let zero = fixed.or_else(|| {
-        let cost = |z: f64| -> f64 { zeros.iter().flatten().map(|c| (c - z).abs().min(STAMP_CAP_S)).sum() };
-        let best = zeros.iter().flatten().copied().min_by(|a, b| cost(*a).total_cmp(&cost(*b)))?;
-        let mut fits: Vec<f64> = zeros.iter().flatten().copied().filter(|c| (c - best).abs() <= STAMP_CAP_S).collect();
-        fits.sort_by(f64::total_cmp);
-        Some(fits[fits.len() / 2])
-    });
-    StampFit { zero, diffs: zeros.iter().map(|c| c.zip(zero).map(|(c, z)| c - z)).collect() }
 }
 
 /// How far a group's stamps typically disagree (median distance from their median, seconds) if
@@ -493,40 +463,16 @@ mod tests {
         crate::synth::notes(secs, SR, 7)
     }
 
-    fn placed(stamp: f64, len: f64, start: f64, as_end: bool) -> Placed {
-        Placed { stamp: Some(stamp), len, start, as_end }
-    }
-
     const T: f64 = 1_347_000_000.0;
 
-    /// Stamps that mark the end, read as the end, agree; read as the start they do not, and the
-    /// numbers say so. Nothing decides the reading but the person.
+    /// Stamps that mark the end agree when read as ends, and the spread says so.
     #[test]
-    fn stamps_are_read_as_the_person_says() {
+    fn the_spread_says_which_reading_fits() {
         let lens = [(100.0, 0.0), (90.0, 40.0), (200.0, 75.0)];
-        let read = |as_end: bool| -> Vec<Placed> { lens.iter().map(|&(l, st): &(f64, f64)| placed(T + st + l, l, st, as_end)).collect() };
-        let f = fit_stamps(&read(true), None);
-        assert_eq!(f.zero, Some(T));
-        assert!(f.diffs.iter().all(|d| *d == Some(0.0)), "{f:?}");
-        let g = fit_stamps(&read(false), None);
-        assert!(g.diffs.iter().any(|d| d.unwrap().abs() > 5.0), "read as the start they disagree: {g:?}");
-        assert_eq!(stamp_spread(&read(false), true), Some(0.0));
-        assert!(stamp_spread(&read(false), false).unwrap() > 5.0);
-    }
-
-    #[test]
-    fn stamps_missing_wrong_and_known_zero() {
-        let recs = [placed(T + 0.6, 100.0, 0.0, false), Placed { stamp: None, len: 50.0, start: 10.0, as_end: false }, placed(T + 75.0, 200.0, 75.0, false), placed(T + 40.0, 80.0, 40.2, false), placed(T + 4e8, 60.0, 5.0, false)];
-        let f = fit_stamps(&recs, None);
-        assert!((f.zero.unwrap() - T).abs() < 0.7, "a clock years off does not drag it: {f:?}");
-        assert_eq!(f.diffs[1], None);
-        assert!(f.diffs[4].unwrap() > 3e8);
-        let none = [Placed { stamp: None, len: 1.0, start: 0.0, as_end: false }];
-        assert_eq!(fit_stamps(&none, None), StampFit { zero: None, diffs: vec![None] });
-        assert_eq!(stamp_spread(&none, false), None);
-        // The group has real time: stamps are measured against it, not moved.
-        let f = fit_stamps(&[placed(T + 110.0, 100.0, T + 8.0, true)], Some(0.0));
-        assert_eq!((f.zero, f.diffs[0]), (Some(0.0), Some(2.0)));
+        let recs: Vec<Placed> = lens.iter().map(|&(l, st): &(f64, f64)| Placed { stamp: Some(T + st + l), len: l, start: st }).collect();
+        assert_eq!(stamp_spread(&recs, true), Some(0.0));
+        assert!(stamp_spread(&recs, false).unwrap() > 5.0);
+        assert_eq!(stamp_spread(&[Placed { stamp: None, len: 1.0, start: 0.0 }], false), None);
     }
 
     /// 16 kHz to 8 kHz: a 1 kHz tone keeps its level, a 5 kHz one (which would alias to 3 kHz)

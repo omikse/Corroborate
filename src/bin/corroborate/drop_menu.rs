@@ -75,7 +75,13 @@ impl App {
         // Through `connect_shown`: either end may be a group's port or its Group Input / Output.
         let made = match end {
             End::Out(n, k) => match spec.inputs.iter().position(|p| p.kind == want).or_else(|| spec.inputs.iter().position(|p| p.kind == PortKind::Any)) {
-                Some(p) => self.connect_shown(n, k, id, p),
+                Some(p) => {
+                    let made = self.connect_shown(n, k, id, p);
+                    if made.is_ok() {
+                        self.also_wire_time(n, k, id, p);
+                    }
+                    made
+                }
                 None => {
                     let out = self.graph.nodes()[n].spec.outputs[k].name;
                     self.wire_many(n, out, id);

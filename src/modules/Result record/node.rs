@@ -80,9 +80,9 @@ impl App {
     /// Every node with a `many = true` input shows its wired ports plus one free one.
     pub(crate) fn sync_many_ports(&mut self) {
         for i in 0..self.nodes.len() {
-            let names = self.nodes[i].kind.many_names();
-            if !names.is_empty() {
-                self.graph.pack_many(i, &names);
+            let many = self.nodes[i].kind.many_rows();
+            if !many.is_empty() {
+                self.graph.pack_rows(i, &many);
             }
         }
     }
@@ -90,10 +90,24 @@ impl App {
     /// Wire `from.out` into node `to`'s free `many` port (project files, tests).
     pub(crate) fn wire_many(&mut self, from: NodeId, out: &str, to: NodeId) {
         self.sync_many_ports();
-        if let Some(free) = self.graph.nodes()[to].spec.inputs.last().map(|p| p.name) {
+        // In the free row, the port that takes what this output gives.
+        let g = self.graph.nodes();
+        let per_row = self.nodes[to].kind.many_rows().per_row.max(1);
+        let inputs = &g[to].spec.inputs;
+        let row = &inputs[inputs.len().saturating_sub(per_row)..];
+        let free = g[from].spec.outputs.iter().find(|p| p.name == out).and_then(|o| row.iter().find(|p| corroborate::core::NodeSpec::can_connect(o, p))).or(row.first()).map(|p| p.name);
+        if let Some(free) = free {
             self.wire(from, out, to, free);
         }
         self.sync_many_ports();
+    }
+
+    /// A wire saved by its ports' names: growing ports are made first, so it can go back.
+    pub(crate) fn connect_grown(&mut self, a: NodeId, out: &str, b: NodeId, inp: &str) -> Result<(), GraphError> {
+        let (ma, mb) = (self.nodes[a].kind.many_rows(), self.nodes[b].kind.many_rows());
+        self.graph.grow_to(a, &ma, out, true);
+        self.graph.grow_to(b, &mb, inp, false);
+        self.graph.connect(a, out, b, inp)
     }
 
     pub(crate) fn record_folder(&self, rec: NodeId) -> PathBuf {

@@ -62,6 +62,8 @@ mod enf_node;
 mod grid_frequencies_node;
 #[path = "../../modules/Invert location/node.rs"]
 mod invert_location_node;
+#[path = "../../modules/Time/node.rs"]
+mod time_node;
 #[path = "../../modules/Value/node.rs"]
 mod value_node;
 #[path = "../../modules/Map/node.rs"]
@@ -112,6 +114,11 @@ const GHOST: Color32 = Color32::from_rgb(88, 94, 104);
 fn kind_color(k: PortKind) -> Color32 {
     let [r, g, b] = corroborate::types::of(k).color;
     Color32::from_rgb(r, g, b)
+}
+
+/// A port's colour: its look's tint, else its kind's.
+fn port_color(l: &corroborate::module_manifest::PortLook, k: PortKind) -> Color32 {
+    l.tint.map_or_else(|| kind_color(k), |[r, g, b]| Color32::from_rgb(r, g, b))
 }
 
 /// A kind's dot: how its data arrives (a value, a list, a stream).
@@ -571,19 +578,41 @@ impl App {
             self.graph.set_inputs(s, ins);
             self.graph.set_outputs(s, outs);
         }
+        // A Time node's ports follow its rows (read by now).
+        for &i in &new {
+            if matches!(self.nodes[i].kind, Kind::Time { .. }) {
+                let inputs = self.nodes[i].kind.spec().inputs;
+                self.graph.set_inputs_keep(i, inputs);
+            }
+        }
+        // Saved before Audio match's rows had a time each.
+        let old_file = keep_ids && !text.lines().any(|l| l.starts_with("format|"));
+        let mut old_time: Vec<(NodeId, NodeId)> = Vec::new();
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                let names = self.nodes[b].kind.many_names();
-                let fixed = self.graph.nodes()[b].spec.inputs.iter().any(|p| p.name == i && !names.contains(&p.name));
-                if !names.is_empty() && !fixed {
-                    // A `many` input: wires come in order and take the free port (old projects
-                    // named the record's inputs by kind).
+                if i == "time" && matches!(self.nodes[b].kind, Kind::AudioMatch { .. }) {
+                    old_time.push((a, b));
+                    continue;
+                }
+                let many = self.nodes[b].kind.many_rows();
+                let named = self.graph.nodes()[b].spec.inputs.iter().any(|p| p.name == i) || many.inputs.contains(&i.as_str());
+                if !many.is_empty() && !named {
+                    // Old projects named a record's inputs by kind: wires take the free port.
                     self.wire_many(a, &o, b);
                 } else {
-                    let _ = self.graph.connect(a, &o, b, &i);
+                    let _ = self.connect_grown(a, &o, b, &i);
                 }
             }
         }
+        if old_file {
+            for &i in &new {
+                if matches!(self.nodes[i].kind, Kind::AudioMatch { .. }) {
+                    let from: Vec<NodeId> = old_time.iter().filter(|(_, b)| *b == i).map(|(a, _)| *a).collect();
+                    self.migrate_match(i, &from);
+                }
+            }
+        }
+        self.ev.stamp_end.clear();
         // A group's ports name the nodes inside by id: their new ids (its rows are read by now).
         for &i in &new {
             if let Kind::Group { rows, .. } = &self.nodes[i].kind {
@@ -692,7 +721,7 @@ impl App {
         }
         // Audio match nodes read their files themselves, all at once.
         for i in 0..self.nodes.len() {
-            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch) {
+            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch { .. }) {
                 let (files, other) = self.audio_match_inputs(i, &before);
                 audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
             }
@@ -806,7 +835,14 @@ impl App {
             }
             let own = match &n.kind {
                 Kind::Planes => planes_node::json(&s),
-                Kind::AudioMatch => audio_match_node::json(&s),
+                Kind::AudioMatch { .. } => {
+                    drop(s);
+                    audio_match_node::json(self, i)
+                }
+                Kind::Time { .. } => {
+                    drop(s);
+                    time_node::json(self, i)
+                }
                 Kind::Enf { .. } => enf_node::json(&s),
                 Kind::GridFrequencies { path } => grid_frequencies_node::json(path),
                 Kind::Plugin { path } => plugin_node::json(path, &s),
@@ -922,6 +958,7 @@ impl App {
 
     fn graph_view(&mut self, ui: &mut egui::Ui) {
         self.area_cache.borrow_mut().clear();
+        self.match_ui.cache.borrow_mut().clear();
         self.refresh_looks();
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
@@ -983,7 +1020,9 @@ impl App {
             let (b, sb) = self.port_place(origin, w.to, w.to_port, false);
             let lit = trail.contains(&w.from) && trail.contains(&w.to);
             let live_from = w.real_from.map_or(w.from, |r| r.0);
-            let col = if self.selected.is_some() && !lit { alpha(kind_color(kind), 0.2) } else { kind_color(kind) };
+            let out_port = &self.graph.nodes()[w.from].spec.outputs[w.from_port];
+            let wc = if self.output_held(w.from, out_port.name).is_some() { GHOST } else { port_color(&self.port_look(w.from, out_port), kind) };
+            let col = if self.selected.is_some() && !lit { alpha(wc, 0.2) } else { wc };
             let pts = layout::wire_points(a, sa, b, sb);
             let width = if lit { 2.6 } else { 1.7 };
             if live[live_from] {
@@ -1224,7 +1263,7 @@ impl App {
                 };
                 let nc = if missing.contains(&p.name) { WARN } else if p.required { tc } else { DIM };
                 let nc = if fed_kind.is_some() { tc } else { nc };
-                layout::draw_port(&painter, c, side, &pl, kind_color(shown_kind), kind_shape(shown_kind), p.required, &name, nc, self.zoom);
+                layout::draw_port(&painter, c, side, &pl, port_color(&pl, shown_kind), kind_shape(shown_kind), p.required, &name, nc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("in", i, k)), Sense::click_and_drag());
                 if pr.hovered() && self.wiring.is_none() && self.wiring_in.is_none() {
                     pr.clone().on_hover_text(self.port_hover(i, p, false));
@@ -1248,7 +1287,7 @@ impl App {
                 // module.toml's title for it, and grey while the node's signal is too weak for it.
                 let title = self.manifest_of(i).and_then(|m| m.sockets.iter().find(|s| s.name == p.name).and_then(|s| s.label.clone()));
                 let held = self.output_held(i, p.name).is_some();
-                let (col, nc) = if held { (GHOST, DIM) } else { (kind_color(p.kind), tc) };
+                let (col, nc) = if held { (GHOST, DIM) } else { (port_color(&pl, p.kind), tc) };
                 layout::draw_port(&painter, c, side, &pl, col, kind_shape(p.kind), false, title.as_deref().unwrap_or(p.name), nc, self.zoom);
                 let pr = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom)), egui::Id::new(("out", i, k)), Sense::drag());
                 if pr.hovered() && self.wiring.is_none() && self.wiring_in.is_none() {
@@ -1284,6 +1323,7 @@ impl App {
                     match self.connect_shown(f, fo, n, k) {
                         Ok(said) => {
                             self.msg = said;
+                            self.also_wire_time(f, fo, n, k);
                             self.sync_many_ports();
                             self.save_project();
                         }
@@ -1312,6 +1352,7 @@ impl App {
                     match self.connect_shown(n, k, t, ti) {
                         Ok(said) => {
                             self.msg = said;
+                            self.also_wire_time(n, k, t, ti);
                             self.sync_many_ports();
                             self.save_project();
                         }

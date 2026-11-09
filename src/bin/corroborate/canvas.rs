@@ -329,17 +329,18 @@ impl App {
                 None => {}
             }
             self.graph.isolate(i);
+            if matches!(self.nodes[i].kind, Kind::Time { .. }) {
+                let inputs = self.nodes[i].kind.spec().inputs;
+                self.graph.set_inputs_keep(i, inputs);
+            }
         }
         self.sync_many_ports();
         for (a, o, b, inp) in &s.wires {
             if *a < self.nodes.len() && *b < self.nodes.len() {
                 if matches!(self.nodes[*b].kind, Kind::ResultRecord { .. }) {
                     self.wire_many(*a, o, *b);
-                } else if let Err(GraphError::NoInput { .. }) = self.graph.connect(*a, o, *b, inp) {
-                    // A growing input (Combine's "location 2") has its next port once the one
-                    // before is wired.
-                    self.sync_many_ports();
-                    let _ = self.graph.connect(*a, o, *b, inp);
+                } else {
+                    let _ = self.connect_grown(*a, o, *b, inp);
                 }
             }
         }

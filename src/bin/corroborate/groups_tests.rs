@@ -321,7 +321,7 @@ fn groups_on_a_big_project() {
     assert_eq!(wires(d.app()), before);
     d.frames(2);
     d.shot("groups_jiku_top");
-    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch)).unwrap();
+    let m = d.app().nodes.iter().position(|n| matches!(n.kind, Kind::AudioMatch { .. })).unwrap();
     d.click("▶ Run");
     let started = Instant::now();
     let (mut worst, mut n) = (0.0f64, 0);

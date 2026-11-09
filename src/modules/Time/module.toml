@@ -1,0 +1,18 @@
+id = "time"
+label = "Time"
+category = "Data"
+order = 2
+role = "transform"
+
+# The time to work from; without a wire it is typed into the node. Each row of the node has an
+# input of its own for a length (its ports are added with the rows).
+[[input]]
+name = "time"
+kind = "time"
+
+[[output]]
+name = "result"
+kind = "time"
+
+[look]
+status = false

@@ -17,8 +17,10 @@
 //!                              # or in this module's own types\<id>.toml, see src/types.rs)
 //! kind = "audio"
 //! required = true              # must be wired for the module to run (default false)
-//! many = true                  # (last input only) grows as it is wired: "audio 1", "audio 2", …
-//!                              # always one free input more, up to MANY_MAX
+//! many = true                  # (last inputs only) grows as it is wired: "audio 1", "audio 2", …
+//!                              # always one free input more, up to MANY_MAX. Several `many` inputs
+//!                              # grow together as rows ("audio 1", "time 1", "audio 2", …); an
+//!                              # [[output]] with `many` gives one port per row
 //!
 //! [[output]]                   # what it gives
 //! name = "location"
@@ -53,7 +55,8 @@
 //! side = "bottom"              # in its [[input]] / [[output]]. side: left right top bottom
 //! at = 40                      # px along that edge from its start (left or top); else spaced evenly
 //! label = "outside"            # inside | outside | hidden
-//! dot_size = 6                 # a dot's colour and shape come from its type (src/types.rs)
+//! dot_size = 6                 # a dot's shape and colour come from its type (src/types.rs)
+//! tint = "#e9a84c"             # this port and its wires in another colour than its type's
 //!
 //! A `look.rhai` beside module.toml can change the look while the node runs (see the workbench's
 //! script.rs).
@@ -251,6 +254,8 @@ pub struct PortLook {
     pub at: Option<f32>,
     pub label: Option<PortLabel>,
     pub dot_size: Option<f32>,
+    /// This port and its wires in this colour instead of its type's.
+    pub tint: Option<[u8; 3]>,
     /// Not drawn (a script's choice; a wired port is drawn all the same).
     pub hidden: bool,
 }
@@ -263,6 +268,7 @@ impl PortLook {
             at: over.at.or(self.at),
             label: over.label.or(self.label),
             dot_size: over.dot_size.or(self.dot_size),
+            tint: over.tint.or(self.tint),
             hidden: self.hidden || over.hidden,
         }
     }
@@ -332,6 +338,7 @@ fn port_look(t: &toml::Table, what: &str) -> Result<PortLook, String> {
             Some(s) => return Err(format!("{what}: label \"{s}\" must be inside, outside or hidden")),
         },
         dot_size: look_num(t, "dot_size", what)?,
+        tint: look_color(t, "tint", what)?,
         hidden: false,
     })
 }
@@ -364,8 +371,11 @@ pub struct Manifest {
     /// Time inputs that anchor another input's clock (`[[input]] anchors = "audio"`): (time
     /// input, anchored input). The wired time is when that input's audio starts.
     pub anchors: Vec<(String, String)>,
-    /// The last input's name when it is `many = true`: it grows as it is wired ("in 1", "in 2", …).
-    pub many: Option<String>,
+    /// The last inputs' names when they are `many = true`: they grow as they are wired ("in 1",
+    /// "in 2", …), together, one row at a time, when there are several.
+    pub many: Vec<String>,
+    /// The output `many = true`, which gives one port per row.
+    pub many_out: Option<String>,
     /// Its look.rhai, if it has one.
     pub script: Option<String>,
 }
@@ -374,18 +384,30 @@ impl Manifest {
     /// The node it makes: its id, role and declared ports.
     pub fn spec(&self) -> NodeSpec {
         let mut inputs = self.inputs.clone();
-        if let (Some(_), Some(last)) = (&self.many, inputs.last_mut()) {
-            last.name = self.many_names()[0];
+        let first = inputs.len() - self.many.len();
+        for (p, base) in inputs[first..].iter_mut().zip(&self.many) {
+            p.name = intern(&format!("{base} 1"));
         }
-        NodeSpec { name: self.id, role: self.role, inputs, outputs: self.outputs.clone() }
+        let mut outputs = self.outputs.clone();
+        if let Some(p) = outputs.iter_mut().find(|p| self.many_out.as_deref() == Some(p.name)) {
+            p.name = intern(&format!("{} 1", self.many_out.as_deref().unwrap_or_default()));
+        }
+        NodeSpec { name: self.id, role: self.role, inputs, outputs }
     }
 
-    /// The names a `many` input takes, in order ("in 1" … "in 64"); empty without one.
+    /// The names its `many` inputs take, in order ("in 1" … "in 64"; rows one after the other);
+    /// empty without one.
     pub fn many_names(&self) -> Vec<&'static str> {
-        match &self.many {
+        (1..=MANY_MAX).flat_map(|k| self.many.iter().map(move |base| intern(&format!("{base} {k}")))).collect()
+    }
+
+    /// How its ports grow; empty without a `many` input.
+    pub fn many_rows(&self) -> Many {
+        let outputs = match &self.many_out {
             Some(base) => (1..=MANY_MAX).map(|k| intern(&format!("{base} {k}"))).collect(),
             None => Vec::new(),
-        }
+        };
+        Many { inputs: self.many_names(), per_row: self.many.len(), outputs }
     }
 
     pub fn setting(&self, name: &str) -> Option<&Setting> {
@@ -399,20 +421,33 @@ impl Manifest {
 
     /// How port `name` looks, as module.toml says.
     pub fn port_look(&self, name: &str) -> PortLook {
-        // A `many` input's ports ("in 3") look like the input declared ("in").
-        let name = match &self.many {
-            Some(base) if name.strip_prefix(base.as_str()).is_some_and(|r| r.starts_with(' ')) => base.as_str(),
-            _ => name,
-        };
+        // A `many` port ("in 3") looks like the port declared ("in").
+        let name = self.many.iter().chain(&self.many_out).find(|base| name.strip_prefix(base.as_str()).is_some_and(|r| r.starts_with(' '))).map_or(name, |b| b.as_str());
         self.port_looks.iter().find(|(n, _)| n == name).map(|(_, l)| l.clone()).unwrap_or_default()
     }
 }
 
-/// A name that lives as long as the program, kept once however often it is asked for. Ports and
-/// node names are `&'static str`; names read from files come through here.
+/// The ports a node grows as it is wired: its `many` inputs, row after row, how many of them make
+/// a row, and the output each row has, if it has one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Many {
+    pub inputs: Vec<&'static str>,
+    pub per_row: usize,
+    pub outputs: Vec<&'static str>,
+}
+
+impl Many {
+    pub fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+}
+
 /// The most ports a `many = true` input grows to (an Audio match over one event's phones needs
 /// 50: Jiku GT_090912).
 pub const MANY_MAX: usize = 64;
+
+/// A name that lives as long as the program, kept once however often it is asked for. Ports and
+/// node names are `&'static str`; names read from files come through here.
 
 pub fn intern(s: &str) -> &'static str {
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
@@ -483,7 +518,8 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
     let mut anchors: Vec<(String, String)> = Vec::new();
-    let mut many: Option<String> = None;
+    let mut many: Vec<String> = Vec::new();
+    let mut many_out: Option<String> = None;
     let mut sockets: Vec<Socket> = Vec::new();
     let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
@@ -540,8 +576,9 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             }
             match p.get("many") {
                 None | Some(toml::Value::Boolean(false)) => {}
-                Some(toml::Value::Boolean(true)) if k == "input" => many = Some(name.to_string()),
-                Some(_) => return Err(format!("[[{k}]] {name}: `many` goes on an input and is true or false")),
+                Some(toml::Value::Boolean(true)) if k == "input" => many.push(name.to_string()),
+                Some(toml::Value::Boolean(true)) => many_out = Some(name.to_string()),
+                Some(_) => return Err(format!("[[{k}]] {name}: `many` is true or false")),
             }
             let l = port_look(p, &format!("[[{k}]] {name}"))?;
             if l != PortLook::default() {
@@ -553,13 +590,17 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let inputs = ports("input", false)?;
     let outputs = ports("output", true)?;
-    if let Some(m) = &many {
-        if inputs.last().map(|p| p.name) != Some(m.as_str()) {
-            return Err(format!("[[input]] {m}: `many` goes on the last input only"));
+    let first = inputs.len().saturating_sub(many.len());
+    for (k, m) in many.iter().enumerate() {
+        if inputs.get(first + k).map(|p| p.name) != Some(m.as_str()) {
+            return Err(format!("[[input]] {m}: `many` goes on the last inputs only"));
         }
-        if inputs.last().is_some_and(|p| p.required) {
+        if inputs[first + k].required {
             return Err(format!("[[input]] {m}: a `many` input cannot be required"));
         }
+    }
+    if many_out.is_some() && many.is_empty() {
+        return Err("an [[output]] with `many` needs `many` inputs: it gives one port per row".into());
     }
     if let Some((t, a)) = anchors.iter().find(|(_, a)| !inputs.iter().any(|p| p.name == a)) {
         return Err(format!("[[input]] {t}: anchors \"{a}\", which is not an input"));
@@ -682,6 +723,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         port_looks,
         anchors,
         many,
+        many_out,
         script: None,
     })
 }
@@ -772,6 +814,21 @@ mod tests {
         assert!(e.contains("required"), "{e}");
     }
 
+    /// Several `many` inputs grow as rows, and a `many` output gives each row a port.
+    #[test]
+    fn many_inputs_grow_as_rows() {
+        let m = parse("id = \"a\"\nlabel = \"a\"\n[[input]]\nname = \"audio\"\nkind = \"audio\"\nmany = true\n[[input]]\nname = \"time\"\nkind = \"time\"\nmany = true\n[[output]]\nname = \"links\"\nkind = \"text\"\n[[output]]\nname = \"synced\"\nkind = \"time\"\nmany = true\ntint = \"#e9a84c\"").unwrap();
+        let s = m.spec();
+        assert_eq!(s.inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["audio 1", "time 1"]);
+        assert_eq!(s.outputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["links", "synced 1"]);
+        let r = m.many_rows();
+        assert_eq!((r.per_row, r.inputs.len(), r.outputs.len()), (2, 2 * MANY_MAX, MANY_MAX));
+        assert_eq!(&r.inputs[2..4], ["audio 2", "time 2"]);
+        assert_eq!(m.port_look("synced 7").tint, Some([0xe9, 0xa8, 0x4c]));
+        let e = parse("id = \"a\"\nlabel = \"a\"\n[[output]]\nname = \"x\"\nkind = \"time\"\nmany = true").unwrap_err();
+        assert!(e.contains("per row"), "{e}");
+    }
+
     /// Use cases on outputs: built ones are real outputs, planned and possible ones are ghost
     /// sockets (listed, not in the spec); a bad status or min_quality says so.
     #[test]
@@ -838,7 +895,8 @@ kind = "text"
             frame: FrameLook::default(),
             port_looks: vec![],
             anchors: vec![],
-            many: None,
+            many: vec![],
+            many_out: None,
             script: None,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];

@@ -171,6 +171,14 @@ impl App {
         let s = self.nodes[from].state.lock().unwrap();
         match (kind, &self.nodes[from].kind) {
             (_, Kind::Value { ty, rows }) => corroborate::modules::value::data(ty, rows),
+            (_, Kind::Time { .. }) => {
+                drop(s);
+                self.time_out(from)
+            }
+            (PortKind::Time, Kind::AudioMatch { .. }) => {
+                drop(s);
+                self.synced_time(from, out)
+            }
             (PortKind::Location, Kind::Sourcer { .. }) => crate::sourcer_node::location(&s.source),
             (PortKind::Location, _) => {
                 drop(s);
@@ -212,6 +220,8 @@ impl App {
     pub(crate) fn output_held(&self, i: NodeId, out: &str) -> Option<String> {
         match &self.nodes[i].kind {
             Kind::Enf { .. } => crate::enf_node::held(&*self.nodes[i].state.lock().ok()?, out),
+            Kind::AudioMatch { .. } if out.starts_with("synced ") => self.synced_time(i, out).err(),
+            Kind::Time { .. } => self.time_out(i).err(),
             _ => None,
         }
     }
