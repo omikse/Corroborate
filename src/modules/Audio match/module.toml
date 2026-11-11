@@ -4,9 +4,10 @@ category = "Detectors"
 order = 3
 role = "detector"
 
-# Each row is one recording: its audio and the time its metadata claims, "audio 1" and "time 1",
-# "audio 2" and "time 2", … Every pair of the wired recordings is matched. Files only for now: each
-# source's own decoded audio is taken once it ends, then all are matched at once.
+# Each row is one recording: its audio, the time its metadata says it starts ("time 1", drawn as
+# audio start time) and, optionally, when it ends ("end in 1", audio end time). Every pair of the
+# wired recordings is matched. Files only for now: each source's own decoded audio is taken once it
+# ends, then all are matched at once. The saved names stay as they were, so old wires hold.
 [[input]]
 name = "audio"
 kind = "audio"
@@ -14,6 +15,11 @@ many = true
 
 [[input]]
 name = "time"
+kind = "time"
+many = true
+
+[[input]]
+name = "end in"
 kind = "time"
 many = true
 
@@ -100,13 +106,19 @@ needs = ["audio", "audio 2"]
 when = "overlapping recordings, one paused or cut"
 min_quality = "weak"
 
-# One per row: the recording's better time. Nothing until its synced group has an anchor; then the
-# group's anchored time, with the anchor's error and the audio links' error.
+# Two per row: when the recording starts and ends ("synced 1" and "end 1", drawn as audio start
+# time and audio end time). Anchored: the group's anchored time, with the anchor's error and the
+# audio links' error. Unanchored: where the metadata (or a drag) puts the group, with the row's own
+# metadata error. The end is the start plus the length, or the wired end passed straight through.
 [[output]]
 name = "synced"
 kind = "time"
 many = true
-tint = "#e9a84c"
+
+[[output]]
+name = "end"
+kind = "time"
+many = true
 
 [look]
 status = false

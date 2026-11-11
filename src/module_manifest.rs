@@ -374,8 +374,9 @@ pub struct Manifest {
     /// The last inputs' names when they are `many = true`: they grow as they are wired ("in 1",
     /// "in 2", …), together, one row at a time, when there are several.
     pub many: Vec<String>,
-    /// The output `many = true`, which gives one port per row.
-    pub many_out: Option<String>,
+    /// The outputs `many = true`, the last outputs: each row has one port of each ("synced 1",
+    /// "end 1", "synced 2", …).
+    pub many_out: Vec<String>,
     /// Its look.rhai, if it has one.
     pub script: Option<String>,
 }
@@ -389,8 +390,10 @@ impl Manifest {
             p.name = intern(&format!("{base} 1"));
         }
         let mut outputs = self.outputs.clone();
-        if let Some(p) = outputs.iter_mut().find(|p| self.many_out.as_deref() == Some(p.name)) {
-            p.name = intern(&format!("{} 1", self.many_out.as_deref().unwrap_or_default()));
+        for p in outputs.iter_mut() {
+            if let Some(base) = self.many_out.iter().find(|b| b.as_str() == p.name) {
+                p.name = intern(&format!("{base} 1"));
+            }
         }
         NodeSpec { name: self.id, role: self.role, inputs, outputs }
     }
@@ -403,11 +406,8 @@ impl Manifest {
 
     /// How its ports grow; empty without a `many` input.
     pub fn many_rows(&self) -> Many {
-        let outputs = match &self.many_out {
-            Some(base) => (1..=MANY_MAX).map(|k| intern(&format!("{base} {k}"))).collect(),
-            None => Vec::new(),
-        };
-        Many { inputs: self.many_names(), per_row: self.many.len(), outputs }
+        let outputs = (1..=MANY_MAX).flat_map(|k| self.many_out.iter().map(move |base| intern(&format!("{base} {k}")))).collect();
+        Many { inputs: self.many_names(), per_row: self.many.len(), outputs, out_per_row: self.many_out.len() }
     }
 
     pub fn setting(&self, name: &str) -> Option<&Setting> {
@@ -421,8 +421,15 @@ impl Manifest {
 
     /// How port `name` looks, as module.toml says.
     pub fn port_look(&self, name: &str) -> PortLook {
-        // A `many` port ("in 3") looks like the port declared ("in").
-        let name = self.many.iter().chain(&self.many_out).find(|base| name.strip_prefix(base.as_str()).is_some_and(|r| r.starts_with(' '))).map_or(name, |b| b.as_str());
+        // A `many` port ("in 3") looks like the port declared ("in"); the longest base that fits
+        // ("end in 3" is "end in", not "end").
+        let name = self
+            .many
+            .iter()
+            .chain(&self.many_out)
+            .filter(|base| name.strip_prefix(base.as_str()).and_then(|r| r.strip_prefix(' ')).is_some_and(|r| r.parse::<usize>().is_ok()))
+            .max_by_key(|b| b.len())
+            .map_or(name, |b| b.as_str());
         self.port_looks.iter().find(|(n, _)| n == name).map(|(_, l)| l.clone()).unwrap_or_default()
     }
 }
@@ -433,7 +440,9 @@ impl Manifest {
 pub struct Many {
     pub inputs: Vec<&'static str>,
     pub per_row: usize,
+    /// One row's outputs after another ("synced 1", "end 1", "synced 2", …).
     pub outputs: Vec<&'static str>,
+    pub out_per_row: usize,
 }
 
 impl Many {
@@ -518,7 +527,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
     let mut anchors: Vec<(String, String)> = Vec::new();
     let mut many: Vec<String> = Vec::new();
-    let mut many_out: Option<String> = None;
+    let mut many_out: Vec<String> = Vec::new();
     let mut sockets: Vec<Socket> = Vec::new();
     let mut ports = |k: &str, req_default: bool| -> Result<Vec<Port>, String> {
         let mut v: Vec<Port> = Vec::new();
@@ -576,7 +585,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             match p.get("many") {
                 None | Some(toml::Value::Boolean(false)) => {}
                 Some(toml::Value::Boolean(true)) if k == "input" => many.push(name.to_string()),
-                Some(toml::Value::Boolean(true)) => many_out = Some(name.to_string()),
+                Some(toml::Value::Boolean(true)) => many_out.push(name.to_string()),
                 Some(_) => return Err(format!("[[{k}]] {name}: `many` is true or false")),
             }
             let l = port_look(p, &format!("[[{k}]] {name}"))?;
@@ -598,8 +607,14 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             return Err(format!("[[input]] {m}: a `many` input cannot be required"));
         }
     }
-    if many_out.is_some() && many.is_empty() {
+    if !many_out.is_empty() && many.is_empty() {
         return Err("an [[output]] with `many` needs `many` inputs: it gives one port per row".into());
+    }
+    let first_out = outputs.len().saturating_sub(many_out.len());
+    for (k, m) in many_out.iter().enumerate() {
+        if outputs.get(first_out + k).map(|p| p.name) != Some(m.as_str()) {
+            return Err(format!("[[output]] {m}: `many` goes on the last outputs only"));
+        }
     }
     if let Some((t, a)) = anchors.iter().find(|(_, a)| !inputs.iter().any(|p| p.name == a)) {
         return Err(format!("[[input]] {t}: anchors \"{a}\", which is not an input"));
@@ -821,7 +836,7 @@ mod tests {
         assert_eq!(s.inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["audio 1", "time 1"]);
         assert_eq!(s.outputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["links", "synced 1"]);
         let r = m.many_rows();
-        assert_eq!((r.per_row, r.inputs.len(), r.outputs.len()), (2, 2 * MANY_MAX, MANY_MAX));
+        assert_eq!((r.per_row, r.inputs.len(), r.outputs.len(), r.out_per_row), (2, 2 * MANY_MAX, MANY_MAX, 1));
         assert_eq!(&r.inputs[2..4], ["audio 2", "time 2"]);
         assert_eq!(m.port_look("synced 7").tint, Some([0xe9, 0xa8, 0x4c]));
         let e = parse("id = \"a\"\nlabel = \"a\"\n[[output]]\nname = \"x\"\nkind = \"time\"\nmany = true").unwrap_err();
@@ -895,7 +910,7 @@ kind = "text"
             port_looks: vec![],
             anchors: vec![],
             many: vec![],
-            many_out: None,
+            many_out: vec![],
             script: None,
         };
         let all = [m("b", "B", "Zeta", None), m("v", "Map", "View", None), m("s2", "Manual", "Sources", Some(2)), m("s1", "SOURCER", "Sources", Some(1)), m("a", "A", "Checks", None)];

@@ -101,6 +101,10 @@ Each stage is tested, committed and run before the next starts.
 
 Only `src/modules/Audio match/node.rs` and its tests.
 
+Done 2026-11-11. Beyond the node: a row of growing ports may now have several outputs
+(`many = true` on more than one `[[output]]`, the last ones), so `graph.rs` and
+`module_manifest.rs` changed too; port hovers show the titles.
+
 1. Renames and labels:
    - View all;
    - a legend in the top bar, after the row height slider;

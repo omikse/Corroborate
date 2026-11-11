@@ -310,8 +310,9 @@ fn audio_match_links_two_recordings() {
     let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(460.0, 120.0));
     app.wire_many(a, "audio", m);
     app.wire_many(b, "audio", m);
-    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 6, "rows of audio and time: two wired and one free");
-    assert_eq!(app.graph.nodes()[m].spec.outputs.iter().filter(|p| p.name.starts_with("synced")).count(), 3, "a yellow output per row");
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 9, "rows of audio, start time and end time: two wired and one free");
+    assert_eq!(app.graph.nodes()[m].spec.outputs.iter().filter(|p| p.name.starts_with("synced")).count(), 3, "a start time output per row");
+    assert_eq!(app.graph.nodes()[m].spec.outputs.iter().filter(|p| p.name.starts_with("end ")).count(), 3, "an end time output per row");
     app.wire_many(c, "audio", m);
     app.run();
     assert!(d.wait_until(30.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
@@ -326,12 +327,50 @@ fn audio_match_links_two_recordings() {
     assert!(wired.iter().all(|r| r.start.is_some() && r.meta.is_none()), "{wired:?}");
     assert_eq!(view.groups.iter().filter(|g| g.number > 0).count(), 1, "one synced group");
     assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Plain("no time metadata".into()));
-    assert!(d.app().value_from(m, "synced 2").is_err(), "no anchor: nothing comes out");
+    assert!(d.app().value_from(m, "synced 2").is_err(), "no time metadata in the group: nothing comes out");
     assert!(d.app().output_held(m, "synced 2").is_some(), "greyed");
-    // A time on row 1, then the group anchored on it: every recording of the group has real time.
+    // A time on row 1: unanchored, the group is placed by its metadata and its times come out.
     let v = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01T00:16:40Z".into()), ("error_s".into(), "2".into())] }, Pos2::new(30.0, 800.0));
     d.app().wire(v, "value", m, "time 1");
+    d.frames(3);
+    let Ok(Data::Time { utc: Some(free_b), source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no unanchored time out of row 2") };
+    assert!((free_b - 1020.5).abs() < 0.01 && source.contains("average of metadata"), "{free_b} {source}");
+    let len_b = d.app().match_view(m).rows[1].len;
+    let Ok(Data::Time { utc: Some(end_b), .. }) = d.app().value_from(m, "end 2") else { panic!("no end time out of row 2") };
+    assert!((end_b - free_b - len_b).abs() < 1e-6, "the end is the start plus the length");
+    d.shot("audio_match_unanchored");
+
+    // A drag on row 1's amber bar moves the group: saved with the project, logged, undone.
+    d.wait(0.5);
+    let track = d.app().match_ui.tracks.last().copied().unwrap();
+    let y = d.app().match_ui.anchor_at[&(m, 0)].center().y;
+    let bar_x = {
+        let v = d.app().match_view(m);
+        let bars: Vec<(f64, f64)> = v.rows.iter().flat_map(|r| [r.meta.map(|t| (t, t + r.len)), r.start.map(|t| (t, t + r.len))]).flatten().collect();
+        let (lo, hi) = crate::audio_match_node::fit_axis(&bars);
+        let r = &v.rows[0];
+        track.left() + (((r.start.unwrap() + r.len / 2.0 - lo) / (hi - lo)) as f32) * track.width()
+    };
+    let logged = d.app().changes.len();
+    d.drag(Pos2::new(bar_x, y), Pos2::new(bar_x + 60.0, y));
     d.frames(2);
+    let Ok(Data::Time { utc: Some(moved_b), source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after the drag") };
+    assert!(moved_b > free_b + 1.0 && source.contains("moved by hand"), "the output moved: {free_b} -> {moved_b} {source}");
+    assert_eq!(d.app().changes.len(), logged + 1, "the drag is logged");
+    assert!(d.app().changes.last().unwrap().name.starts_with("drag of the group"));
+    let text = d.app().project_text();
+    assert!(text.contains("shift "), "kept with the project");
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    assert!(back.nodes[m].kind.rows().iter().any(|(k, v)| k.starts_with("shift ") && v.parse::<f64>().is_ok_and(|s| s > 1.0)), "and read back");
+    d.shot("audio_match_dragged");
+    d.wait(0.5);
+    d.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    d.frames(3);
+    let Ok(Data::Time { utc: Some(undone_b), .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after undo") };
+    assert!((undone_b - free_b).abs() < 0.01, "Ctrl+Z puts the group back: {undone_b}");
+
+    // The group anchored on row 1's time: every recording of the group has real time.
     let ub = uid(d.app(), b);
     assert_ne!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "a time on a row is a claim only");
     d.app().toggle_anchor(m, 0);
@@ -345,7 +384,31 @@ fn audio_match_links_two_recordings() {
     let view = d.app().match_view(m);
     assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Anchor);
     assert!(d.app().project_text().contains(&format!("anchor {}", uid(d.app(), a))), "kept with the project");
+    // Row 2's metadata 2.5 s later than audio puts it, row 3's 2 s earlier: the Status cell is
+    // split at zero, later filling the right half, earlier the left.
+    let t2 = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01T00:17:03Z".into()), ("error_s".into(), "1".into())] }, Pos2::new(30.0, 900.0));
+    d.app().wire(t2, "value", m, "time 2");
+    let t3 = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01T00:16:38Z".into()), ("error_s".into(), "1".into())] }, Pos2::new(30.0, 1000.0));
+    d.app().wire(t3, "value", m, "time 3");
+    d.frames(3);
+    let view = d.app().match_view(m);
+    let off = |k: usize| match crate::audio_match_node::cell(&view, k).0 {
+        crate::audio_match_node::Cell::Off(d, _) => d,
+        c => panic!("row {}: {c:?}", k + 1),
+    };
+    assert!((off(1) - 2.5).abs() < 0.01 && (off(2) + 2.0).abs() < 0.01, "{} {}", off(1), off(2));
     d.shot("audio_match_anchored");
+    // The Order menu: open, then by how far off.
+    d.click_contains("Order:");
+    d.frames(2);
+    d.shot("audio_match_order_menu");
+    d.click("Group › how far off");
+    d.frames(2);
+    assert!(d.app().nodes[m].kind.rows().iter().any(|(k, v)| k == "order" && v == "group-off"), "the order is kept");
+    assert_eq!(d.app().match_ui.slots[&m][..3], [0, 2, 1], "the anchor, then 2 s off, then 2.5 s off");
+    d.shot("audio_match_by_how_far_off");
+    d.app().graph.disconnect(m, "time 2");
+    d.app().graph.disconnect(m, "time 3");
     d.app().toggle_anchor(m, 0);
     d.app().graph.disconnect(m, "time 1");
     d.app().sync_many_ports();
@@ -434,7 +497,7 @@ fn dropping_audio_on_a_row_draws_its_time_wire() {
     let app = d.app();
     assert_eq!(app.graph.feeder(m, "audio 1"), Some((s, "audio")), "{}", app.msg);
     assert_eq!(app.graph.feeder(m, "time 1"), Some((s, "time")));
-    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 4, "and a free row");
+    assert_eq!(app.graph.nodes()[m].spec.inputs.len(), 6, "and a free row (audio, start time, end time)");
     let (a, t) = (app.port_place(o, m, 0, false).0, app.port_place(o, m, 1, false).0);
     assert!(a.y < t.y && (a.x - t.x).abs() < 0.01, "audio above time: {a:?} {t:?}");
 }
@@ -975,9 +1038,10 @@ fn audio_match_timeline() {
     assert_eq!(v.rows.iter().filter(|x| x.start.is_some()).count(), 12, "every row has its audio position");
     assert_eq!(v.groups.iter().filter(|g| g.number > 0).count(), 1, "one synced group");
     d.shot("am_3_after_the_match");
-    assert!(d.app().value_from(m, "synced 1").is_err(), "no anchor: nothing comes out");
+    let Ok(Data::Time { source, .. }) = d.app().value_from(m, "synced 1") else { panic!("unanchored: a time all the same") };
+    assert!(source.contains("unanchored"), "{source}");
 
-    // A drag on an amber bar moves the group and changes no data.
+    // A drag on an amber bar moves the group (saved in the node) and changes no evidence.
     let track = d.app().match_ui.tracks[0];
     let k = v.rows.iter().position(|r| r.meta.is_some()).expect("a row with a time");
     let on = d.app().match_ui.anchor_at[&(m, k)];

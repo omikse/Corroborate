@@ -178,7 +178,7 @@ impl Graph {
     /// Pack node `id`'s `many` input (its last inputs, named `names` in order): its wired ports
     /// first, in order, then one free port, at most `names.len()`. Other inputs stay as they are.
     pub fn pack_many(&mut self, id: NodeId, names: &[&'static str]) {
-        self.pack_rows(id, &Many { inputs: names.to_vec(), per_row: 1, outputs: Vec::new() });
+        self.pack_rows(id, &Many { inputs: names.to_vec(), per_row: 1, outputs: Vec::new(), out_per_row: 0 });
     }
 
     /// Where node `id`'s growing ports start: its first `many` input and its first per-row output.
@@ -197,8 +197,8 @@ impl Graph {
         let mut inputs = spec.inputs[..fixed].to_vec();
         inputs.extend(m.inputs[..rows * w].iter().enumerate().map(|(k, s)| Port::opt(s, spec.inputs.get(fixed + k % w).map_or(PortKind::Any, |p| p.kind))));
         let mut outputs = spec.outputs[..fixed_out].to_vec();
-        let kind = spec.outputs.get(fixed_out).map_or(PortKind::Any, |p| p.kind);
-        outputs.extend(m.outputs[..rows.min(m.outputs.len())].iter().map(|s| Port::req(s, kind)));
+        let ow = m.out_per_row.max(1);
+        outputs.extend(m.outputs[..(rows * ow).min(m.outputs.len())].iter().enumerate().map(|(k, s)| Port::req(s, spec.outputs.get(fixed_out + k % ow).map_or(PortKind::Any, |p| p.kind))));
         Some((inputs, outputs))
     }
 
@@ -207,6 +207,7 @@ impl Graph {
     pub fn pack_rows(&mut self, id: NodeId, m: &Many) {
         let Some((fixed, fixed_out)) = self.many_start(id, m) else { return };
         let w = m.per_row.max(1);
+        let ow = m.out_per_row.max(1);
         let max_rows = m.inputs.len() / w;
         let has_out = !m.outputs.is_empty();
         let mut used: Vec<usize> = self
@@ -216,7 +217,7 @@ impl Graph {
                 if x.to == id && x.to_port >= fixed {
                     Some((x.to_port - fixed) / w)
                 } else if has_out && x.from == id && x.from_port >= fixed_out {
-                    Some(x.from_port - fixed_out)
+                    Some((x.from_port - fixed_out) / ow)
                 } else {
                     None
                 }
@@ -231,8 +232,8 @@ impl Graph {
                 x.to_port = fixed + slot * w + (x.to_port - fixed) % w;
             }
             if has_out && x.from == id && x.from_port >= fixed_out {
-                let Ok(slot) = used.binary_search(&(x.from_port - fixed_out)) else { return false };
-                x.from_port = fixed_out + slot;
+                let Ok(slot) = used.binary_search(&((x.from_port - fixed_out) / ow)) else { return false };
+                x.from_port = fixed_out + slot * ow + (x.from_port - fixed_out) % ow;
             }
             true
         });
@@ -247,7 +248,7 @@ impl Graph {
     /// in, so a wire saved by name can go back. `pack_rows` closes any gap afterwards.
     pub fn grow_to(&mut self, id: NodeId, m: &Many, name: &str, out: bool) {
         let w = m.per_row.max(1);
-        let row = if out { m.outputs.iter().position(|s| *s == name) } else { m.inputs.iter().position(|s| *s == name).map(|k| k / w) };
+        let row = if out { m.outputs.iter().position(|s| *s == name).map(|k| k / m.out_per_row.max(1)) } else { m.inputs.iter().position(|s| *s == name).map(|k| k / w) };
         let Some(row) = row else { return };
         let Some((fixed, _)) = self.many_start(id, m) else { return };
         let have = (self.nodes[id].spec.inputs.len() - fixed) / w;
@@ -479,7 +480,7 @@ mod tests {
     /// the wire out of its output, all move up.
     #[test]
     fn rows_of_ports_move_together() {
-        let m = Many { inputs: vec!["audio 1", "time 1", "audio 2", "time 2", "audio 3", "time 3"], per_row: 2, outputs: vec!["out 1", "out 2", "out 3"] };
+        let m = Many { inputs: vec!["audio 1", "time 1", "audio 2", "time 2", "audio 3", "time 3"], per_row: 2, outputs: vec!["out 1", "out 2", "out 3"], out_per_row: 1 };
         let mut g = Graph::new();
         let f = g.add("file", source());
         let n = g.add("match", NodeSpec { name: "m", role: Role::Detector, inputs: vec![Port::opt("audio 1", PortKind::Audio), Port::opt("time 1", PortKind::Time)], outputs: vec![Port::req("links", PortKind::Event), Port::req("out 1", PortKind::Time)] });

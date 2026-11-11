@@ -513,7 +513,7 @@ fn clean_up_lays_out_the_nodes_by_their_wires() {
         assert!(app.nodes[w.from].pos.x < app.nodes[w.to].pos.x, "wires run left to right: {w:?}");
     }
     for k in 0..4 {
-        let (a, b) = (app.port_place(o, m, 2 * k, false).0.y, app.port_place(o, m, 2 * (k + 1), false).0.y);
+        let (a, b) = (app.port_place(o, m, 3 * k, false).0.y, app.port_place(o, m, 3 * (k + 1), false).0.y);
         assert!(a < b, "rows top to bottom");
         assert!(app.nodes[srcs[k]].pos.y < app.nodes[srcs[k + 1]].pos.y, "the sources are in the order of the rows: {k}");
     }
@@ -562,7 +562,7 @@ fn clean_up_knows_the_size_of_nodes_off_screen() {
     }
 }
 
-/// Audio match's top bar and thin rows: Scale to all fits once, its circle makes it live; the row
+/// Audio match's top bar and thin rows: View all fits once, its circle makes it live; the row
 /// height slider is one size at any canvas zoom; the thinnest row is its name with both ports
 /// still apart.
 #[test]
@@ -585,13 +585,13 @@ fn audio_match_scale_slider_and_thin_rows() {
     }
 
     assert!(!d.app().match_ui.views.contains_key(&m), "live at first");
-    d.click("Scale to all");
+    d.click("View all");
     assert!(!d.app().match_ui.views.contains_key(&m), "pressing it while live leaves it live");
     d.click("live");
     let held = d.app().match_ui.views.get(&m).copied().expect("the circle stops live");
     d.app().match_ui.views.insert(m, (held.0 - 500.0, held.1 + 900.0));
     d.frames(2);
-    d.click("Scale to all");
+    d.click("View all");
     let fitted = d.app().match_ui.views.get(&m).copied().expect("a fit once, not live");
     assert!(fitted.1 - fitted.0 < held.1 - held.0 + 1.0, "{fitted:?}");
     d.click("live");

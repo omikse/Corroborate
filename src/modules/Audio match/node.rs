@@ -9,14 +9,17 @@
 //! from there like any link output. Files only for now: a stream or microphone wired in is named in
 //! the status and left out. Compiled into the `corroborate` program.
 //!
-//! On the node, one row per recording: blue is where its time input puts it, amber where audio puts
-//! it. Recordings linked by audio are a synced group, which exists only here. Audio says only how a
-//! group's recordings lie against each other, so until the group has an anchor its amber bars are
-//! merely shown with the middle of the bars on the middle of its blue ones, and the person may drag
-//! them; nothing comes out. A person picks one row's time as the group's anchor: the audio's start
-//! snaps to it, every other row keeps its real offset, and the group's times leave on the yellow
-//! outputs through the clock solve. Nothing is ever hidden or left out for being far off: a time 200
-//! years away stays in view until a person corrects it in a Time node.
+//! On the node, one row per recording: blue is where its time input (audio start time) puts it,
+//! amber where audio puts it. Recordings linked by audio are a synced group, which exists only here.
+//! Audio says only how a group's recordings lie against each other, so until the group has an
+//! anchor its amber bars are shown with the middle of the bars on the middle of its blue ones, and
+//! the person may drag them (saved with the project, logged); those times come out marked "?". A
+//! person picks one row's time as the group's anchor: the audio's start snaps to it, every other row
+//! keeps its real offset, and the group's times leave through the clock solve, marked with an
+//! anchor. Each row gives its audio start time and audio end time (start + length, or its optional
+//! end input passed straight through). A row with no time metadata that audio linked to nothing has
+//! nothing to place it by: it is greyed out and gives nothing. Nothing is ever hidden or left out
+//! for being far off: a time 200 years away stays in view until a person corrects it in a Time node.
 
 use super::*;
 use corroborate::audio_match::{self, Clip, Placed};
@@ -69,6 +72,9 @@ pub struct Row {
     /// The time input is wired to a Time node that has an error, and the error.
     pub time_err: Option<String>,
     pub time_wired: bool,
+    /// Its optional end input (audio end time) is wired, and what it says.
+    pub end_wired: bool,
+    pub end_in: Option<f64>,
     /// Where audio puts its start (shown after a match), and how far from there the time input is.
     pub start: Option<f64>,
     pub off: Option<f64>,
@@ -91,6 +97,8 @@ pub struct Group {
     pub rows: Vec<usize>,
     /// The row holding its anchor.
     pub anchor: Option<usize>,
+    /// Unanchored, and dragged by hand away from where its metadata puts it.
+    pub moved: bool,
 }
 
 /// What a node's rows are this frame.
@@ -119,6 +127,43 @@ const HINT_S: f64 = 5.0;
 /// A node's saved rows: which row holds an anchor is kept by the recording's id.
 fn anchor_key(uid: &str) -> String {
     format!("anchor {uid}")
+}
+
+/// A node's saved rows: how far an unanchored group was dragged, kept by the group's key.
+fn shift_key(group: &str) -> String {
+    format!("shift {group}")
+}
+
+/// Sets saved row `k` to `val`, adding it when missing.
+fn set_row(rows: &mut Vec<(String, String)>, k: &str, val: String) {
+    match rows.iter_mut().find(|(q, _)| q == k) {
+        Some((_, x)) => *x = val,
+        None => rows.push((k.to_string(), val)),
+    }
+}
+
+/// How far group `group` of a node of kind `kind` was dragged, seconds.
+fn saved_shift(kind: &Kind, group: &str) -> f64 {
+    let k = shift_key(group);
+    kind.rows().iter().find(|(q, _)| *q == k).and_then(|(_, v)| v.parse().ok()).unwrap_or(0.0)
+}
+
+/// How many inputs make a row: audio, audio start time ("time n"), audio end time ("end in n").
+const PER_ROW: usize = 3;
+
+/// What a port is called on the node and in its hover; the saved names stay as they were, so old
+/// wires hold.
+pub(crate) fn port_title(name: &str) -> Option<String> {
+    let (base, n) = name.rsplit_once(' ')?;
+    n.parse::<usize>().ok()?;
+    let t = match base {
+        "audio" => "audio",
+        "time" | "synced" => "audio start time",
+        "end in" => "audio end time (optional)",
+        "end" => "audio end time",
+        _ => return None,
+    };
+    Some(format!("{t}, row {n}"))
 }
 
 /// The middle of a recording.
@@ -161,9 +206,9 @@ impl App {
         let spec = &self.graph.nodes()[i].spec;
         let mut rows: Vec<Row> = Vec::new();
         let mut file_k = 0;
-        for (k, pair) in spec.inputs.chunks(2).enumerate() {
+        for (k, ports) in spec.inputs.chunks(PER_ROW).enumerate() {
             let mut r = Row { n: k + 1, ..Default::default() };
-            let [audio, time] = pair else { continue };
+            let (Some(audio), Some(time)) = (ports.first(), ports.get(1)) else { continue };
             if let Some((f, _)) = self.graph.feeder(i, audio.name) {
                 let path = self.source_file(f);
                 r.name = row_name(&self.nodes[f].label, path.as_deref());
@@ -185,6 +230,13 @@ impl App {
                     Ok(_) => {}
                     Err(e) if matches!(self.nodes[f].kind, Kind::Time { .. }) => r.time_err = Some(e),
                     Err(_) => {}
+                }
+            }
+            if let Some((f, o)) = ports.get(2).and_then(|e| self.graph.feeder(i, e.name)) {
+                r.end_wired = true;
+                r.wired = true;
+                if let Ok(Data::Time { utc: Some(u), .. }) = self.value_from(f, o) {
+                    r.end_in = Some(u);
                 }
             }
             rows.push(r);
@@ -233,7 +285,10 @@ impl App {
             }
             g.anchor = g.rows.iter().copied().find(|&k| rows[k].meta.is_some() && rows[k].uid.as_deref().is_some_and(|u| saved.contains(u)));
         }
-        let shift_of = |g: &Group| self.match_ui.shift.get(&(i, g.key.clone())).copied().unwrap_or(0.0);
+        let shift_of = |g: &Group| saved_shift(&self.nodes[i].kind, &g.key);
+        for g in &mut groups {
+            g.moved = g.anchor.is_none() && shift_of(g) != 0.0;
+        }
         let real = rows.iter().any(|r| r.meta.is_some());
         // The middle of every time there is: where a group with no time at all is shown.
         let all_mids: Vec<f64> = rows.iter().filter_map(|r| r.meta.map(|t| mid(t, r.len))).collect();
@@ -297,16 +352,58 @@ impl App {
             .collect()
     }
 
-    /// The better time on output `out` ("synced 3"): none until its group has an anchor.
+    /// The better time on output `out`: "synced 3" is row 3's audio start time, "end 3" its audio
+    /// end time. Anchored, through the clock solve; unanchored, where the group's metadata (or a
+    /// drag) puts it, with the row's own metadata error. The end is the start plus the length, or
+    /// the row's end input passed straight through when wired.
     pub(crate) fn synced_time(&self, i: NodeId, out: &str) -> Result<Data, String> {
-        let n: usize = out.strip_prefix("synced ").and_then(|n| n.parse().ok()).ok_or("no such output")?;
+        let (end, n) = match (out.strip_prefix("synced "), out.strip_prefix("end ")) {
+            (Some(n), _) => (false, n),
+            (_, Some(n)) => (true, n),
+            _ => return Err("no such output".into()),
+        };
+        let n: usize = n.parse().map_err(|_| "no such output")?;
+        if end {
+            if let Some((f, o)) = self.graph.feeder(i, &format!("end in {n}")) {
+                return self.value_from(f, o);
+            }
+        }
         let v = self.match_view(i);
         let r = v.rows.get(n - 1).ok_or("no such row")?;
+        if cell(&v, n - 1).1 {
+            return Err("no time metadata, and audio linked it to nothing: nothing to place it by".into());
+        }
         let clock = r.clock.clone().ok_or("no audio wired into this row")?;
         let g = &v.groups[r.group];
-        let a = g.anchor.ok_or("its synced group has no anchor")?;
-        let (utc, error_s) = self.ev.clocks.to_utc(&clock, 0.0).ok_or("its synced group has no anchor")?;
-        Ok(Data::Time { clock, t: 0.0, utc: Some(utc), error_s, source: format!("Audio match, anchored on the time of {}", v.rows[a].name) })
+        let (utc, error_s, source) = match g.anchor {
+            Some(a) => {
+                let (utc, e) = self.ev.clocks.to_utc(&clock, 0.0).ok_or("its synced group's anchor is not in the clock solve")?;
+                (utc, e, format!("Audio match, anchored on the time of {}", v.rows[a].name))
+            }
+            None => {
+                let at = r.start.ok_or(if v.done { "audio did not place it" } else { "not matched yet: run the graph" })?;
+                let errs: Vec<f64> = g.rows.iter().filter(|&&k| v.rows[k].meta.is_some()).map(|&k| v.rows[k].meta_err).collect();
+                if errs.is_empty() {
+                    return Err("no time metadata in its synced group: nothing to place it by".into());
+                }
+                // A row with no metadata of its own takes the group's largest error.
+                let e = if r.meta.is_some() { r.meta_err } else { errs.iter().copied().fold(0.0, f64::max) };
+                let how = if g.moved { "moved by hand" } else { "average of metadata" };
+                (at, e, format!("Audio match, unanchored: {how}"))
+            }
+        };
+        Ok(if end {
+            Data::Time { clock, t: r.len, utc: Some(utc + r.len), error_s, source: format!("{source}, plus its length {:.3} s", r.len) }
+        } else {
+            Data::Time { clock, t: 0.0, utc: Some(utc), error_s, source }
+        })
+    }
+
+    /// Whether row `k`'s outputs are anchored (Some(true)), unanchored (Some(false)), or give
+    /// nothing (None).
+    fn output_mark(&self, i: NodeId, v: &MatchView, k: usize) -> Option<bool> {
+        self.synced_time(i, &format!("synced {}", k + 1)).ok()?;
+        Some(v.groups[v.rows[k].group].anchor.is_some())
     }
 
     /// Row `row` becomes its group's anchor, or stops being it. Kept by the recording, so it stays
@@ -376,8 +473,8 @@ impl App {
         let inputs = self.graph.nodes()[i].spec.inputs.clone();
         let origin = self.nodes[i].pos;
         let mut made = 0.0;
-        for pair in inputs.chunks(2) {
-            let [audio, time] = pair else { continue };
+        for ports in inputs.chunks(PER_ROW) {
+            let (Some(audio), Some(time)) = (ports.first(), ports.get(1)) else { continue };
             let Some((f, _)) = self.graph.feeder(i, audio.name) else { continue };
             if !matches!(self.nodes[f].kind, Kind::Sourcer { .. }) {
                 continue;
@@ -785,8 +882,9 @@ pub fn json(app: &App, i: NodeId) -> String {
         .map(|r| {
             let meta = r.meta.map_or("null".to_string(), |t| format!("\"{}\"", timebase::fmt_utc(t)));
             let synced = app.synced_time(i, &format!("synced {}", r.n)).map_or("null".to_string(), |d| d.to_json());
+            let end = app.synced_time(i, &format!("end {}", r.n)).map_or("null".to_string(), |d| d.to_json());
             let g = &v.groups[r.group];
-            format!("{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"synced\":{synced}}}", r.n, json_escape(&r.name), g.number, g.anchor == Some(r.n - 1))
+            format!("{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"synced\":{synced},\"end\":{end}}}", r.n, json_escape(&r.name), g.number, g.anchor == Some(r.n - 1))
         })
         .collect();
     format!(",\"outputs\":{{{}}},\"rows\":[{}]", outs.join(","), rows.join(","))
@@ -797,14 +895,13 @@ pub fn json(app: &App, i: NodeId) -> String {
 /// What the rows keep between frames.
 #[derive(Default)]
 pub struct MatchUi {
-    /// Axes moved by hand, by node. None: Scale to all is live, the axis follows the bars.
+    /// Axes moved by hand, by node. None: View all is live, the axis follows the bars.
     pub views: HashMap<NodeId, (f64, f64)>,
     /// The tracks on screen: the wheel over one is not the canvas's.
     pub tracks: Vec<Rect>,
-    /// How far each unanchored group was dragged, by node and group. It changes no data.
-    pub shift: HashMap<(NodeId, String), f64>,
-    /// The group being dragged and the axis held still meanwhile.
-    grab: Option<(NodeId, String, (f64, f64))>,
+    /// The group being dragged, the axis held still meanwhile, and how far the group had been
+    /// dragged before (a drag is kept in the node's rows, `shift <group>`, and logged when it ends).
+    grab: Option<(NodeId, String, (f64, f64), f64)>,
     /// Which row is drawn where (row → place), by node, as last drawn (Audio match and Timeline).
     pub slots: HashMap<NodeId, Vec<usize>>,
     /// Who was in each anchored group at the last result, by node and anchor; who has left it since.
@@ -831,6 +928,9 @@ const ROW_DEFAULT: f32 = 64.0;
 const ROW_MIN: f32 = STRIP_H + 2.0;
 const ROW_MAX: f32 = 96.0;
 const STRIP_H: f32 = 20.0;
+/// The thin stripe under a row's audio start time: its optional audio end time input. A row is
+/// its height plus this.
+const END_H: f32 = 12.0;
 /// With ports at least this tall, "audio" and "time" are written on them.
 const WORDS_FROM: f32 = 14.0;
 /// With ports shorter than this, the anchor button moves up beside the file name.
@@ -841,8 +941,11 @@ const EDGE: f32 = 6.0;
 const AMBER: Color32 = Color32::from_rgb(233, 168, 76);
 const BLUE: Color32 = Color32::from_rgb(125, 180, 230);
 const BOTH: Color32 = Color32::from_rgb(246, 236, 217);
-const ANCHOR_BLUE: Color32 = Color32::from_rgb(34, 89, 143);
 const OFF: Color32 = Color32::from_rgb(65, 70, 78);
+/// The end input's stripe while nothing is wired into it.
+const OPT: Color32 = Color32::from_rgb(51, 55, 62);
+/// A time output, blue like every time port.
+const TIME_OUT: Color32 = Color32::from_rgb(122, 167, 224);
 const STRIP: Color32 = Color32::from_rgb(53, 58, 66);
 const TRACK: Color32 = Color32::from_rgb(29, 32, 37);
 const INK: Color32 = Color32::from_rgb(16, 18, 20);
@@ -869,8 +972,71 @@ fn row_height(kind: &Kind) -> f32 {
     kind.rows().iter().find(|(k, _)| k == "row height").and_then(|(_, v)| v.parse().ok()).unwrap_or(ROW_DEFAULT).clamp(ROW_MIN, ROW_MAX)
 }
 
-fn by_group(kind: &Kind) -> bool {
-    kind.rows().iter().any(|(k, v)| k == "order by group" && v == "true")
+/// The order the rows are drawn in; the free row is always last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// By group, then rows with time metadata before those without, then by start.
+    GroupMetaStart,
+    /// By start, then by group.
+    StartGroup,
+    /// By group, then by how far the metadata is from audio, nearest first.
+    GroupOff,
+    /// As wired.
+    Wired,
+}
+
+impl Order {
+    pub const ALL: [Order; 4] = [Order::GroupMetaStart, Order::StartGroup, Order::GroupOff, Order::Wired];
+
+    /// As saved in the node's rows (`order`).
+    fn key(self) -> &'static str {
+        match self {
+            Order::GroupMetaStart => "group-meta-start",
+            Order::StartGroup => "start-group",
+            Order::GroupOff => "group-off",
+            Order::Wired => "wired",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Order::GroupMetaStart => "Group › metadata › start",
+            Order::StartGroup => "Start › group",
+            Order::GroupOff => "Group › how far off",
+            Order::Wired => "As wired",
+        }
+    }
+}
+
+/// The node's order; a project saved with `order by group = true` reads as group, metadata, start.
+fn order_of(kind: &Kind) -> Order {
+    let rows = kind.rows();
+    if let Some((_, v)) = rows.iter().find(|(k, _)| k == "order") {
+        return Order::ALL.into_iter().find(|o| o.key() == v).unwrap_or(Order::Wired);
+    }
+    if rows.iter().any(|(k, v)| k == "order by group" && v == "true") { Order::GroupMetaStart } else { Order::Wired }
+}
+
+/// The rows in the order they are drawn: row indices, top to bottom.
+pub fn sorted(v: &MatchView, order: Order) -> Vec<usize> {
+    let group = |k: usize| match v.groups[v.rows[k].group].number {
+        0 => usize::MAX,
+        n => n,
+    };
+    let start = |k: usize| v.rows[k].start.or(v.rows[k].meta).unwrap_or(f64::MAX);
+    let off = |k: usize| v.rows[k].off.map_or(f64::MAX, f64::abs);
+    let no_meta = |k: usize| v.rows[k].meta.is_none();
+    let mut o: Vec<usize> = (0..v.rows.len()).collect();
+    o.sort_by(|&a, &b| {
+        let by = match order {
+            Order::GroupMetaStart => group(a).cmp(&group(b)).then(no_meta(a).cmp(&no_meta(b))).then(start(a).total_cmp(&start(b))),
+            Order::StartGroup => start(a).total_cmp(&start(b)).then(group(a).cmp(&group(b))),
+            Order::GroupOff => group(a).cmp(&group(b)).then(off(a).total_cmp(&off(b))),
+            Order::Wired => std::cmp::Ordering::Equal,
+        };
+        (!v.rows[a].wired).cmp(&!v.rows[b].wired).then(by).then(a.cmp(&b))
+    });
+    o
 }
 
 /// Where a row's parts are, unzoomed from the top of its place.
@@ -883,10 +1049,10 @@ fn geom(rh: f32) -> RowGeom {
     RowGeom { strip: STRIP_H, half: ((rh - 2.0 - STRIP_H) / 2.0).max(0.0) }
 }
 
-/// "Scale to all": a click fits the axis to every bar. The circle inside it turns live on and off:
+/// "View all": a click fits the axis to every bar. The circle inside it turns live on and off:
 /// while live, the axis follows the bars. Returns (the button was pressed, the circle was).
 pub(crate) fn scale_button(ui: &mut egui::Ui, id: NodeId, rect: Rect, z: f32, live: bool) -> (bool, bool) {
-    const LABEL: &str = "Scale to all";
+    const LABEL: &str = "View all";
     let centre = Pos2::new(rect.right() - 11.0 * z, rect.center().y);
     let dot = Rect::from_center_size(centre, Vec2::splat(18.0 * z));
     let main = ui.interact(rect, egui::Id::new(("scale-to-all", id)), Sense::click());
@@ -929,7 +1095,7 @@ pub(crate) fn row_slider(ui: &mut egui::Ui, at: Pos2, z: f32, value: &mut f32, r
 }
 
 fn place_y(slot: usize, rh: f32) -> f32 {
-    TOP + BAR_H + RULER_H + slot as f32 * rh
+    TOP + BAR_H + RULER_H + slot as f32 * (rh + END_H)
 }
 
 /// `+12 years`, `-3 min`, `+40.2 s`.
@@ -1025,7 +1191,11 @@ pub fn cell(v: &MatchView, k: usize) -> (Cell, bool) {
     }
     let linked = g.rows.iter().filter(|&&q| v.rows[q].uid.is_some()).count() >= 2;
     if !linked {
-        return (Cell::Plain("no links found".into()), r.meta.is_none());
+        // Nothing to place it by: greyed, and it gives nothing.
+        return match r.meta {
+            Some(_) => (Cell::Plain("no links found".into()), false),
+            None => (Cell::Plain("no links found\nno time metadata".into()), true),
+        };
     }
     if r.lost && g.anchor.is_none() {
         return (Cell::Plain("lost its anchor".into()), false);
@@ -1145,7 +1315,7 @@ pub struct Look;
 
 impl crate::look::NodeLook for Look {
     fn size(&self, app: &App, i: NodeId, _standard: Vec2) -> Vec2 {
-        let n = app.graph.nodes()[i].spec.inputs.len() / 2;
+        let n = app.graph.nodes()[i].spec.inputs.len() / PER_ROW;
         Vec2::new(NODE_W, place_y(n, row_height(&app.nodes[i].kind)) + FOOT_H + 6.0)
     }
 
@@ -1169,8 +1339,17 @@ impl crate::look::NodeLook for Look {
         if let Some(n) = number("time ") {
             return at(Side::Left, row(n) + lead + room * 0.75);
         }
+        // The thin stripe under the start time.
+        if let Some(n) = number("end in ") {
+            let small = PortLook { dot_size: Some(dot.min(4.0)), ..Default::default() };
+            return at(Side::Left, row(n) + rh - 2.0 + END_H * 0.5).map(|l| l.with(&small));
+        }
+        // The outputs: the start time over the end time, in the middle of their fields.
         if let Some(n) = number("synced ") {
-            return at(Side::Right, row(n) + lead + room * 0.5);
+            return at(Side::Right, row(n) + lead + (room + END_H) * 0.25);
+        }
+        if let Some(n) = number("end ") {
+            return at(Side::Right, row(n) + lead + (room + END_H) * 0.75);
         }
         // The other outputs: along the bottom edge, at the right.
         let fixed = ["links", "quality", "clock drift", "same recording", "speed change", "gaps"];
@@ -1193,15 +1372,9 @@ impl crate::look::NodeLook for Look {
         let (edge_l, edge_r) = (body.left() - EDGE * z, body.right() + EDGE * z);
         let wide = ui.painter().with_clip_rect(ui.clip_rect().expand2(Vec2::new(EDGE * z, 0.0)).intersect(app.canvas_rect));
 
-        // Draw order: by group when asked and known, the free row always last.
-        let mut order: Vec<usize> = (0..v.rows.len()).collect();
-        if by_group(&app.nodes[i].kind) && v.done {
-            let rank = |k: usize| {
-                let n = v.groups[v.rows[k].group].number;
-                (!v.rows[k].wired, if n == 0 { usize::MAX } else { n }, k)
-            };
-            order.sort_by_key(|&k| rank(k));
-        }
+        // Draw order: as the Order menu says, the free row always last.
+        let ord = order_of(&app.nodes[i].kind);
+        let order = sorted(&v, ord);
         let mut slots = vec![0; order.len()];
         for (s, &k) in order.iter().enumerate() {
             slots[k] = s;
@@ -1211,7 +1384,8 @@ impl crate::look::NodeLook for Look {
         let x0 = body.left();
         let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + RIGHT_W) * z);
         let rows_top = body.top() + (BAR_H + RULER_H) * z;
-        let row_top = |slot: usize| rows_top + slot as f32 * rh * z;
+        let pitch = (rh + END_H) * z;
+        let row_top = |slot: usize| rows_top + slot as f32 * pitch;
         let rows_bottom = row_top(order.len());
         let track = Rect::from_min_max(Pos2::new(track_x.0, rows_top - RULER_H * z), Pos2::new(track_x.1, rows_bottom));
         if track.width() <= 10.0 {
@@ -1228,23 +1402,41 @@ impl crate::look::NodeLook for Look {
 
         // The bar along the top.
         let always = !app.match_ui.views.contains_key(&i);
-        let by = by_group(&app.nodes[i].kind);
-        let mut toggle_by = false;
+        let mut new_ord = ord;
         let mut new_rh = rh;
         let y = body.top() + BAR_H * 0.5 * z;
-        let button = |ui: &mut egui::Ui, x: f32, w: f32, text: &str, on: bool| {
-            let b = egui::Button::new(egui::RichText::new(text).size(11.5 * z)).fill(if on { Color32::from_rgb(81, 88, 98) } else { Color32::from_rgb(58, 63, 71) });
-            ui.put(Rect::from_min_size(Pos2::new(x, y - 10.0 * z), Vec2::new(w * z, 20.0 * z)), b).clicked()
-        };
-        let (mut do_fit, toggle_always) = scale_button(ui, i, Rect::from_min_size(Pos2::new(x0 + 4.0 * z, y - 10.0 * z), Vec2::new(98.0 * z, 20.0 * z)), z, always);
-        if button(ui, x0 + 106.0 * z, 96.0, "Order by group", by) {
-            toggle_by = true;
+        let (mut do_fit, toggle_always) = scale_button(ui, i, Rect::from_min_size(Pos2::new(x0 + 4.0 * z, y - 10.0 * z), Vec2::new(82.0 * z, 20.0 * z)), z, always);
+        {
+            let rect = Rect::from_min_size(Pos2::new(x0 + 90.0 * z, y - 10.0 * z), Vec2::new(196.0 * z, 20.0 * z));
+            let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("match-order", i)));
+            c.spacing_mut().button_padding.y = 2.0 * z;
+            c.menu_button(egui::RichText::new(format!("Order: {} ⏷", ord.label())).size(11.5 * z), |ui| {
+                for o in Order::ALL {
+                    if ui.selectable_label(o == ord, o.label()).clicked() {
+                        new_ord = o;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("the order of the rows: the free row is always last");
         }
-        p.text(Pos2::new(x0 + 216.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
-        row_slider(ui, Pos2::new(x0 + 278.0 * z, y), z, &mut new_rh, ROW_MIN..=ROW_MAX);
+        p.text(Pos2::new(x0 + 296.0 * z, y), Align2::LEFT_CENTER, "row height", font(11.5), DIM);
+        row_slider(ui, Pos2::new(x0 + 358.0 * z, y), z, &mut new_rh, ROW_MIN..=ROW_MAX);
+        // The legend: what the bars are.
+        let mut lx = x0 + 482.0 * z;
+        for (col, text) in [(AMBER, "time calculated from audio"), (BLUE, "time from metadata")] {
+            let sw = Rect::from_min_size(Pos2::new(lx, y - 5.0 * z), Vec2::new(14.0 * z, 10.0 * z));
+            p.rect_filled(sw, 0.0, alpha(col, BAR_ALPHA));
+            let r = p.text(Pos2::new(sw.right() + 5.0 * z, y), Align2::LEFT_CENTER, text, font(11.0), DIM);
+            lx = r.right() + 12.0 * z;
+        }
         let scale = if span < 86400.0 { format!("{} to {}", timebase::fmt_utc_clock(v0), timebase::fmt_utc_clock(v1)) } else { format!("{} to {}", &timebase::fmt_utc(v0)[..10], &timebase::fmt_utc(v1)[..10]) };
-        if v.real {
-            p.text(Pos2::new(body.right() - 8.0 * z, y), Align2::RIGHT_CENTER, scale, mono(11.5), DIM);
+        let scale = p.layout_no_wrap(scale, mono(11.5), DIM);
+        let at = Pos2::new(body.right() - 8.0 * z - scale.size().x, y - scale.size().y * 0.5);
+        // Left out when the legend has its room.
+        if v.real && at.x > lx {
+            p.galley(at, scale, DIM);
         }
         p.line_segment([Pos2::new(body.left(), body.top() + BAR_H * z), Pos2::new(body.right(), body.top() + BAR_H * z)], Stroke::new(z, SEAM));
 
@@ -1262,7 +1454,8 @@ impl crate::look::NodeLook for Look {
             q += 1.0;
             ticks += 1;
         }
-        p.text(Pos2::new(track.right() + STATUS_W * 0.5 * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "status", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + STATUS_W * 0.5 * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Status", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + (STATUS_W + 8.0) * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, "output", font(11.0), DIM);
 
         // The rows.
         let mut press_anchor: Option<usize> = None;
@@ -1275,17 +1468,28 @@ impl crate::look::NodeLook for Look {
             let inner = top + 2.0 * z;
             let strip_h = g.strip * z;
             let half = g.half * z;
-            let left_col = Rect::from_min_max(Pos2::new(x0, inner), Pos2::new(track.left(), top + rh * z));
+            let bottom = top + pitch;
+            let left_col = Rect::from_min_max(Pos2::new(x0, inner), Pos2::new(track.left(), bottom));
             let words = g.half >= WORDS_FROM;
+            // The optional end input: a thin stripe under the start time, grey until wired.
+            let end_sw = Rect::from_min_max(Pos2::new(edge_l, top + rh * z), Pos2::new(track.left() - z, bottom));
+            let end_words = |p: &egui::Painter, on: bool| {
+                if END_H * z >= 8.0 {
+                    let text = if on { "audio end time" } else { "audio end time (optional)" };
+                    p.text(Pos2::new(x0 + 21.0 * z, end_sw.center().y), Align2::LEFT_CENTER, text, font(9.5), if on { INK } else { DIM });
+                }
+            };
             if !r.wired {
                 // The free row waits for a wire.
                 let d = alpha(DIM, 0.8);
                 if words {
                     p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 0.5), Align2::LEFT_CENTER, format!("audio {}", r.n), font(12.0), d);
-                    p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 1.5), Align2::LEFT_CENTER, format!("time {}", r.n), font(12.0), d);
+                    p.text(Pos2::new(x0 + 14.0 * z, inner + strip_h + half * 1.5), Align2::LEFT_CENTER, "audio start time", font(12.0), d);
                 } else {
-                    p.text(Pos2::new(x0 + 14.0 * z, left_col.center().y), Align2::LEFT_CENTER, format!("audio {0}, time {0}", r.n), font(11.5), d);
+                    p.text(Pos2::new(x0 + 14.0 * z, (inner + top + rh * z) * 0.5), Align2::LEFT_CENTER, format!("audio {}, audio start time", r.n), font(11.5), d);
                 }
+                wide.rect_filled(end_sw, 0.0, alpha(OPT, 0.6));
+                end_words(&p, false);
                 continue;
             }
             // With no room on the ports, the anchor button sits beside the name.
@@ -1297,9 +1501,12 @@ impl crate::look::NodeLook for Look {
             let time_sw = Rect::from_min_max(Pos2::new(edge_l, audio_sw.bottom()), Pos2::new(track.left() - z, audio_sw.bottom() + half));
             wide.rect_filled(audio_sw, 0.0, fade(if r.uid.is_some() { AMBER } else { OFF }));
             wide.rect_filled(time_sw, 0.0, fade(if r.meta.is_some() { BLUE } else { OFF }));
+            wide.rect_filled(Rect::from_min_max(end_sw.min, Pos2::new(end_sw.right(), end_sw.top() + z)), 0.0, SEAM);
+            wide.rect_filled(Rect::from_min_max(end_sw.min + Vec2::new(0.0, z), end_sw.max), 0.0, fade(if r.end_in.is_some() { BLUE } else { OPT }));
+            end_words(&p, r.end_in.is_some());
             if words {
                 p.text(Pos2::new(x0 + 21.0 * z, audio_sw.center().y), Align2::LEFT_CENTER, "audio", font(12.0), if r.uid.is_some() { INK } else { DIM });
-                p.text(Pos2::new(x0 + 21.0 * z, time_sw.center().y), Align2::LEFT_CENTER, "time", font(12.0), if r.meta.is_some() { INK } else { DIM });
+                p.text(Pos2::new(x0 + 21.0 * z, time_sw.center().y), Align2::LEFT_CENTER, "audio start time", font(12.0), if r.meta.is_some() { INK } else { DIM });
             }
             // The anchor button, on a time, once the audio has placed the row.
             if r.meta.is_some() {
@@ -1325,7 +1532,7 @@ impl crate::look::NodeLook for Look {
             }
 
             // The timeline.
-            let lane = Rect::from_min_max(Pos2::new(track.left(), inner), Pos2::new(track.right(), top + rh * z));
+            let lane = Rect::from_min_max(Pos2::new(track.left(), inner), Pos2::new(track.right(), bottom));
             let band = |b: (f64, f64)| {
                 let (a, c) = (tx(b.0).max(lane.left()), tx(b.1).min(lane.right()));
                 (c > a || (b.0 <= v1 && b.1 >= v0)).then(|| Rect::from_min_max(Pos2::new(a, lane.top()), Pos2::new(c.max(a + 2.0 * z), lane.bottom())))
@@ -1347,9 +1554,8 @@ impl crate::look::NodeLook for Look {
                     }
                 }
             }
-            if let Some(t) = r.meta.filter(|t| *t >= v0 && *t <= v1) {
-                let x = tx(t);
-                p.rect_filled(Rect::from_min_max(Pos2::new(x - 1.25 * z, lane.top()), Pos2::new(x + 1.25 * z, lane.bottom())), 0.0, fade(ANCHOR_BLUE));
+            if dead {
+                p.text(Pos2::new(lane.left() + 8.0 * z, lane.center().y), Align2::LEFT_CENTER, "no metadata, and audio found no match: nothing to place it by", font(11.0), fade(DIM));
             }
             if let (Some(b), true) = (amber, v.anchored(r)) {
                 let x = tx(b.1);
@@ -1364,23 +1570,41 @@ impl crate::look::NodeLook for Look {
             }
 
             // The status cell.
-            let cell_r = Rect::from_min_max(Pos2::new(track.right() + z, inner), Pos2::new(track.right() + STATUS_W * z, top + rh * z));
+            let cell_r = Rect::from_min_max(Pos2::new(track.right() + z, inner), Pos2::new(track.right() + STATUS_W * z, bottom));
             match &status {
                 Cell::Plain(t) => {
                     let t = if rh < 44.0 { t.lines().last().unwrap_or(t).to_string() } else { t.clone() };
-                    p.text(cell_r.center(), Align2::CENTER_CENTER, t, mono(12.0), fade(DIM));
+                    // Shrunk until the widest line fits the cell.
+                    let mut size = 12.0;
+                    while size > 7.0 && p.layout_no_wrap(t.clone(), mono(size), DIM).size().x > cell_r.width() - 6.0 * z {
+                        size -= 0.5;
+                    }
+                    p.text(cell_r.center(), Align2::CENTER_CENTER, t, mono(size), fade(DIM));
                 }
                 Cell::Bad(t) => {
                     p.text(cell_r.center(), Align2::CENTER_CENTER, t, mono(12.0), RED);
                 }
                 Cell::Off(d, hint) => {
+                    // Split at zero: metadata earlier than audio fills the left half, later the
+                    // right, so a column shows from afar whether a group is behind, ahead or both.
                     let (bg, fg) = off_color(*d);
-                    p.rect_filled(cell_r, 0.0, bg);
-                    p.text(cell_r.center(), Align2::CENTER_CENTER, gap_text(*d), mono(13.0), fg);
+                    let mid = cell_r.center().x;
+                    let left = Rect::from_min_max(cell_r.min, Pos2::new(mid, cell_r.bottom()));
+                    let right = Rect::from_min_max(Pos2::new(mid, cell_r.top()), cell_r.max);
+                    let (full, empty) = if *d < 0.0 { (left, right) } else { (right, left) };
+                    p.rect_filled(full, 0.0, bg);
+                    let text = gap_text(*d);
+                    let mut size = 13.0;
+                    let fits = |s: f32| p.layout_no_wrap(text.clone(), mono(s), fg).size().x <= full.width() - 4.0 * z;
+                    while size > 7.0 && !fits(size) {
+                        size -= 0.5;
+                    }
+                    p.text(full.center(), Align2::CENTER_CENTER, text, mono(size), fg);
+                    p.line_segment([Pos2::new(mid, cell_r.top()), Pos2::new(mid, cell_r.bottom())], Stroke::new(1.0, GRID));
                     if *hint {
                         let s = (16.0 * z).min(cell_r.height() - 4.0 * z);
-                        let icon = Rect::from_center_size(Pos2::new(cell_r.right() - 12.0 * z, cell_r.center().y), Vec2::splat(s));
-                        mirror_icon(&p, icon, fg);
+                        let icon = Rect::from_center_size(empty.center(), Vec2::splat(s));
+                        mirror_icon(&p, icon, TEXT);
                         ui.interact(icon, egui::Id::new(("match-mirror", i, r.n)), Sense::hover()).on_hover_text("off by about its own length: the time may mark the end of the recording, not its start. A Time node can subtract the length");
                     }
                 }
@@ -1392,14 +1616,38 @@ impl crate::look::NodeLook for Look {
             }
 
             // The output.
-            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(edge_r, top + rh * z));
+            // The outputs: audio start time over audio end time, blue when they give a time, each
+            // marked in its upper left: an anchor when the group is anchored, ? when it is placed by
+            // metadata or by hand.
+            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(edge_r, bottom));
             wide.rect_filled(Rect::from_min_size(out_col.min, Vec2::new(out_col.width(), strip_h)), 0.0, fade(STRIP));
             p.text(out_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 15), mono(11.5), fade(TEXT));
-            let on = v.anchored(r) && r.uid.is_some();
-            let out_sw = Rect::from_min_max(Pos2::new(out_col.left(), inner + strip_h), out_col.max);
-            wide.rect_filled(out_sw, 0.0, fade(if on { AMBER } else { OFF }));
-            if words {
-                p.text(Pos2::new(body.right() - 21.0 * z, out_sw.center().y), Align2::RIGHT_CENTER, "time", font(12.0), if on { INK } else { DIM });
+            let mark = app.output_mark(i, &v, k);
+            let fields_top = inner + strip_h;
+            let fh = (out_col.bottom() - fields_top) * 0.5;
+            for (f, text) in ["audio start time", "audio end time"].into_iter().enumerate() {
+                let fr = Rect::from_min_max(Pos2::new(out_col.left(), fields_top + f as f32 * fh), Pos2::new(out_col.right(), fields_top + (f as f32 + 1.0) * fh));
+                // The end passes a wired end straight through, whatever the start does.
+                let gives = if f == 1 && r.end_wired { r.end_in.is_some() } else { mark.is_some() };
+                wide.rect_filled(fr, 0.0, fade(if gives { TIME_OUT } else { OFF }));
+                if f == 1 {
+                    wide.rect_filled(Rect::from_min_max(fr.min, Pos2::new(edge_r, fr.top() + z)), 0.0, SEAM);
+                }
+                if fh >= 13.0 * z {
+                    p.text(Pos2::new(body.right() - 12.0 * z, fr.center().y), Align2::RIGHT_CENTER, text, font(10.5), if gives { INK } else { DIM });
+                }
+                let s = (18.0 * z).min(fh - 2.0 * z);
+                match mark.filter(|_| gives && s >= 6.0 * z && !(f == 1 && r.end_wired)) {
+                    Some(true) => anchor_icon(&p, Rect::from_min_size(fr.min + Vec2::new(3.0 * z, 1.0 * z), Vec2::splat(s)), INK),
+                    Some(false) => {
+                        let at = fr.min + Vec2::new(5.0 * z, -1.0 * z);
+                        // Drawn twice, a hair apart: bold.
+                        for dx in [0.0, 0.8 * z] {
+                            p.text(at + Vec2::new(dx, 0.0), Align2::LEFT_TOP, "?", FontId::proportional(s), INK);
+                        }
+                    }
+                    None => {}
+                }
             }
         }
         wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, rows_bottom), Pos2::new(edge_r, rows_bottom + 2.0 * z)), 0.0, SEAM);
@@ -1446,7 +1694,7 @@ impl crate::look::NodeLook for Look {
             }
         }
         let row_at = |y: f32| -> Option<&Row> {
-            let s = ((y - rows_top) / (rh * z)).floor();
+            let s = ((y - rows_top) / pitch).floor();
             (s >= 0.0).then(|| order.get(s as usize).map(|&k| &v.rows[k])).flatten()
         };
         if resp.drag_started() {
@@ -1454,14 +1702,20 @@ impl crate::look::NodeLook for Look {
                 let t = v0 + ((pos.x - track.left()) / track.width()) as f64 * span;
                 if let Some(r) = row_at(pos.y).filter(|r| r.start.is_some_and(|s| t >= s && t <= s + r.len) && !v.anchored(r)) {
                     let key = v.groups[r.group].key.clone();
-                    app.match_ui.grab = Some((i, key, (v0, v1)));
+                    let before = saved_shift(&app.nodes[i].kind, &key);
+                    app.match_ui.grab = Some((i, key, (v0, v1), before));
                 }
             }
         }
         if resp.dragged() {
             let dt = (resp.drag_delta().x / track.width()) as f64 * span;
             match app.match_ui.grab.clone().filter(|g| g.0 == i) {
-                Some((_, key, _)) => *app.match_ui.shift.entry((i, key)).or_default() += dt,
+                Some((_, key, _, _)) => {
+                    let to = saved_shift(&app.nodes[i].kind, &key) + dt;
+                    if let Kind::AudioMatch { rows } = &mut app.nodes[i].kind {
+                        set_row(rows, &shift_key(&key), format!("{to:.3}"));
+                    }
+                }
                 None => {
                     let (a, b) = view_now(app);
                     app.match_ui.views.insert(i, (a - dt, b - dt));
@@ -1469,7 +1723,16 @@ impl crate::look::NodeLook for Look {
             }
         }
         if resp.drag_stopped() {
-            app.match_ui.grab = None;
+            // The drag is saved with the project and logged like any setting.
+            if let Some((_, key, _, before)) = app.match_ui.grab.take().filter(|g| g.0 == i) {
+                let now = saved_shift(&app.nodes[i].kind, &key);
+                if now != before {
+                    let name = v.groups.iter().find(|g| g.key == key).and_then(|g| g.rows.first()).map_or(key.clone(), |&k| v.rows[k].name.clone());
+                    let label = app.nodes[i].label.clone();
+                    app.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: app.nodes[i].uid.clone(), label, name: format!("drag of the group with {name}"), old: format!("{before:+.3} s"), new: format!("{now:+.3} s") });
+                    app.save_project();
+                }
+            }
         }
         if resp.double_clicked() {
             do_fit = true;
@@ -1490,16 +1753,13 @@ impl crate::look::NodeLook for Look {
         }
         let mut changed = false;
         if let Kind::AudioMatch { rows } = &mut app.nodes[i].kind {
-            let set = |rows: &mut Vec<(String, String)>, k: &str, val: String| match rows.iter_mut().find(|(q, _)| q == k) {
-                Some((_, x)) => *x = val,
-                None => rows.push((k.to_string(), val)),
-            };
-            if toggle_by {
-                set(rows, "order by group", (!by).to_string());
+            if new_ord != ord {
+                rows.retain(|(k, _)| k != "order by group");
+                set_row(rows, "order", new_ord.key().to_string());
                 changed = true;
             }
             if (new_rh - rh).abs() >= 0.5 {
-                set(rows, "row height", format!("{new_rh:.0}"));
+                set_row(rows, "row height", format!("{new_rh:.0}"));
                 changed = true;
             }
         }
@@ -1522,6 +1782,34 @@ mod tests {
         let (a, b) = fit_axis(&[(t, t + 100.0), (t + 50.0, t + 200.0), (t + 4e8, t + 4e8 + 60.0)]);
         assert!(a < t && b > t + 4e8 + 60.0, "{a} {b}");
         assert_eq!(fit_axis(&[]), (0.0, 600.0));
+    }
+
+    /// Every order sorts as its name says, the free row always last.
+    #[test]
+    fn every_order_sorts_as_named() {
+        let row = |n: usize, group: usize, meta: Option<f64>, start: Option<f64>| Row { n, wired: true, group, meta, start, off: meta.zip(start).map(|(m, s)| m - s), ..Default::default() };
+        // Group 1 (number 2): rows 1 and 3; group 2 (number 1): rows 2 and 4; row 5 alone; row 6 free.
+        let rows = vec![
+            row(1, 0, Some(100.0), Some(90.0)),
+            row(2, 1, None, Some(50.0)),
+            row(3, 0, Some(10.0), Some(40.0)),
+            row(4, 1, Some(70.0), Some(60.0)),
+            row(5, 2, Some(5.0), None),
+            Row { n: 6, group: 3, ..Default::default() },
+        ];
+        let g = |number: usize, rows: Vec<usize>| Group { number, rows, ..Default::default() };
+        let v = MatchView { rows, groups: vec![g(2, vec![0, 2]), g(1, vec![1, 3]), g(0, vec![4]), g(0, vec![5])], done: true, ..Default::default() };
+        // Group number 1 first, its row with metadata before the one without; then group 2 by start.
+        assert_eq!(sorted(&v, Order::GroupMetaStart), [3, 1, 2, 0, 4, 5]);
+        // By where each starts (audio, else metadata).
+        assert_eq!(sorted(&v, Order::StartGroup), [4, 2, 1, 3, 0, 5]);
+        // By group, nearest first; a row with no offset last in its group.
+        assert_eq!(sorted(&v, Order::GroupOff), [3, 1, 0, 2, 4, 5]);
+        assert_eq!(sorted(&v, Order::Wired), [0, 1, 2, 3, 4, 5]);
+        // An old project's "order by group".
+        assert_eq!(order_of(&Kind::AudioMatch { rows: vec![("order by group".into(), "true".into())] }), Order::GroupMetaStart);
+        assert_eq!(order_of(&Kind::AudioMatch { rows: vec![("order".into(), "start-group".into())] }), Order::StartGroup);
+        assert_eq!(order_of(&Kind::AudioMatch { rows: Vec::new() }), Order::Wired);
     }
 
     #[test]

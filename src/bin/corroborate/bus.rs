@@ -220,7 +220,7 @@ impl App {
     pub(crate) fn output_held(&self, i: NodeId, out: &str) -> Option<String> {
         match &self.nodes[i].kind {
             Kind::Enf { .. } => crate::enf_node::held(&*self.nodes[i].state.lock().ok()?, out),
-            Kind::AudioMatch { .. } if out.starts_with("synced ") => self.synced_time(i, out).err(),
+            Kind::AudioMatch { .. } if out.starts_with("synced ") || out.starts_with("end ") => self.synced_time(i, out).err(),
             Kind::Time { .. } => self.time_out(i).err(),
             _ => None,
         }
@@ -252,7 +252,12 @@ impl App {
             Some(s) if out => format!("\n{}", layout::socket_text(&s)),
             _ => String::new(),
         };
-        format!("{} · {} ({}, {need})\n{}{about}\nnow: {now}", p.name, t.label, t.flow.name(), t.description)
+        // Audio match draws its ports by title; the saved names stay.
+        let name = match &self.nodes[i].kind {
+            Kind::AudioMatch { .. } => crate::audio_match_node::port_title(p.name).unwrap_or_else(|| p.name.to_string()),
+            _ => p.name.to_string(),
+        };
+        format!("{name} · {} ({}, {need})\n{}{about}\nnow: {now}", t.label, t.flow.name(), t.description)
     }
 
     /// A location a program sent (the area of a node whose module has no Rust code).
