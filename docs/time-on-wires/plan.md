@@ -131,9 +131,13 @@ The Time type does not change.
      - The row's sign does not matter here: an uncertainty is never subtracted.
      - A row of zeros with only a ± is how a judgement goes in, such as phone clocks being often a
        second off.
-     - **It is drawn:** a bracket right of the ± column takes a line from every row's ± box, runs
-       down, and ends in an arrow at Result's ±. The label beside it reads "√( Σ ±² )" over
-       "root sum of squares".
+     - **It is drawn as the formula:**
+       - a large root sign over the rows' ± boxes, its hook beside the last row and its bar across
+         the top;
+       - a small ² at the upper right of each ± box;
+       - Result's ± sits below, outside the root.
+
+       The hover on it names it: "root sum of squares".
    - **Wired rows** (SOURCER's `length`) lock their boxes and their ±, both from the wire. The input
      row's ± is whatever came in.
    - There are no notes and no written-out sums: the boxes and the ± column are the whole node.
