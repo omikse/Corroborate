@@ -549,6 +549,21 @@ fn time_node_corrects_a_time() {
     let view = d.app().match_view(m);
     assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Bad("Time node error".into()));
     d.shot("time_node_error");
+    // A file with no time in its metadata through a Time node: no time metadata, not the Time
+    // node's error, and the hover says why.
+    let bare = d.app().add(Kind::Sourcer { input: "bare.mp4".into() }, Pos2::new(30.0, 400.0));
+    d.app().facts.put("bare.mp4", FileFacts { stamp: None, len: Some(90.0), source: "no time in the file's metadata".into() });
+    let t2 = d.app().add(Kind::Time { rows: corroborate::modules::time::defaults() }, Pos2::new(520.0, 400.0));
+    d.app().wire(bare, "time", t2, "time");
+    d.app().wire(t2, "result", m, "time 2");
+    d.app().wire(bare, "audio", m, "audio 2");
+    d.app().sync_many_ports();
+    d.frames(3);
+    let view = d.app().match_view(m);
+    assert!(d.app().value_from(t2, "result").is_err());
+    assert_eq!(view.rows[1].time_err, None);
+    assert!(matches!(crate::audio_match_node::cell(&view, 1).0, crate::audio_match_node::Cell::Plain(ref s) if s.contains("no time metadata")), "{:?}", crate::audio_match_node::cell(&view, 1).0);
+    assert!(view.rows[1].meta_source.contains("metadata"), "{}", view.rows[1].meta_source);
     // Saved and loaded with its rows and wires.
     let text = d.app().project_text();
     let mut back = App::empty();
@@ -1117,4 +1132,5 @@ fn audio_match_timeline() {
     d.shot("am_9_timeline_node");
     d.app().stop_run();
 }
+
 

@@ -228,8 +228,10 @@ impl App {
                 match self.value_from(f, o) {
                     Ok(Data::Time { utc: Some(u), error_s, source, .. }) => (r.meta, r.meta_err, r.meta_source) = (Some(u), error_s, source),
                     Ok(_) => {}
-                    Err(e) if matches!(self.nodes[f].kind, Kind::Time { .. }) => r.time_err = Some(e),
-                    Err(_) => {}
+                    // Nothing came into the Time node (a file with no time in its metadata): no
+                    // time metadata, not the Time node's error.
+                    Err(e) if matches!(self.nodes[f].kind, Kind::Time { .. }) && !matches!(self.time_in(f), Some(Err(_))) => r.time_err = Some(e),
+                    Err(e) => r.meta_source = e,
                 }
             }
             if let Some((f, o)) = ports.get(2).and_then(|e| self.graph.feeder(i, e.name)) {
@@ -1081,16 +1083,14 @@ pub(crate) fn scale_button(ui: &mut egui::Ui, id: NodeId, rect: Rect, z: f32, li
     pressed
 }
 
-/// The row height slider: one size on screen, whatever the canvas zoom. `at`: the middle of its
-/// left end.
+/// The row height slider: zoomed with the node like everything on it, so it keeps its place
+/// beside the legend. `at`: the middle of its left end.
 pub(crate) fn row_slider(ui: &mut egui::Ui, at: Pos2, z: f32, value: &mut f32, range: std::ops::RangeInclusive<f32>) {
     const W: f32 = 110.0;
     const H: f32 = 18.0;
-    let rect = Rect::from_min_size(at - Vec2::new(0.0, H * 0.5), Vec2::new(W, H));
+    let rect = Rect::from_min_size(at - Vec2::new(0.0, H * 0.5 * z), Vec2::new(W * z, H * z));
     let mut s = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("row-height"));
-    // The node's style is scaled by the zoom: undone here.
-    crate::look::scale(&mut s, 1.0 / z);
-    s.spacing_mut().slider_width = W;
+    s.spacing_mut().slider_width = W * z;
     s.add(egui::Slider::new(value, range).show_value(false));
 }
 
@@ -1132,6 +1132,10 @@ fn hsl(h: f32, s: f32, l: f32) -> Color32 {
     let u = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
     Color32::from_rgb(u(r), u(g), u(b))
 }
+
+/// How far off fills a whole half of the Status cell, seconds; less fills part of it, from the
+/// middle out.
+const FILL_S: f64 = 5.0;
 
 /// Green at 0 s, fully red at 30 s, going black by a year: the cell's fill and text.
 fn off_color(d: f64) -> (Color32, Color32) {
@@ -1281,6 +1285,7 @@ fn row_hover(v: &MatchView, r: &Row) -> String {
     let mut h = vec![r.name.clone()];
     match r.meta {
         Some(t) => h.push(format!("time input: {} UTC ± {} s, {}", timebase::fmt_utc(t), r.meta_err, r.meta_source)),
+        None if r.time_wired && !r.meta_source.is_empty() => h.push(format!("the time input gives no time: {}", r.meta_source)),
         None if r.time_wired => h.push("the time input gives no time".to_string()),
         None => h.push("nothing wired into the time input".to_string()),
     }
@@ -1592,14 +1597,19 @@ impl crate::look::NodeLook for Look {
                     let left = Rect::from_min_max(cell_r.min, Pos2::new(mid, cell_r.bottom()));
                     let right = Rect::from_min_max(Pos2::new(mid, cell_r.top()), cell_r.max);
                     let (full, empty) = if *d < 0.0 { (left, right) } else { (right, left) };
-                    p.rect_filled(full, 0.0, bg);
+                    // The colour grows out from the middle: the whole half at FILL_S and beyond.
+                    let w = (full.width() * (d.abs() / FILL_S).min(1.0) as f32).max(2.0 * z);
+                    let fill = if *d < 0.0 { Rect::from_min_max(Pos2::new(mid - w, full.top()), Pos2::new(mid, full.bottom())) } else { Rect::from_min_max(Pos2::new(mid, full.top()), Pos2::new(mid + w, full.bottom())) };
+                    p.rect_filled(fill, 0.0, bg);
+                    // Dark on a full half, light while the half is mostly the track.
+                    let ink = if d.abs() >= FILL_S { fg } else { TEXT };
                     let text = gap_text(*d);
                     let mut size = 13.0;
-                    let fits = |s: f32| p.layout_no_wrap(text.clone(), mono(s), fg).size().x <= full.width() - 4.0 * z;
+                    let fits = |s: f32| p.layout_no_wrap(text.clone(), mono(s), ink).size().x <= full.width() - 4.0 * z;
                     while size > 7.0 && !fits(size) {
                         size -= 0.5;
                     }
-                    p.text(full.center(), Align2::CENTER_CENTER, text, mono(size), fg);
+                    p.text(full.center(), Align2::CENTER_CENTER, text, mono(size), ink);
                     p.line_segment([Pos2::new(mid, cell_r.top()), Pos2::new(mid, cell_r.bottom())], Stroke::new(1.0, GRID));
                     if *hint {
                         let s = (16.0 * z).min(cell_r.height() - 4.0 * z);

@@ -39,7 +39,7 @@ fn seconds_of(d: &Data) -> Option<f64> {
 
 impl App {
     /// What is wired into the time input: the moment and where it comes from, or why there is none.
-    fn time_in(&self, i: NodeId) -> Option<Result<(f64, String), String>> {
+    pub(crate) fn time_in(&self, i: NodeId) -> Option<Result<(f64, String), String>> {
         let (f, o) = self.graph.feeder(i, "time")?;
         Some(match self.value_from(f, o) {
             Ok(Data::Time { utc: Some(u), source, .. }) => Ok((u, source)),

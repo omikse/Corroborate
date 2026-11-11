@@ -563,7 +563,7 @@ fn clean_up_knows_the_size_of_nodes_off_screen() {
 }
 
 /// Audio match's top bar and thin rows: View all fits once, its circle makes it live; the row
-/// height slider is one size at any canvas zoom; the thinnest row is its name with both ports
+/// height slider zooms with the node; the thinnest row is its name with both ports
 /// still apart.
 #[test]
 fn audio_match_scale_slider_and_thin_rows() {
@@ -603,10 +603,10 @@ fn audio_match_scale_slider_and_thin_rows() {
         d.frames(3);
         d.shot(&format!("am_slider_z{z}"));
         let r = d.h.get_by_role(Role::Slider).rect();
-        sizes.push((r.width(), r.height()));
+        sizes.push((z, r.width()));
     }
-    for s in &sizes {
-        assert!((s.0 - sizes[0].0).abs() < 0.5 && (s.1 - sizes[0].1).abs() < 0.5, "the same at every zoom: {sizes:?}");
+    for (z, w) in &sizes {
+        assert!((w / z - sizes[1].1).abs() < 2.0, "zoomed with the node: {sizes:?}");
     }
 
     d.app().zoom = 1.0;
