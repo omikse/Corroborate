@@ -197,7 +197,7 @@ fn damaged_files_load_what_they_can() {
 fn made_on_the_canvas() {
     let mut d = Drive::new();
     for label in [Kind::Map.default_label(), Kind::Value { ty: String::new(), rows: vec![] }.default_label()] {
-        d.click("Add node");
+        d.click("+ Add node");
         d.click(&label);
     }
     assert_eq!(d.app().nodes.len(), 2, "two nodes added from the menu");

@@ -543,13 +543,35 @@ impl App {
         }
     }
 
-    /// The Project menu in the top bar, with the project's name beside it (• while it has unsaved
-    /// changes), then the Recordings menu.
+    /// The Project menu in the top bar: its button is the project's name (• while it has unsaved
+    /// changes). While renaming, a box to type the new name in takes its place.
     pub(crate) fn file_menu(&mut self, ui: &mut egui::Ui) {
         self.project_keys(&ui.ctx().clone());
+        if self.renaming.is_some() {
+            self.name_box(ui);
+            return;
+        }
         let named = self.project_path.is_some();
         let dirty = self.dirty();
-        ui.menu_button("Project", |ui| {
+        let path = self.project_file().map(|p| p.display().to_string()).unwrap_or_else(|| "not saved".into());
+        let hover = match (named, dirty) {
+            (true, true) => format!("{path}\nunsaved changes (Ctrl+S saves; they are kept in {} until then)", self.project_path.as_deref().map(recovery_of).unwrap_or_default().display()),
+            (true, false) => path,
+            (false, _) => "untitled: kept in settings\\project.txt; Save as gives it its own folder".to_string(),
+        };
+        let title = format!("{}{} ⏷", self.project_name(), if dirty { " •" } else { "" });
+        let menu = ui.menu_button(egui::RichText::new(title).color(TEXT), |ui| {
+            let rename = if named { "Rename…" } else { "Name it…" };
+            if ui.button(rename).on_hover_text(if named { "rename the project and its folder" } else { "give the project a folder (Save as)" }).clicked() {
+                ui.close();
+                if named {
+                    self.renaming = Some(self.project_name());
+                    self.renaming_fresh = true;
+                } else {
+                    self.save_as_dialog();
+                }
+            }
+            ui.separator();
             if ui.add(egui::Button::new("New…").shortcut_text("Ctrl+N")).on_hover_text("pick or make the new project's folder").clicked() {
                 ui.close();
                 self.new_dialog();
@@ -598,6 +620,7 @@ impl App {
                 self.request(Then::Revert);
             }
             ui.separator();
+            self.recordings_menu(ui, false);
             if ui.add_enabled(named, egui::Button::new("Show project folder")).on_disabled_hover_text("save the project first").clicked() {
                 ui.close();
                 if let Some(d) = self.project_dir() {
@@ -605,38 +628,13 @@ impl App {
                 }
             }
         });
-        let path = self.project_file().map(|p| p.display().to_string()).unwrap_or_else(|| "not saved".into());
-        let hover = match (named, dirty) {
-            (true, true) => format!("{path}\nunsaved changes (Ctrl+S saves; they are kept in {} until then)\nclick to rename the project and its folder", self.project_path.as_deref().map(recovery_of).unwrap_or_default().display()),
-            (true, false) => format!("{path}\nclick to rename the project and its folder"),
-            (false, true) => "untitled: kept in settings\\project.txt\nclick to give it a folder".to_string(),
-            (false, false) => format!("{path}\nclick to give it a folder"),
-        };
-        self.name_box(ui, hover);
-        if dirty {
-            ui.colored_label(TEXT, "•");
-        }
-        ui.separator();
-        self.recordings_menu(ui);
-        ui.separator();
+        menu.response.on_hover_text(hover);
     }
 
-    /// The project's name in the top bar. A click makes it a box to type a new name in: Enter or
-    /// clicking away renames, Esc leaves it. An untitled project has no folder to rename, so the
-    /// click gives it one.
-    fn name_box(&mut self, ui: &mut egui::Ui, hover: String) {
-        let Some(typed) = &mut self.renaming else {
-            let r = ui.add(egui::Label::new(egui::RichText::new(self.project_name()).color(TEXT)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::Text).on_hover_text(hover);
-            if r.clicked() {
-                if self.project_path.is_some() {
-                    self.renaming = Some(self.project_name());
-                    self.renaming_fresh = true;
-                } else {
-                    self.save_as_dialog();
-                }
-            }
-            return;
-        };
+    /// Project → Rename…: a box with the name in place of the menu's button. Enter or clicking
+    /// away renames, Esc leaves it.
+    fn name_box(&mut self, ui: &mut egui::Ui) {
+        let Some(typed) = &mut self.renaming else { return };
         let mut out = egui::TextEdit::singleline(typed).clip_text(false).desired_width(90.0).show(ui);
         if std::mem::take(&mut self.renaming_fresh) {
             out.response.request_focus();
@@ -698,7 +696,9 @@ impl App {
             self.save_project();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let title = format!("{}{} — Corroborate", self.project_name(), if self.dirty() { " •" } else { "" });
+        // The program and its build (the commit it was built from, + with uncommitted changes, set
+        // by run.cmd; "dev" for a plain cargo build). The project is named in the top bar.
+        let title = format!("Corroborate · {}", option_env!("CORROBORATE_BUILD").unwrap_or("dev"));
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;

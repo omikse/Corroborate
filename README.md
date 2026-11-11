@@ -10,8 +10,8 @@ built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Rust, plus ffmpeg on `PATH` (yt-dlp for YouTube links).
 
 **run.cmd** (double-click it, or run it from the repository root) builds the current code and
-starts the workbench from `app\`, the tool's own folder. The build is shown in the top bar: the
-commit, with `+` when there were uncommitted changes. It works while the app is open: the open
+starts the workbench from `app\`, the tool's own folder. The build is in the window title
+(`Corroborate · <build>`): the commit, with `+` when there were uncommitted changes. It works while the app is open: the open
 window keeps its build and the next start gets the new one (`tools\run.ps1` says how).
 
 ```bash
@@ -30,18 +30,24 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 `settings\` (the project, planes-view's settings), `results\` (result JSON, flight logs) and
 `recordings\`. Nothing goes to system folders.
 
-In the workbench: right-click (or **Add node**) to add nodes, drag from a dot to a dot to wire
+In the workbench: right-click (or **+ Add node**) to add nodes, drag from a dot to a dot to wire
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
-Projects: the top bar shows **Project**, the project's name (with • while it has unsaved changes)
-and **Recordings**. Project has **New…** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**, **Save**
-(Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved** and **Show project
-folder**. New, Open, Save as and Save a copy all pick a folder, and New and the two saves can make
+The top bar: the project menu (its button is the project's name, with • while it has unsaved
+changes); **▶ Run**, **■ Stop** and **↻ Restart**, always there, Run lit while running and showing
+how many nodes run (Run while running does nothing; Restart starts again); **+ Add node**, which
+also has **Live device** (this computer's microphones and capture cards, asked of ffmpeg when it
+opens) and **Value of a type**; **Arrange**; and a warning when recordings are missing or changed,
+which opens their list. Messages are at the bottom of the canvas, over the line of keys.
+
+Projects: the project menu has **Rename…**, **New…** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**,
+**Save** (Ctrl+S), **Save as…** (Ctrl+Shift+S), **Save a copy…**, **Revert to saved**,
+**Recordings** and **Show project folder**. New, Open, Save as and Save a copy all pick a folder, and New and the two saves can make
 one: a project is that folder and the folder's name is its only name, with `project.txt` inside,
 `results\` (what its Result records write) and `recordings\` (files copied into it); the dialogs start in
 `app\projects\`. A folder that already holds another project is refused for New and the saves, so
-its file is never written over. Click the name in the top bar to rename the project: Enter or
-clicking away renames its folder, Esc leaves it. The project file changes only on Save; until then changes are kept in
+its file is never written over. **Rename…** puts a box with the name in place of the menu's
+button: Enter or clicking away renames its folder, Esc leaves it. The project file changes only on Save; until then changes are kept in
 `project.recovery.txt` beside it, which the next Open restores. New, Open and closing the window
 ask Save, Don't save or Cancel when there are unsaved changes. A project that was never given a
 folder (the first start, or `--new`) is "untitled" and lives in `settings\project.txt` (written as
@@ -69,7 +75,7 @@ Canvas keys and mouse:
 | Copy, cut, paste, duplicate | Ctrl+C, Ctrl+X, Ctrl+V (at the pointer), Ctrl+D |
 | Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z (moves, wires, settings, names, adding, deleting) |
 | Frame | F or Home: the selection, else every node |
-| Clean up | the button in the top bar: lays out the nodes on this level by their wires, left to right, each column ordered to reduce crossings using the real port heights. A column far taller than what it feeds (fifty recordings into one Audio match) is dealt into several side by side; separate pieces are packed about the shape of a screen and nodes with no wires are parked underneath. The result depends on the wires and node sizes, not on where the nodes stood, so a second press changes nothing. Ctrl+Z puts them back |
+| Arrange | the button in the top bar (Clean up before): lays out the nodes on this level by their wires, left to right, each column ordered to reduce crossings using the real port heights. A column far taller than what it feeds (fifty recordings into one Audio match) is dealt into several side by side; separate pieces are packed about the shape of a screen and nodes with no wires are parked underneath. The result depends on the wires and node sizes, not on where the nodes stood, so a second press changes nothing. Ctrl+Z puts them back |
 | Wire | drag from an output dot to an input dot, or the other way; right-click an input to unwire |
 | Add a node already wired | drag from a dot onto empty canvas: pick from the modules that fit its type (from an input, a Value of its type comes first) |
 | Play, pause | Space (or Play on a SOURCER or a Timeline node): the selected node's playhead runs and its sound plays |
@@ -91,7 +97,7 @@ What travels on a wire has a type, and every type is a folder like a module: `sr
 (in the tool, `app\types\<id>\`, read again every second; a change there wins over the built-in
 one). It says the type's `label`, `color`, `flow`, `description` and its `[[field]]`s (name, type
 number|text|datetime|bool|choice|file, label, unit, min, max, default, required); the format is at
-the top of `src/types.rs`. **Types** in the top bar lists them all with where each came from;
+the top of `src/types.rs`. **+ Add node → Value of a type** lists them all with where each came from;
 hovering one names the modules that give and take it, clicking one adds a Value node of it.
 
 A dot on a node always means the same:

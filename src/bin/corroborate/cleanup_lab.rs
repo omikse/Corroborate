@@ -57,7 +57,7 @@ fn judge(d: &mut Drive, name: &str) -> Report {
     let (items, links, at) = sheet(d.app());
     line(&format!("{name}: as it stood"), items.len(), links.len(), &measure(&items, &links, &at));
     let before = items.clone();
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     let (items, links, at) = sheet(d.app());
     let changed = before.iter().zip(&items).filter(|(a, b)| (a.w - b.w).abs() > 0.5 || (a.h - b.h).abs() > 0.5).inspect(|(a, b)| println!("   size changed: {} x {} -> {} x {}", a.w, a.h, b.w, b.h)).count();
@@ -67,13 +67,13 @@ fn judge(d: &mut Drive, name: &str) -> Report {
     let after = measure(&items, &links, &at);
     line(&format!("{name}: cleaned"), items.len(), links.len(), &after);
     d.shot(&format!("lab_{name}"));
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     let (_, _, again) = sheet(d.app());
     let moved = at.iter().zip(&again).map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs())).fold(0.0, f32::max);
     println!("{:34} second press moved a node by at most {moved:.1}", "");
     let (a2, l2, b2) = sheet(d.app());
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     let (a3, l3, b3) = sheet(d.app());
     let third = b2.iter().zip(&b3).map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs())).fold(0.0, f32::max);

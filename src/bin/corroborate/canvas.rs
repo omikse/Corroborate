@@ -480,7 +480,7 @@ impl App {
             self.nodes[i].pos = Pos2::new(x, y);
         }
         self.frame_all = true;
-        self.msg = format!("cleaned up {} nodes (Ctrl+Z puts them back)", ids.len());
+        self.msg = format!("arranged {} nodes (Ctrl+Z puts them back)", ids.len());
         self.save_project();
     }
 

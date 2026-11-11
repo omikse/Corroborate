@@ -6,6 +6,7 @@
 use super::*;
 use crate::drive::{out_dir, Drive};
 use project::{bad_name, drop_recent, project_file_of, project_in, push_recent, recent_in, recovery_of, taken_by, Answer, Then};
+use egui_kittest::kittest::Queryable;
 use recordings::{relative, State};
 use std::path::Path;
 
@@ -179,13 +180,15 @@ fn the_name_in_the_top_bar_renames_the_project() {
     d.app().add(Kind::Map, Pos2::new(40.0, 60.0));
     d.app().save_project_as(root.join("first name"));
     d.frames(2);
-    d.click("first name");
+    d.click("first name ⏷");
+    d.click("Rename…");
     assert_eq!(d.app().renaming.as_deref(), Some("first name"));
     d.type_into(0, "typed then left");
     d.press(egui::Key::Escape);
     assert!(d.app().renaming.is_none());
     assert_eq!(d.app().project_name(), "first name", "Esc leaves it");
-    d.click("first name");
+    d.click("first name ⏷");
+    d.click("Rename…");
     d.type_into(0, "second name");
     d.shot("project_rename");
     d.press(egui::Key::Enter);
@@ -438,6 +441,7 @@ fn moved_missing_and_changed_recordings() {
 
     let mut d = Drive::with(b);
     d.frames(3);
+    d.click_contains("⏷");
     d.click_contains("Recordings (5");
     d.shot("project_recordings_menu");
 }
@@ -482,6 +486,48 @@ fn top_bar_shot() {
     d.app().save_project_as(dir.join("hillingdon"));
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.frames(2);
-    d.click("Project");
+    d.click("hillingdon • ⏷");
     d.shot("project_top_bar");
+}
+
+/// The top bar: the window title is the program and its build; Run, Stop and Restart are always
+/// there; Run while running does nothing, Restart starts again; a missing recording shows a
+/// warning that opens the recordings.
+#[test]
+fn top_bar_run_stop_restart_and_warning() {
+    let dir = fresh("bar");
+    let clip = dir.join("north.wav");
+    wav(&clip, 440.0, 0.5);
+    let mut d = Drive::new();
+    d.app().add(Kind::Sourcer { input: clip.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
+    d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
+    d.frames(2);
+    d.app().save_project_as(dir.join("bar"));
+    d.app().stop_run();
+    d.frames(2);
+    assert!(d.app().title.starts_with("Corroborate · "), "{}", d.app().title);
+    for b in ["▶ Run", "■ Stop", "↻ Restart", "Arrange", "+ Add node", "bar ⏷"] {
+        assert!(d.h.query_by_label(b).is_some(), "{b} is there while stopped");
+    }
+    assert!(d.h.query_by_label_contains("missing or changed").is_none(), "no warning while all is well");
+    d.shot("top_bar_stopped");
+    d.click("▶ Run");
+    assert!(!d.app().stopped);
+    let runs = d.app().runs;
+    d.click("▶ Run");
+    assert_eq!(d.app().runs, runs, "Run while running does nothing");
+    d.click("↻ Restart");
+    assert_eq!(d.app().runs, runs + 1, "Restart starts again");
+    for b in ["▶ Run", "■ Stop", "↻ Restart"] {
+        assert!(d.h.query_by_label(b).is_some(), "{b} is there while running");
+    }
+    d.shot("top_bar_running");
+    d.click("■ Stop");
+    assert!(d.app().stopped);
+    std::fs::remove_file(&clip).unwrap();
+    d.app().library.list[0].check();
+    d.frames(2);
+    d.click_contains("1 recording missing or changed");
+    assert!(d.h.query_all_by_label_contains("missing").count() >= 2, "the warning and the recording marked missing");
+    d.shot("top_bar_warning");
 }

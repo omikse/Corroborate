@@ -452,12 +452,20 @@ impl App {
         self.save_project();
     }
 
-    /// Top bar → Recordings: each of the project's files with what is known of it, and what can
-    /// be done with it.
-    pub(crate) fn recordings_menu(&mut self, ui: &mut egui::Ui) {
+    /// Project → Recordings: each of the project's files with what is known of it, and what can
+    /// be done with it. With `warning`, the same list behind a warning in the top bar, shown only
+    /// while recordings are missing or changed.
+    pub(crate) fn recordings_menu(&mut self, ui: &mut egui::Ui, warning: bool) {
         let n = self.library.list.len();
         let bad = self.library.list.iter().filter(|r| matches!(r.state, State::Missing | State::Changed)).count();
-        let title = if bad > 0 { format!("Recordings ({n}, {bad} !)") } else { format!("Recordings ({n})") };
+        if warning && bad == 0 {
+            return;
+        }
+        let title = if warning {
+            egui::RichText::new(format!("⚠ {bad} recording{} missing or changed", if bad == 1 { "" } else { "s" })).color(WARN)
+        } else {
+            egui::RichText::new(format!("Recordings ({n})"))
+        };
         let r = ui.menu_button(title, |ui| {
             ui.set_min_width(460.0);
             let into = self.project_dir().map(|d| d.join("recordings"));

@@ -237,7 +237,9 @@ struct App {
     sig_seen: (String, Instant),
     textures: HashMap<NodeId, (u64, f64, TextureHandle)>,
     lut: [[u8; 4]; 256],
+    /// This computer's audio devices (Add node → Live device), asked for once it opens.
     mics: Vec<String>,
+    mics_looked: bool,
     /// The Earth image under every map (loaded at the first frame).
     earth: Option<TextureHandle>,
     /// Areas worked out this frame, by node (see `area_from`).
@@ -333,6 +335,7 @@ impl App {
             textures: HashMap::new(),
             lut: colormap(),
             mics: Vec::new(),
+            mics_looked: false,
             earth: None,
             area_cache: Default::default(),
             last_project_save: Instant::now(),
@@ -728,7 +731,6 @@ impl App {
             return;
         }
         self.stop = Some(stop);
-        self.msg = format!("running {started} source(s)");
     }
 
     /// What a run is made of: each source's input and what its audio feeds. The graph runs
@@ -924,6 +926,9 @@ impl App {
                     pick = Some(k);
                 }
             }
+            if section == nodes::SOURCES {
+                ui.menu_button("Live device", |ui| self.devices_menu(ui, at));
+            }
             if section == nodes::PLUGINS && ui.button("Plugin from file…").clicked() {
                 if let Some(p) = rfd::FileDialog::new().add_filter("program", &["exe"]).pick_file() {
                     pick = Some(Kind::Plugin { path: p.to_string_lossy().into_owned() });
@@ -940,6 +945,13 @@ impl App {
                 }
             }
         }
+        // A Value node of a type: what travels on wires, typed in by hand.
+        ui.label(egui::RichText::new("VALUES").small().color(DIM));
+        ui.menu_button("Value of a type", |ui| {
+            if let Some(ty) = self.types_menu(ui) {
+                pick = Some(Kind::Value { ty: ty.into(), rows: corroborate::modules::value::defaults(ty) });
+            }
+        });
         if let Some(g) = use_of {
             self.add_group_use(g, at);
             ui.close();
@@ -1389,6 +1401,8 @@ impl App {
             let all = (0..self.nodes.len()).filter(|&i| self.on_canvas(i)).collect();
             self.frame_ids(area, all);
         }
+        // Messages, over the line of keys.
+        painter.text(area.left_bottom() + Vec2::new(10.0, -24.0), Align2::LEFT_BOTTOM, &self.msg, FontId::proportional(12.5), TEXT);
         painter.text(
             area.left_bottom() + Vec2::new(10.0, -8.0),
             Align2::LEFT_BOTTOM,
@@ -1400,92 +1414,158 @@ impl App {
 
     // ---------------- frame
 
-    /// PC streams: the audio devices of this computer (microphones, virtual mics, capture cards,
-    /// as ffmpeg lists them). A click adds a SOURCER on that device; one already used shows green
-    /// and a click selects its node.
-    fn streams_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(DIM, "PC streams");
-            let mut add: Option<String> = None;
-            let mut pick: Option<NodeId> = None;
-            for m in &self.mics {
-                let input = format!("mic:{m}");
-                let used = (0..self.nodes.len()).find(|&i| !self.nodes[i].hidden && matches!(&self.nodes[i].kind, Kind::Sourcer { input: x } if *x == input));
-                let text = egui::RichText::new(m).size(11.5).color(if used.is_some() { GOOD } else { TEXT });
-                let r = ui.add(egui::Button::new(text).small()).on_hover_text(if used.is_some() { "in use: click to select its source" } else { "add a source listening to this device (live)" });
-                if r.clicked() {
-                    match used {
-                        Some(i) => pick = Some(i),
-                        None => add = Some(input),
-                    }
+    /// Add node → Live device: the audio devices of this computer (microphones, virtual mics,
+    /// capture cards, as ffmpeg lists them), asked for the first time the menu opens. A click adds
+    /// a live SOURCER on that device at `at`; one already used shows green and a click selects its
+    /// node.
+    fn devices_menu(&mut self, ui: &mut egui::Ui, at: Pos2) {
+        if !self.mics_looked {
+            self.look_for_devices();
+        }
+        let mut add: Option<String> = None;
+        let mut pick: Option<NodeId> = None;
+        if self.mics.is_empty() {
+            ui.colored_label(DIM, "no audio devices found");
+        }
+        for m in &self.mics {
+            let input = format!("mic:{m}");
+            let used = (0..self.nodes.len()).find(|&i| !self.nodes[i].hidden && matches!(&self.nodes[i].kind, Kind::Sourcer { input: x } if *x == input));
+            let text = egui::RichText::new(m).color(if used.is_some() { GOOD } else { TEXT });
+            let r = ui.button(text).on_hover_text(if used.is_some() { "in use: click to select its source" } else { "add a source listening to this device (live)" });
+            if r.clicked() {
+                match used {
+                    Some(i) => pick = Some(i),
+                    None => add = Some(input),
                 }
             }
-            if self.mics.is_empty() {
-                ui.colored_label(DIM, "not looked yet");
-            }
-            if ui.small_button(if self.mics.is_empty() { "Find devices" } else { "↻" }).on_hover_text("ask ffmpeg for this computer's audio devices").clicked() {
-                match corroborate::ingest::list_microphones() {
-                    Ok(m) => self.mics = m,
-                    Err(e) => self.msg = e,
-                }
-            }
-            if let Some(input) = add {
-                let k = self.nodes.iter().filter(|n| !n.hidden).count() as f32;
-                // Near the canvas's top-left corner as seen, a step further for each node.
-                let at = ((Vec2::splat(60.0 + 30.0 * (k % 6.0)) - self.pan) / self.zoom).to_pos2();
-                let n = self.add(Kind::Sourcer { input }, at);
-                self.pick_only(n);
-                self.save_project();
-            }
-            if let Some(i) = pick {
-                self.pick_only(i);
-            }
-        });
+        }
+        ui.separator();
+        if ui.button("↻ Look again").on_hover_text("ask ffmpeg for this computer's audio devices").clicked() {
+            self.look_for_devices();
+        }
+        if let Some(input) = add {
+            let n = self.add(Kind::Sourcer { input }, at);
+            self.pick_only(n);
+            self.save_project();
+            ui.close();
+        }
+        if let Some(i) = pick {
+            self.pick_only(i);
+            ui.close();
+        }
     }
 
+    fn look_for_devices(&mut self) {
+        self.mics_looked = true;
+        match corroborate::ingest::list_microphones() {
+            Ok(m) => self.mics = m,
+            Err(e) => self.msg = e,
+        }
+    }
+
+    /// The top bar: the project (its name is the menu's button), Run, Stop and Restart (always
+    /// there; Run lit while running, with how many nodes run), Add node and Arrange, then a warning
+    /// when recordings are missing or changed. The program's name and build are in the window
+    /// title; messages are at the bottom of the canvas.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("CORROBORATE").strong().color(TEXT));
-            // Which build this is: the commit it was built from (+ when there were uncommitted
-            // changes), set by run.cmd; "dev" for a plain cargo build.
-            ui.colored_label(DIM, option_env!("CORROBORATE_BUILD").unwrap_or("dev"));
+            self.file_menu(ui);
             ui.separator();
-            {
-                // Running, changes restart the graph by themselves; a project opens stopped.
-                // Recording is in the Result record node.
-                self.file_menu(ui);
-                if self.stopped {
-                    if ui.button("▶ Run").on_hover_text("start every source; while it runs, changes restart it").clicked() {
-                        self.run();
-                    }
-                } else {
-                    if ui.button("■ Stop").on_hover_text("stop every source; nothing runs until Run").clicked() {
-                        self.stop_run();
-                    }
-                    if ui.button("↻ Restart").on_hover_text("start every source again from its beginning").clicked() {
-                        self.run();
-                    }
-                }
-                ui.separator();
-                ui.menu_button("Add node", |ui| {
-                    let at = Pos2::new(400.0, 300.0) - self.pan;
-                    self.add_menu(ui, at);
-                });
-                ui.menu_button("Types", |ui| {
-                    if let Some(ty) = self.types_menu(ui) {
-                        let at = Pos2::new(400.0, 300.0) - self.pan;
-                        let n = self.add(Kind::Value { ty: ty.into(), rows: corroborate::modules::value::defaults(ty) }, at);
-                        self.pick_only(n);
-                        self.save_project();
-                    }
-                });
-                if ui.button("Clean up").on_hover_text("lay out the nodes on this level by their wires; Ctrl+Z puts them back").clicked() {
-                    self.clean_up(ui.input(|i| i.time));
-                }
+            // Running, changes restart the graph by themselves; a project opens stopped.
+            // Recording is in the Result record node.
+            let running = !self.stopped;
+            let nodes = self.nodes.iter().filter(|n| !n.hidden && !matches!(n.kind, Kind::Group { .. } | Kind::GroupInput | Kind::GroupOutput)).count();
+            let sources = self.nodes.iter().filter(|n| !n.hidden && n.kind.is_source()).count();
+            let count = format!("{nodes} node{}", if nodes == 1 { "" } else { "s" });
+            let about = format!("{nodes} nodes run, {sources} of them sources; while it runs, changes restart it");
+            let run = bar_button(ui, "▶ Run", Extra::Count(count), running, true).on_hover_text(if running { format!("running: {about}") } else { format!("start: {about}") });
+            if run.clicked() && !running {
+                self.msg.clear();
+                self.run();
             }
-            ui.colored_label(DIM, &self.msg);
+            if bar_button(ui, "■ Stop", Extra::None, false, running).on_hover_text("stop every source; nothing runs until Run").on_disabled_hover_text("not running").clicked() {
+                self.stop_run();
+            }
+            if bar_button(ui, "↻ Restart", Extra::None, false, true).on_hover_text("start every source again from its beginning").clicked() {
+                self.msg.clear();
+                self.run();
+            }
+            ui.separator();
+            ui.menu_button("+ Add node", |ui| {
+                let at = Pos2::new(400.0, 300.0) - self.pan;
+                self.add_menu(ui, at);
+            });
+            if bar_button(ui, "Arrange", Extra::ArrangeIcon, false, true).on_hover_text("lay out the nodes on this level by their wires; Ctrl+Z puts them back").clicked() {
+                self.clean_up(ui.input(|i| i.time));
+            }
+            self.recordings_menu(ui, true);
         });
     }
+}
+
+/// What a top bar button shows after its word.
+enum Extra {
+    None,
+    /// A small dimmer text: how many nodes run.
+    Count(String),
+    /// Three small nodes, one feeding two: Arrange.
+    ArrangeIcon,
+}
+
+/// A top bar button: its word, then `extra`. `lit`: drawn green, for a state that is on (Run while
+/// running). Not `enabled`: dimmed, and clicks do nothing. Its name for screen readers and tests
+/// is `label` alone.
+fn bar_button(ui: &mut egui::Ui, label: &str, extra: Extra, lit: bool, enabled: bool) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let word = ui.painter().layout_no_wrap(label.to_string(), font.clone(), TEXT);
+    let count = match &extra {
+        Extra::Count(s) => Some(ui.painter().layout_no_wrap(s.clone(), FontId::proportional(font.size - 1.5), DIM)),
+        _ => None,
+    };
+    let (gap, icon) = (6.0, Vec2::new(17.0, 13.0));
+    let extra_w = match &extra {
+        Extra::None => 0.0,
+        Extra::Count(_) => gap + count.as_ref().map_or(0.0, |g| g.size().x),
+        Extra::ArrangeIcon => gap + icon.x,
+    };
+    let pad = ui.spacing().button_padding;
+    let size = Vec2::new(word.size().x + extra_w + 2.0 * pad.x, (word.size().y + 2.0 * pad.y).max(ui.spacing().interact_size.y));
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let v = if enabled { ui.style().interact(&resp).clone() } else { ui.visuals().widgets.noninteractive.clone() };
+        let (fill, stroke) = if lit { (GOOD.gamma_multiply(0.22), Stroke::new(1.0, GOOD)) } else { (v.weak_bg_fill, v.bg_stroke) };
+        let p = ui.painter();
+        p.rect(rect, v.corner_radius, fill, stroke, StrokeKind::Inside);
+        let col = if !enabled { DIM.gamma_multiply(0.7) } else if lit { GOOD } else { v.text_color() };
+        let x0 = rect.left() + pad.x;
+        p.galley_with_override_text_color(Pos2::new(x0, rect.center().y - word.size().y / 2.0), word.clone(), col);
+        let x1 = x0 + word.size().x + gap;
+        match extra {
+            Extra::None => {}
+            Extra::Count(_) => {
+                let g = count.unwrap();
+                let h = g.size().y;
+                p.galley_with_override_text_color(Pos2::new(x1, rect.center().y - h / 2.0), g, if lit { GOOD } else { DIM });
+            }
+            Extra::ArrangeIcon => {
+                let b = Rect::from_min_size(Pos2::new(x1, rect.center().y - icon.y / 2.0), icon);
+                let s = Stroke::new(1.2, col);
+                let k = 4.4;
+                let boxes = [Pos2::new(b.left() + k / 2.0, b.center().y), Pos2::new(b.right() - k / 2.0, b.top() + k / 2.0), Pos2::new(b.right() - k / 2.0, b.bottom() - k / 2.0)];
+                for c in boxes {
+                    p.rect_stroke(Rect::from_center_size(c, Vec2::splat(k)), 1.0, s, StrokeKind::Middle);
+                }
+                let from = Pos2::new(boxes[0].x + k / 2.0, boxes[0].y);
+                for to in [boxes[1], boxes[2]] {
+                    let to = Pos2::new(to.x - k / 2.0, to.y);
+                    let mid = (from.x + to.x) / 2.0;
+                    p.add(CubicBezierShape::from_points_stroke([from, Pos2::new(mid, from.y), Pos2::new(mid, to.y), to], false, Color32::TRANSPARENT, s));
+                }
+            }
+        }
+    }
+    resp
 }
 
 fn describe(e: &GraphError) -> String {
@@ -1562,9 +1642,6 @@ impl App {
         }
         egui::Panel::top("bar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.top_bar(ui);
-        });
-        egui::Panel::top("streams").frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(10, 4)).stroke(Stroke::new(1.0, LINE))).show(ui, |ui| {
-            self.streams_bar(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             self.graph_view(ui);

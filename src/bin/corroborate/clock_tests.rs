@@ -689,7 +689,7 @@ fn make_jiku_inverted_project() {
         app.wire(t, "result", m, &format!("time {n}"));
     }
     d.frames(3);
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     let dir = projects.join("Jiku GT_090912 inverted");
     let file = project::project_in(&dir);
@@ -745,7 +745,7 @@ fn make_hillingdon_project() {
     }
     assert_eq!(app.graph.wires().len(), 8, "{}", app.msg);
     d.frames(3);
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     let dir = root.join("app").join("projects").join("Hillingdon meetings");
     let file = project::project_in(&dir);

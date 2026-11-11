@@ -291,7 +291,8 @@ fn a_dot_says_its_type() {
 #[test]
 fn types_menu() {
     let (mut d, ..) = three();
-    d.click("Types");
+    d.click("+ Add node");
+    d.click_contains("Value of a type");
     for t in ["Audio", "Location", "Event", "JSON"] {
         assert!(d.h.query_by_label(t).is_some(), "{t} is listed");
     }
@@ -326,8 +327,9 @@ fn value_nodes() {
     assert!(json.contains("\"type\":\"time\",\"value\":{\"utc\": 1793822799"), "{json}");
     d.shot("value_place_and_time");
 
-    // Types → Event adds a Value node of events.
-    d.click("Types");
+    // Add node → Value of a type → Event adds a Value node of events.
+    d.click("+ Add node");
+    d.click_contains("Value of a type");
     d.click("Event");
     let ev = d.app().nodes.len() - 1;
     assert!(matches!(&d.app().nodes[ev].kind, Kind::Value { ty, .. } if ty == "event"));
@@ -438,7 +440,11 @@ fn record_inputs_grow_with_the_new_wiring() {
 fn pc_streams_add_a_source() {
     let mut d = Drive::new();
     d.app().mics = vec!["Test Mic (none)".into()];
+    d.app().mics_looked = true;
     d.frames(2);
+    d.click("+ Add node");
+    d.click_contains("Live device");
+    d.shot("live_device_menu");
     d.click("Test Mic (none)");
     let app = d.app();
     let srcs: Vec<NodeId> = (0..app.nodes.len()).filter(|&i| matches!(&app.nodes[i].kind, Kind::Sourcer { input } if input == "mic:Test Mic (none)")).collect();
@@ -447,6 +453,8 @@ fn pc_streams_add_a_source() {
     d.shot("pc_streams");
     d.app().pick_none();
     d.frames(1);
+    d.click("+ Add node");
+    d.click_contains("Live device");
     d.click("Test Mic (none)");
     let app = d.app();
     assert_eq!(app.nodes.iter().filter(|n| matches!(&n.kind, Kind::Sourcer { .. })).count(), 1, "no second source");
@@ -485,7 +493,7 @@ fn clean_up_lays_out_the_nodes_by_their_wires() {
     d.shot("clean_up_before");
     assert_eq!(d.h.query_all_by_label("Results folder").count(), 0, "the button it replaced");
     let before: Vec<Pos2> = d.app().nodes.iter().map(|n| n.pos).collect();
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     d.shot("clean_up_after");
 
@@ -507,7 +515,7 @@ fn clean_up_lays_out_the_nodes_by_their_wires() {
     }
     let down = ids.iter().filter(|&&i| i != lone).map(|&i| app.node_rect(o, i).bottom()).fold(f32::MIN, f32::max);
     assert!(app.node_rect(o, lone).top() > down, "the unwired node is parked underneath");
-    let view = Rect::from_min_size(o, Vec2::new(1800.0, 800.0));
+    let view = app.canvas_rect;
     for &i in &ids {
         assert!(view.contains_rect(app.node_rect(o, i)), "node {i} is in view: {:?}", app.node_rect(o, i));
     }
@@ -532,7 +540,7 @@ fn clean_up_knows_the_size_of_nodes_off_screen() {
         app.sync_many_ports();
     }
     d.frames(3);
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(4);
     let app = d.app();
     let o = app.canvas_origin;

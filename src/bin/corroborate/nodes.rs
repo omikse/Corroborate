@@ -58,6 +58,8 @@ pub enum Kind {
 
 /// The Add node heading "Plugin from file…" goes under.
 pub const PLUGINS: &str = "Plugins";
+/// The Add node heading "Live device" goes under.
+pub const SOURCES: &str = "Sources";
 
 impl Kind {
     pub fn is_source(&self) -> bool {

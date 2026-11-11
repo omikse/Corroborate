@@ -53,7 +53,7 @@ fn clean_up_inside_a_group_stays_inside() {
     assert!(d.app().view.is_some(), "inside the group");
     d.app().nodes[inv].pos = Pos2::new(900.0, 900.0);
     d.frames(2);
-    d.click("Clean up");
+    d.click("Arrange");
     d.frames(3);
     d.shot("groups_clean_up");
     let app = d.app();

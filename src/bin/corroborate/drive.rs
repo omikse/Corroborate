@@ -429,7 +429,7 @@ fn collapse_node() {
 #[test]
 fn add_node_menu() {
     let mut d = Drive::new();
-    d.click("Add node");
+    d.click("+ Add node");
     let text = d.dump();
     for want in ["SOURCES", "DETECTORS", "PLUGINS", "ENF (power hum)", "Metadata", "Combine locations (any)", "Plugin from file…"] {
         assert!(text.contains(want), "{want} not in the menu:\n{text}");
