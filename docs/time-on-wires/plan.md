@@ -120,39 +120,32 @@ The Time type does not change.
    - It is built from the nodes as they are now, so it cannot disagree with the canvas.
    - The results file writes the same trace for each time when it is saved, for readers without
      the project.
-2. **The Time node** (mockup section 5) becomes a plain calculator:
-   - **Start:** the time port, with date boxes that lock and show the incoming time when wired, or
-     take a typed time when not. Its ± shows beside it.
-   - **Corrections:** one row each, made of
-     - a sign (+ or −),
-     - one value field with a unit dropdown (ms, s, min, h, days, years),
-     - a ± column,
-     - a note.
-
-     This replaces the seven boxes per row. Years and months still move on the calendar.
-     - A wired correction (SOURCER's `length`) locks its field and brings its own ±, greyed.
-     - A typed correction is exact.
-     - Each row keeps its own input port, as now.
-   - **Notes** document the node, like comments. They do not travel on the wire; the trace reads
-     them from the node.
-   - **Clock error ±:** one box for a person's judgement of how far the clock that wrote the start
-     may be off.
-     - Filled in, it replaces the start's ±.
-     - Empty, it keeps what came on the wire. Today the error box always replaces the error.
-   - **Result:** date boxes and its ±.
-     - The ± is the clock error and the wired corrections' ± added as squares: ±1 s and ±0.02 s
-       give ±1.000 s.
-     - A hover on it writes the sum out.
-3. Old projects:
-   - a correction row saved as seven boxes reads as one value in seconds, or in years/months when
-     only those boxes are filled;
-   - the old `error_s` reads as the clock error.
+2. **The Time node** (mockup section 5) keeps today's rows of seven boxes, with two stacks
+   running down them.
+   - **Every row shows all seven boxes:** a 0 where nothing changes, not an empty box.
+   - **A ± (s) column on every row**, the input row included, saved as `n.error_s` (0 by default).
+     The ± box under Result goes.
+   - **A note on every row**, saved as `n.note`. Notes document the node like comments and do not
+     travel on the wire; the trace reads them from the node.
+   - **The date stack**, as today: each row's boxes are added or taken away, top to bottom, into
+     the Result's date. Years and months move on the calendar; days and smaller are exact seconds.
+   - **The error stack:** every row's ± adds as squares into the Result's ±, √(Σ ±²).
+     - The row's sign does not matter here: an uncertainty is never subtracted.
+     - A row of zeros with only a ± is how a judgement goes in ("phone clocks are often a second
+       off").
+   - **Wired rows** (SOURCER's `length`) lock their boxes and their ±, both from the wire. The input
+     row's ± is whatever came in.
+   - Under Result, both sums written out:
+     - "12:20:41.000 − 0:02:46.200 − 1:00:00.000 + 0 = 11:17:54.800";
+     - "√(0² + 0.02² + 0² + 1²) = 1.000 s".
+3. Old projects: the old single `error_s` becomes a row of zeros with that ±, so the Result's ± is
+   unchanged.
 
 Tests:
-- a correction in each unit moves the time as named (years and months on the calendar);
-- a wired length locks its row and its ± reaches Result;
-- an empty clock error keeps the incoming ±, a filled one replaces it;
-- an old project's Time nodes read the same Result as before;
+- the date stack moves the time as named (years and months on the calendar), as today;
+- the error stack: ±0, ±0.02, ±0 and ±1 give ±1.000; a row's sign does not change it;
+- a wired length locks its row, and its ± reaches Result;
+- an old project's Time nodes read the same Result and ± as before;
 - the trace of a SOURCER → Time → Audio match chain names the three nodes in order;
 - `drive` PNGs of the Time node and of the trace hover.
 

@@ -68,10 +68,11 @@ code{font:12px var(--mono);color:var(--amber)}
 .tn .title{display:flex;justify-content:space-between;padding:5px 10px;font:12.5px var(--sans);border-bottom:1px solid var(--seam)}
 .tn .title span:last-child{color:var(--dim);font-size:11px}
 .tb{padding:8px 10px 10px;display:flex;flex-direction:column;gap:5px}
-.trow{display:grid;grid-template-columns:78px repeat(7,50px) 50px 26px minmax(0,1fr);gap:4px;align-items:center}
-.trow b:nth-of-type(8){border-color:#6a5a8a}
-.trow.res b:nth-of-type(8){border-color:var(--blue);color:var(--blue)}
-.sum{color:var(--dim);font:11px var(--mono);padding-left:82px}
+.trow{display:grid;grid-template-columns:78px repeat(7,50px) 26px 56px minmax(0,1fr);gap:4px;align-items:center}
+.trow b.pm{border-color:#8a6fc0;margin-left:6px}
+.trow.res b.pm{border-color:var(--blue);color:var(--blue)}
+.pmh{color:#b8a0e8!important;padding-left:6px}
+.sum{color:var(--dim);font:11px var(--mono);padding-left:82px;white-space:pre}
 .crow{display:grid;grid-template-columns:78px 26px 104px 50px 62px minmax(0,1fr);gap:4px;align-items:center}
 .crow b{font-weight:400;background:#1d2025;border:1px solid #3a3f47;border-radius:3px;padding:2px 5px;text-align:right;min-height:20px}
 .crow b.lk{color:var(--dim);background:#23262b}
@@ -215,25 +216,25 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>5 · The Time node</h2>
-    <p>A calculator, nothing more. A start (wired in, or typed into the date boxes), then corrections: each one signed duration with a note saying why. One clock error box for your judgement of how far the clock that wrote the start may be off. Date boxes only where a date is meant: the start and the Result.</p></div>
+    <p>Today's boxes, every row showing all seven (a 0 where nothing changes), plus a ± on every row and a note. Two sums run down the same stack and each gives its own result: the date boxes add and subtract into the Result's date; the ± column adds as squares into the Result's ±.</p></div>
     <div class="scroll"><div class="tn">
       <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
       <div class="tb">
-        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span>±</span><span></span><span></span></div>
-        <div class="trow"><span class="lab"><i class="port t"></i>start</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><b class="lk">0 s</b><span></span><span class="dimt">wired from SOURCER · …3263724.mp4</span></div>
-        <div class="sep"><span>corrections</span></div>
-        <div class="crow"><span class="lab"><i class="port d"></i>1</span><span class="sg">−</span><b class="lk">166.200</b><span class="unit lk">s</span><b class="lk">0.02 s</b><span class="tnote">the stamp marks the end</span></div>
-        <div class="crow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>2</span><span class="sg">−</span><b>1</b><span class="unit">h ⏷</span><b class="none">exact</b><span class="tnote">camera wrote local time (BST), not UTC</span></div>
-        <div class="crow add"><span class="lab">+ add</span><span></span><b></b><span class="unit"></span><b></b><span></span></div>
-        <div class="err"><span>clock error ±</span><b>1 s</b><span class="tnote">phone clocks are often a second off</span><span class="dimt">empty: keeps the start's own ±</span></div>
-        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><b>1.000</b><span></span><span class="dimt">time <i class="port t out"></i></span></div>
-        <div class="sum">hover on ±: √( 1² + 0.02² ) = 1.000 s · the clock error, and the wired length's own ±; typed corrections are exact</div>
+        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span class="pmh">± s</span><span>note</span></div>
+        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><b class="lk pm">0</b><span class="dimt">wired from SOURCER · …3263724.mp4</span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><b class="lk pm">0.02</b><span class="tnote">length of the file · the stamp marks the end</span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>1</b><b>0</b><b>0</b><b>000</b><span class="sg">−</span><b class="pm">0</b><span class="tnote">camera wrote local time (BST), not UTC</span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 3</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>000</b><span class="sg">+</span><b class="pm">1</b><span class="tnote">phone clocks are often a second off</span></div>
+        <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><b></b><span></span></div>
+        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><span></span><b class="pm">1.000</b><span class="dimt">time <i class="port t out"></i></span></div>
+        <div class="sum"><span style="color:var(--text)">date</span>  12:20:41.000 − 0:02:46.200 − 1:00:00.000 + 0 = 11:17:54.800</div>
+        <div class="sum"><span style="color:var(--text)">±   </span>  √( 0² + 0.02² + 0² + 1² ) = 1.000 s</div>
       </div>
     </div></div>
     <div class="cols">
-      <div class="card"><h3>Corrections</h3><p>One field and a unit (ms, s, min, h, days, years) instead of seven boxes. A wired correction (a length) locks its field and brings its own ±, shown greyed; a typed one is exact. Years and months still move on the calendar.</p></div>
-      <div class="card"><h3>Clock error</h3><p>Where the doubt really lives: in the clock that wrote the start. Filled in, it replaces the start's ±; empty, the start keeps what came on the wire.</p></div>
-      <div class="card"><h3>Notes</h3><p>Each correction's note documents the node, like a comment. It does not travel on the wire; the trace on hover reads it from here.</p></div>
+      <div class="card"><h3>Date stack</h3><p>As today: each row's boxes are added or taken away, top to bottom. Years and months move on the calendar; days and smaller are exact seconds. Empty boxes read 0 and show it.</p></div>
+      <div class="card"><h3>Error stack</h3><p>Each row's ± (0 by default) adds as squares, the input's included, into Result's ±. The sign of the row does not matter here: an uncertainty is never subtracted. A row of zeros with only a ± (row 3) is how a judgement like "phone clocks are often a second off" goes in.</p></div>
+      <div class="card"><h3>Wired rows</h3><p>A wired row (a length) locks its boxes and its ±, both from the wire. The input's ± is whatever came in; a node before this one decided it.</p></div>
     </div>
   </section>
 </main>
