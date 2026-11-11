@@ -85,8 +85,13 @@ After the change:
     - It is split at zero: slower on the left, faster on the right.
     - It is green near 0 and red toward 1000 ppm (`SPEED_CHANGE_PPM`, where a sped-up file begins).
     - The anchor row reads "reference".
-- **The six bottom outputs** (links, quality, clock drift, same recording, speed change, gaps) are
-  proposed to go, with their findings shown as marks in Status. This is not yet confirmed; see Open.
+- **The six bottom outputs go** (links, quality, clock drift, same recording, speed change, gaps).
+  - Same recording, speed change and gaps show as marks in the Status cell, with details on hover.
+  - The summary stays in the foot line.
+  - `links` goes last, in stage 4, since the hidden solve reads it until then.
+- **SOURCER gets no end output yet.** Audio match assumes start + length when its end input is
+  unwired. An end output comes when ENF or a speed detector gives real ends.
+- **Order of work:** stages 1 to 5 as below.
 
 ## Stages
 
@@ -203,7 +208,8 @@ Tests:
      row's speed is then that times its speed against the anchor.
    - **Wired on another row:** it is compared with the measured end, as Status compares the start.
 7. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
-   on hover, if the bottom outputs go.
+   on hover. The outputs quality, clock drift, same recording, speed change and gaps go. Saved
+   wires into them are dropped with a message, though no saved project wires them today.
 
 Tests:
 - a `drive` PNG of the Stretch column;
@@ -225,7 +231,8 @@ Tests:
 4. Manual anchors and links: dropping one on the timeline creates a Value node of type time. The
    `anchor|` and `link|` project lines and `manual_*` are removed. Old projects lose them, with a
    message saying how many.
-5. `gather_evidence`, `update_clocks`, `ev.clocks`, `solve_devices` and `stamp_end` go.
+5. `gather_evidence`, `update_clocks`, `ev.clocks`, `solve_devices` and `stamp_end` go, and with
+   them Audio match's `links` output.
    `clock.rs` stays as a library for stage 3's fit.
 6. Playheads (`playhead.rs`): a recording's real-time position comes from the start and end wired
    into it, t s in being start + t × (end − start) ÷ length. With only a start, the speed counts as
@@ -245,7 +252,6 @@ README, `docs/ARCHITECTURE.md`, the Audio match and ENF READMEs, and `docs/audio
 
 - Must every Time on a wire be a real (UTC, Coordinated Universal Time) moment? This is "not sure
   yet". Until a node needs otherwise, the type keeps `clock`, `t` and `utc` as they are.
-- Should the six bottom outputs go, with their findings as Status marks? Asked, not yet answered.
 - Proper error margins for unanchored and fitted times: a separate job.
 - Shared errors: two times anchored on the same phone share its ±, so their difference is far more
   precise than either. One ± per value can't know that, and a node comparing them would overstate
@@ -255,7 +261,5 @@ README, `docs/ARCHITECTURE.md`, the Audio match and ENF READMEs, and `docs/audio
     directly (and cancel when subtracted) before the root sum of squares. Python's `uncertainties`
     package works this way.
   - Not needed until a node compares two times; check for a Rust crate first.
-- SOURCER's end output (start + length), with a guessed ± for clock speed (about 100 ppm × length):
-  add it in stage 1, or wait until something needs it?
 - One speed per phone across groups (`solve_devices`) is lost with the pool. Within a group, the fit
   can still tie one phone's files to one speed.
