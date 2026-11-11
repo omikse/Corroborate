@@ -123,6 +123,7 @@ The Time type does not change.
 2. **The Time node** (mockup section 5) keeps today's rows of seven boxes, with two stacks
    running down them.
    - **Every row shows all seven boxes:** a 0 where nothing changes, not an empty box.
+   - **Each row's + or − sits on its left**, between the row's name and its year box.
    - **A ± (s) column on every row**, the input row included, saved as `n.error_s` (0 by default).
      The ± box under Result goes.
    - **The date stack**, as today: each row's boxes are added or taken away, top to bottom, into

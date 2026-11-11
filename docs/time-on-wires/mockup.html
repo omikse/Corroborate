@@ -68,8 +68,9 @@ code{font:12px var(--mono);color:var(--amber)}
 .tn .title{display:flex;justify-content:space-between;padding:5px 10px;font:12.5px var(--sans);border-bottom:1px solid var(--seam)}
 .tn .title span:last-child{color:var(--dim);font-size:11px}
 .tb{position:relative;padding:8px 10px 10px;display:flex;flex-direction:column;gap:5px}
-.trow{display:grid;grid-template-columns:78px repeat(7,50px) 26px 74px minmax(0,1fr);gap:4px;align-items:center}
-.trow b.pm{border-color:#8a6fc0;margin:0 12px 0 18px}
+.trow{display:grid;grid-template-columns:62px 22px repeat(7,50px) 82px minmax(0,1fr);gap:4px;align-items:center}
+.trow b.pm{border-color:#8a6fc0;margin:0 16px 0 18px}
+.trow.add b.pm{border-color:#3a3f47}
 .trow.res b.pm{border-color:var(--blue);color:var(--blue)}
 .pmh{color:#b8a0e8!important;padding-left:12px}
 .sum{color:var(--dim);font:11px var(--mono);padding-left:82px;white-space:pre}
@@ -220,13 +221,13 @@ code{font:12px var(--mono);color:var(--amber)}
     <div class="scroll"><div class="tn">
       <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
       <div class="tb">
-        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span class="pmh">± s</span><span></span></div>
-        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><b class="lk pm">0</b><span></span></div>
-        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><b class="lk pm">0.02</b><span></span></div>
-        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>1</b><b>0</b><b>0</b><b>000</b><span class="sg">−</span><b class="pm">0</b><span></span></div>
-        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 3</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>000</b><span class="sg">+</span><b class="pm">1</b><span></span></div>
-        <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><b></b><span></span></div>
-        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><span></span><b class="pm">1.000</b><span class="dimt">time <i class="port t out"></i></span></div>
+        <div class="trow hdr"><span></span><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span class="pmh">± s</span><span></span></div>
+        <div class="trow"><span class="lab"><i class="port t"></i>input</span><span></span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><b class="lk pm">0</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><span class="sg">−</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><b class="lk pm">0.02</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 2</span><span class="sg">−</span><b>0</b><b>0</b><b>0</b><b>1</b><b>0</b><b>0</b><b>000</b><b class="pm">0</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 3</span><span class="sg">+</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>000</b><b class="pm">1</b><span></span></div>
+        <div class="trow add"><span class="lab">+ row</span><span></span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="pm"></b><span></span></div>
+        <div class="trow res"><span class="lab">Result</span><span></span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><b class="pm">1.000</b><span class="dimt">time <i class="port t out"></i></span></div>
       </div>
     </div></div>
     <div class="cols">
@@ -289,12 +290,12 @@ function bracket(){
   const res=tb.querySelector('.trow.res b.pm').getBoundingClientRect();
   if(!boxes.length)return;
   const c='#a58ae0';
-  const lx=boxes[0].left-o.left-5, rx=Math.max(...boxes.map(b=>b.right))-o.left+14;
-  const top=boxes[0].top-o.top-5, bot=boxes[boxes.length-1].bottom-o.top+2;
-  const hook=bot-(bot-top)*0.18;
+  const lx=boxes[0].left-o.left-4, rx=Math.max(...boxes.map(b=>b.right))-o.left+13;
+  const top=boxes[0].top-o.top-5, bot=boxes[boxes.length-1].bottom-o.top;
+  const h=boxes[0].height;
   let s=`<svg class="brk" width="${o.width}" height="${o.height}" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible" aria-hidden="true">`;
-  s+=`<path d="M${lx-12} ${hook+3} L${lx-8} ${hook} L${lx-3} ${bot} L${lx} ${top} L${rx} ${top} l0 5" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  boxes.forEach(b=>{s+=`<text x="${b.right-o.left+2}" y="${b.top-o.top+8}" fill="${c}" font-family="Inter,system-ui,sans-serif" font-size="11" font-weight="600">2</text>`});
+  s+=`<path d="M${lx-13} ${bot-h*0.55} L${lx-9} ${bot-h*0.7} L${lx-4} ${bot} L${lx} ${top} L${rx} ${top}" fill="none" stroke="${c}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  boxes.forEach(b=>{s+=`<text x="${b.right-o.left+3}" y="${b.top-o.top+7}" fill="${c}" font-family="JetBrains Mono,Consolas,monospace" font-size="9.5">2</text>`});
   tb.insertAdjacentHTML('beforeend',s+'</svg>');
 }
 bracket();addEventListener('resize',bracket);if(document.fonts)document.fonts.ready.then(bracket);
