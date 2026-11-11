@@ -36,6 +36,10 @@ After the change:
   - Each Audio match row gets a second output: its audio resampled by the speed Audio match measured.
   - The speed is relative to the group: the anchor's clock counts as running true. ENF could later
     correct a group to real time.
+- **Rows with nothing to place them by:** a row with no metadata that audio matched to nothing is
+  greyed out, and both its outputs give nothing.
+  - A row with metadata but no match gives its metadata time and its audio uncorrected.
+  - A row with no metadata in an anchored group gives the time the group puts it at.
 - **Unanchored groups** send times out too. They are placed on the average of the group's metadata,
   or wherever a person dragged them.
   - Each output keeps its own metadata ±. Proper error margins are a separate, later job.
@@ -87,6 +91,8 @@ Only `src/modules/Audio match/node.rs` and its tests.
      in old projects hold.
    - Only the labels drawn on the node and the hover texts change.
 5. Unanchored outputs: `synced_time` stops refusing groups with no anchor.
+   - A row with no metadata and no links is greyed out (the `dead` fade covers the whole row, the
+     outputs included), and `synced_time` gives an error naming why.
    - The time is `rows[k].start`, with the row's own `meta_err`.
    - The source says "unanchored: average of metadata" or "moved by hand".
 6. Saved drags.
@@ -108,9 +114,23 @@ Tests:
 2. Every place that makes a Time (about 20: data.rs, bus.rs, evidence.rs, SOURCER, Time, Value,
    Timeline, ENF, Audio match) appends a step instead of overwriting the text.
 3. Hover on any time output lists its steps (mockup section 1). The results file carries them.
+4. The Time node (mockup section 5), with the same boxes as today plus:
+   - **Steps in:** a list at the top of the steps on the incoming wire, folded to one line
+     ("▾ steps in (1)") until opened.
+   - **A note per row:** a short text after the sign, saying why the row is there ("the stamp marks
+     the end"), saved in the node's rows (`1.note`). It becomes the row's step.
+     - With no note, the step is worded from the numbers alone ("+ 0.4 s").
+     - A wired row names what fed it ("− 166.2 s, length of x.mp4").
+   - **The error box:** filled in, it adds a step ("error ±1 s") with its own note. Empty, it keeps
+     the incoming error and adds no step. Today it always replaces the error.
+   - **Steps out:** a list at the foot, edged in blue: the steps that came in, then this node's.
+     The output carries exactly these.
+   - The node's label stays as it is; the steps carry the reasons.
 
 Tests:
 - a SOURCER → Time → Audio match chain shows three steps in order, with the numbers each changed;
+- a Time node's notes become its steps, and an empty error box keeps the incoming error;
+- `drive` PNGs of the Time node with its steps folded and open;
 - the JSON round-trips.
 
 ### 3 · Audio match fits its own groups

@@ -64,6 +64,32 @@ section{display:flex;flex-direction:column;gap:12px}
 .card h3{margin:0;font:600 13.5px var(--head)}
 .card p{font-size:13px}
 code{font:12px var(--mono);color:var(--amber)}
+.tn{min-width:760px;max-width:820px;background:var(--node);border:2px solid #4a505a;border-radius:6px;font:11.5px var(--mono)}
+.tn .title{display:flex;justify-content:space-between;padding:5px 10px;font:12.5px var(--sans);border-bottom:1px solid var(--seam)}
+.tn .title span:last-child{color:var(--dim);font-size:11px}
+.tb{padding:8px 10px 10px;display:flex;flex-direction:column;gap:5px}
+.trow{display:grid;grid-template-columns:78px repeat(7,52px) 26px minmax(0,1fr);gap:4px;align-items:center}
+.trow b{font-weight:400;background:#1d2025;border:1px solid #3a3f47;border-radius:3px;padding:2px 5px;text-align:right;min-height:20px}
+.trow b.lk{color:var(--dim);background:#23262b}
+.trow.hdr span{color:var(--dim);font:10.5px var(--sans);text-align:center}
+.trow.hdr span:last-child{text-align:left}
+.trow.add{opacity:.4}
+.trow.res b{border-color:var(--blue)}
+.lab{position:relative;color:var(--dim);font-family:var(--sans);padding-left:10px}
+.port{position:absolute;left:-17px;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;background:var(--node);border:2px solid var(--blue)}
+.port.d{border-color:#c9a0e8}
+.port.out{left:auto;right:-17px;position:absolute}
+.dimt{color:var(--dim);font-family:var(--sans);position:relative}
+.trow .dimt:has(.out){text-align:right;padding-right:6px}
+.sg{background:#3a3f47;border-radius:3px;text-align:center;padding:2px 0}
+.tnote{background:#1d2025;border:1px dashed #4a505a;border-radius:3px;padding:2px 6px;font-family:var(--sans);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.err{display:grid;grid-template-columns:120px 60px minmax(0,1fr) auto;gap:6px;align-items:center;margin-top:4px;font-family:var(--sans);color:var(--dim)}
+.err b{font:400 11.5px var(--mono);background:#1d2025;border:1px solid #3a3f47;border-radius:3px;padding:2px 5px;text-align:right;color:var(--text)}
+.stepsin{background:#23262b;border:1px solid #3a3f47;border-radius:4px;padding:5px 8px;display:flex;flex-direction:column;gap:2px}
+.stepsin.out{margin-top:6px;border-color:var(--blue)}
+.stepsin .fold{color:var(--dim);font-family:var(--sans)}
+.stepsin .s{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:6px}
+.stepsin .n{color:var(--dim)}.stepsin .v{color:var(--amber)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 <main>
@@ -75,7 +101,7 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>1 · The Audio match node</h2>
-    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: audio (stretch corrected), and time (recalculated start), blue like every time port. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status.</p></div>
+    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: audio (stretch corrected), and time (recalculated start), blue like every time port. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status. The last row has no metadata and audio matched it to nothing, so there is nothing to place it by: the whole row is greyed out and both outputs give nothing. A row with metadata but no match still gives its metadata time, and its audio uncorrected.</p></div>
     <div class="scroll">
       <div class="am" id="node">
         <div class="title"><span>Audio match</span><span>detector</span></div>
@@ -172,6 +198,35 @@ code{font:12px var(--mono);color:var(--amber)}
       <div class="card"><h3>Still open</h3><p>Whether a Time on a wire must always be a real (UTC) moment. Until a node needs otherwise, the type keeps its clock and utc fields as they are.</p></div>
     </div>
   </section>
+
+  <section>
+    <div><h2>5 · The Time node</h2>
+    <p>The same boxes as today, plus steps. The steps that came in are listed at the top, folded to one line until opened. Every row gets a short note saying why it is there; the note becomes that row's step. The error box, when filled, adds a step too. At the foot, the steps going out: the ones that came in, then this node's.</p></div>
+    <div class="scroll"><div class="tn">
+      <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
+      <div class="tb">
+        <div class="stepsin">
+          <div class="fold">▾ steps in (1)</div>
+          <div class="s"><span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±0 s</span></div>
+        </div>
+        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span>note (becomes the step)</span></div>
+        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><span class="dimt">wired from SOURCER</span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><span class="tnote">the stamp marks the end</span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>400</b><span class="sg">+</span><span class="tnote">phone clock behind GPS (measured)</span></div>
+        <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><span></span></div>
+        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>12</b><b>17</b><b>55</b><b>200</b><span></span><span class="dimt">time <i class="port t out"></i></span></div>
+        <div class="err"><span>error margin ± (s)</span><b>1</b><span class="tnote">checked against the venue clock</span><span class="dimt">empty: keeps the error that came in</span></div>
+        <div class="stepsin out">
+          <div class="fold">steps out (4)</div>
+          <div class="s"><span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±0 s</span></div>
+          <div class="s"><span class="n">2</span><span>Time: − 166.2 s, length of …3263724.mp4 · the stamp marks the end</span><span class="v">12:17:54.8</span></div>
+          <div class="s"><span class="n">3</span><span>Time: + 0.4 s · phone clock behind GPS (measured)</span><span class="v">12:17:55.2</span></div>
+          <div class="s"><span class="n">4</span><span>Time: error ±1 s · checked against the venue clock</span><span class="v">±1 s</span></div>
+        </div>
+      </div>
+    </div></div>
+    <p class="note">A row with no note still makes a step, worded from its numbers alone ("+ 0.4 s"). A wired row names what fed it ("length of …3263724.mp4"). The node's label can stay as it is: the steps carry the reasons.</p>
+  </section>
 </main>
 <script>
 const rows=[
@@ -181,6 +236,7 @@ const rows=[
  {n:"phone 0 1347194274656",grp:2,a:[10,30],b:[10.8,30.8],d:0.6,ppm:31,mark:"gap"},
  {n:"phone 0 1347194408059",a:[44,70],b:[43.6,69.6],d:-0.4,ppm:-80},
  {n:"phone 0 1347194561200",a:[70,92],b:null,none:true,ppm:5,mark:"same"},
+ {n:"phone 0 1347194700311",dead:true},
 ];
 const col=d=>{const a=Math.min(Math.abs(d)/30,1);return `hsl(${130*(1-a)},62%,46%)`};
 const ticks=['12:16','12:18','12:20','12:22','12:24'];
@@ -188,6 +244,12 @@ let h=`<div class="hd" style="background:var(--node)"></div><div class="ruler">$
 const ppmCol=p=>{const a=Math.min(Math.abs(p)/1000,1);return `hsl(${130*(1-a)},62%,46%)`};
 const marks={gap:'<span title="0.4 s missing against …4408059" style="color:var(--text)">⟂ gap</span>',same:'<span style="color:var(--text)">= same recording</span>'};
 h+=rows.map((r,k)=>{
+  if(r.dead){const f='opacity:.45';
+    return `<div class="name" style="height:58px;${f}">${r.n}<div class="ports"><span style="background:var(--amber)">audio</span><span style="background:var(--off);color:var(--dim)">time (start of recording)</span></div></div>`
+     +`<div class="lane" style="${f}"><span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--dim)">no metadata, and audio found no match: nothing to place it by</span></div>`
+     +`<div class="st" style="${f}"><div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no links found</span><span>no time metadata</span></div></div>`
+     +`<div class="st" style="${f}"></div>`
+     +`<div class="out" style="${f}"><div class="nm">…${r.n.slice(-7)}</div><div class="f" style="background:var(--off);color:var(--dim)">audio (stretch corrected)</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated start)</div></div>`;}
   const bar=(x,c)=>x?`<div class="b" style="left:${x[0]}%;width:${x[1]-x[0]}%;background:${c}"></div>`:'';
   let lane=bar(r.b,'var(--blue)')+bar(r.a,'var(--amber)');
   if(r.grp) lane+=`<span style="position:absolute;left:3px;top:3px;background:${r.grp==1?'var(--g1)':'var(--g2)'};color:var(--ink);padding:0 4px">${r.grp}</span>`;
