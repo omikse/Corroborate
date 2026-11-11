@@ -220,27 +220,88 @@ Tests:
 
 ### 4 · Remove the pool
 
-1. ENF:
-   - `grid event time` (anchor) becomes a Time output;
-   - `sync recordings` and `clock drift` (links) become a start and an end Time per recording, tied
-     to the grid's real seconds. Wired into an Audio match anchor's time input, they correct a whole
-     group to real time.
-2. ADS-B check: `anchors` becomes a Time output.
-3. Planes: `anchors = "audio"` goes. A wired time input is just an input, as the ports-simplify
-   todo said.
-4. Manual anchors and links: dropping one on the timeline creates a Value node of type time. The
-   `anchor|` and `link|` project lines and `manual_*` are removed. Old projects lose them, with a
-   message saying how many.
-5. `gather_evidence`, `update_clocks`, `ev.clocks`, `solve_devices` and `stamp_end` go, and with
-   them Audio match's `links` output.
-   `clock.rs` stays as a library for stage 3's fit.
-6. Playheads (`playhead.rs`): a recording's real-time position comes from the start and end wired
-   into it, t s in being start + t × (end − start) ÷ length. With only a start, the speed counts as
-   1. Recordings with no wired time move on their own clock only.
+What the global solve touches today, module by module, and what each becomes. Surveyed
+2026-11-11 from the code: every caller of `ev.clocks`, `ev.links`, `gather_evidence`, the
+playheads and the `anchor`/`link` types.
+
+**App core (`src/bin/corroborate`)**
+1. `evidence.rs`:
+   - Goes: `gather_evidence`, `update_clocks`, `carry_playheads`, `not_comparable`, and
+     `ev.clocks`, `ev.links`, `ev.anchors` and `ev.off` (evidence switched off by hand).
+   - Stays: `clock_of`, the recording identity a Time's `clock` names, which Audio match uses to
+     group files on one clock.
+2. `main.rs`: the per-frame `update_clocks()` call and `ev.stamp_end.clear()` go.
+3. The project file:
+   - `evidence_text` stops writing the `anchor|`, `link|` and `off|` lines.
+   - `evidence_line` still reads them from old projects, drops them, and says how many.
+   - Manual anchors and links become small Value nodes of type time.
+4. The results file: `clocks_json` (the solved clocks and the "not comparable" list) goes. Each
+   time gets its trace instead (stage 2).
+5. The **Same clock / Separate clocks** actions on a source's right-click menu (`same_clock`,
+   `separate_clocks`, `shares_clock`) tied two files from one phone to one solved speed
+   (`solve_devices`).
+   - They stay as labels only: Audio match still groups rows on one clock.
+   - Their only effect on speed is inside Audio match's own fit.
+6. `playhead.rs`:
+   - Each recording keeps its own playhead on its own clock (`playhead_on`, `set_playhead`), as
+     now.
+   - Today's "absolute groups" and "floating clocks" came from the solve's clock kinds.
+     - They go.
+     - The real-time playhead (`ph.utc`, `set_utc_playhead`) lives in the **Timeline node**.
+   - A recording follows it only when its start (and end) times are wired into that Timeline. Its
+     position is t = (utc − start) × length ÷ (end − start).
+   - `active_clock`, `active_key`, `is_active_clock` and `live_now` are reworked around that.
+7. `sound.rs`: playback reads `playhead_on(clock_of(src))`, which is unchanged.
+8. `bus.rs`:
+   - A plugin's own Time output (from its anchor, `s.anchor`) is unchanged.
+   - Events and tracks it receives without a clock still get the clock of the audio they heard.
+
+**Modules (`src/modules`)**
+
+9. **Audio match:**
+   - It places groups from its own fit (stage 3), not from `ev.clocks`.
+   - `synced_time` reads the fit.
+   - `links` goes.
+   - `migrate_match` (which read `ev.stamp_end` to convert projects older than per-row times)
+     goes; such projects are not read any more.
+10. **ENF (power hum):**
+    - `sync recordings` and `clock drift` (links) go.
+    - `time of recording` (already a Time) becomes "audio start time", and a new "audio end time"
+      comes from the hum's own speed against the grid.
+    - `grid event time` (anchor) becomes a Time output.
+    - The node's cursor (`clock_of` + `playhead_on`) is unchanged.
+11. **ADS-B check:**
+    - `anchors` (anchor) becomes "audio start time", and "audio end time" when the matched planes
+      span long enough to measure a speed.
+    - Its `time` input stays an input.
+12. **Planes (Doppler):** the `anchors = "audio"` key on its `time` input goes. A wired time is just
+    an input. Its playhead cursor is unchanged.
+13. **Plugin:** the manifest key `anchors = "audio"` goes from `module_manifest.rs`
+    (`anchoring_inputs`), so no plugin can feed the pool. Plugins with `anchor` or `link` outputs
+    give Time outputs instead.
+14. **Timeline:**
+    - Its rows already take wired Times (the `time` input); it gains the real-time playhead from
+      point 6.
+    - Each row needs the recording's start and, if known, end.
+15. **SOURCER:** its time output (the metadata, ±0) is unchanged; `stamp_end` goes with the old
+    format.
+16. **Types:** `anchor` and `link` (`src/types/anchor`, `src/types/link`) are retired, so the Types
+    menu no longer lists them. A project wire carrying one is dropped with a message; none is
+    expected.
+17. **Events and tracks** (Planes, ENF, plugins) stay on their recording's clock, in seconds into
+    the recording. A node that needs them in real time takes that recording's start and end on a
+    wire beside them.
+
+**Library (`src`)**
+
+18. `clock.rs` stays: `solve` is used inside Audio match (stage 3) on one group's links.
+    `anchors_from_json`, `links_from_json` and `solve_devices` go.
 
 Tests:
 - the existing clock and playhead tests rewritten against wired times;
+- clicking the Timeline moves the playheads of the recordings wired into it, and only those;
 - an ENF → Time → Audio match chain dates a group;
+- an old project with `anchor|` and `link|` lines opens, drops them, and says how many;
 - no evidence reaches a recording without a wire.
 
 ### 5 · Docs
