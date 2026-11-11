@@ -1,44 +1,25 @@
-//! The project's clocks: which clock each node's times are on, the evidence the nodes give about
-//! them, and the solve (`corroborate::clock`).
+//! Which clock each node's times are on. There is no project-wide pool of evidence and no global
+//! clock solve any more (Time on wires, stage 4, 2026-11-11): a time reaches a node only on a wire,
+//! and each node that measures clocks (Audio match) fits its own.
 //!
 //! - **Clocks**: each source node is its own clock, named by its stable id, unless Same clock
-//!   (right-click on several selected sources) gave them one shared id. A node fed audio is on
-//!   the clock of that audio's source.
-//! - **Evidence**, gathered every frame and solved again when it changes:
-//!   - each live source's own anchor (stream times, this PC's clock); a time written in a file is
-//!     never evidence by itself;
-//!   - the time of the row a person anchored an Audio match group on;
-//!   - a time wired into an input that module.toml marks `anchors = "audio"`: the audio starts at
-//!     that time (an anchor when the time is UTC, a link when it is on another clock);
-//!   - every `anchor` and `link` output in the project, wired or not;
-//!   - manual anchors and links (saved in the project).
-//! - Each piece of evidence can be switched off (its key in `evidence_off`, saved in the project).
+//!   (right-click on several selected sources) gave them one shared id: a label only, saying the
+//!   files are one recording's parts. A node fed audio is on the clock of that audio's source.
+//! - Projects saved before stage 4 may hold evidence lines (`anchor|`, `link|`, `off|`,
+//!   `stamp-end|`): they are read, dropped, and counted in a message.
 //!
-//! Project lines: `clock|<node id>|<clock id>`, `off|<evidence key>`,
-//! `anchor|<clock>|<t>|<utc>|<error_s>`, `link|<a>|<t_a>|<b>|<t_b>|<error_s>`.
+//! Project lines: `format|2`, `clock|<node id>|<clock id>`.
 
 use super::*;
-use corroborate::clock::{self, Anchor as ClockAnchor, Link};
-use corroborate::data::Data;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The evidence and what the solve made of it.
+/// Which sources share a clock, and what an old project held that is no longer read.
 #[derive(Default)]
 pub struct Evidence {
     /// Source node id → shared clock id (Same clock).
     pub share: BTreeMap<String, String>,
-    /// Keys of the evidence switched off.
-    pub off: BTreeSet<String>,
-    /// While loading a project saved before there were Time nodes: the sources whose stamp was read
-    /// as the recording's end.
-    pub stamp_end: BTreeSet<String>,
-    /// Anchors and links made by hand, kept from older projects.
-    pub manual_anchors: Vec<ClockAnchor>,
-    pub manual_links: Vec<Link>,
-    /// All evidence last gathered, with its on/off state, and the clocks solved from it.
-    pub anchors: Vec<ClockAnchor>,
-    pub links: Vec<Link>,
-    pub clocks: clock::Clocks,
+    /// While loading: old evidence lines dropped (anchors, links, switches).
+    pub dropped: (usize, usize, usize),
 }
 
 impl App {
@@ -59,123 +40,6 @@ impl App {
         let audio = self.graph.nodes()[i].spec.inputs.iter().find(|p| p.kind == PortKind::Audio)?;
         let (f, _) = self.graph.feeder(i, audio.name)?;
         self.clock_at(f, depth + 1)
-    }
-
-    /// The clock of what is wired into input `port` of node `i`.
-    fn clock_into(&self, i: NodeId, port: &str) -> Option<String> {
-        let (f, _) = self.graph.feeder(i, port)?;
-        self.clock_of(f)
-    }
-
-    /// Time inputs of node `i` that anchor another input's clock (module.toml `anchors`).
-    fn anchoring_inputs(&self, i: NodeId) -> Vec<(String, String)> {
-        match self.manifest_of(i) {
-            Some(m) => m.anchors.clone(),
-            None if matches!(self.nodes[i].kind, Kind::Planes) => corroborate::modules::planes::manifest().anchors.clone(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Every piece of evidence in the project now, each with its on/off state.
-    pub(crate) fn gather_evidence(&self) -> (Vec<ClockAnchor>, Vec<Link>) {
-        let (mut an, mut ln) = (Vec::new(), Vec::new());
-        for i in 0..self.nodes.len() {
-            let n = &self.nodes[i];
-            if n.hidden {
-                continue;
-            }
-            // A source's own anchor: its time 0 is at utc0. A time written in a file is only a
-            // claim until a person picks it as an anchor, wired or not.
-            if n.kind.is_source() && self.source_file(i).is_none() {
-                let a = n.state.lock().unwrap().anchor.clone();
-                if let (Some(a), Some(c)) = (a, self.clock_of(i)) {
-                    an.push(ClockAnchor { clock: c, t: 0.0, utc: a.utc0, error_s: a.error_s, from: n.uid.clone(), enabled: true });
-                }
-            }
-            // A row an Audio match node's person picked: its audio starts at that row's time.
-            if matches!(n.kind, Kind::AudioMatch { .. }) {
-                an.extend(self.match_anchors(i));
-            }
-            // A time wired into an anchoring input: the audio starts at that time.
-            for (tin, ain) in self.anchoring_inputs(i) {
-                let (Some((f, o)), Some(ac)) = (self.graph.feeder(i, &tin), self.clock_into(i, &ain)) else { continue };
-                let Ok(Data::Time { clock: tc, t, utc, error_s, .. }) = self.value_from(f, o) else { continue };
-                if tc == ac {
-                    continue; // the audio's own time: nothing new
-                }
-                match utc {
-                    Some(u) => an.push(ClockAnchor { clock: ac, t: 0.0, utc: u, error_s, from: n.uid.clone(), enabled: true }),
-                    None => ln.push(Link { a: ac, t_a: 0.0, b: tc, t_b: t, error_s, from: n.uid.clone(), enabled: true }),
-                }
-            }
-            // Anchor and link outputs, wired or not.
-            for p in &self.graph.nodes()[i].spec.outputs {
-                let PortKind::Custom(k @ ("anchor" | "link")) = p.kind else { continue };
-                let Ok(Data::Custom { json, .. }) = self.value_from(i, p.name) else { continue };
-                let own = self.clock_of(i).unwrap_or_else(|| n.uid.clone());
-                if k == "anchor" {
-                    an.extend(clock::anchors_from_json(&json, &own, &n.uid));
-                } else {
-                    ln.extend(clock::links_from_json(&json, &own, &n.uid));
-                }
-            }
-        }
-        an.extend(self.ev.manual_anchors.iter().cloned());
-        ln.extend(self.ev.manual_links.iter().cloned());
-        for a in &mut an {
-            a.enabled = !self.ev.off.contains(&a.key());
-        }
-        for l in &mut ln {
-            l.enabled = !self.ev.off.contains(&l.key());
-        }
-        (an, ln)
-    }
-
-    /// Gathers the evidence and solves the clocks again when it changed.
-    pub(crate) fn update_clocks(&mut self) {
-        let (an, ln) = self.gather_evidence();
-        if an != self.ev.anchors || ln != self.ev.links {
-            let new = clock::solve(&an, &ln);
-            self.carry_playheads(&new);
-            self.ev.clocks = new;
-            (self.ev.anchors, self.ev.links) = (an, ln);
-        }
-    }
-
-    /// New evidence gave a clock real time, or took it away: its playhead moves over at the same
-    /// moment. The selected node's wins the real-time one.
-    fn carry_playheads(&mut self, new: &clock::Clocks) {
-        let old = &self.ev.clocks;
-        let active = self.active_clock();
-        let mut clocks: BTreeSet<String> = self.ph.floating.keys().cloned().collect();
-        clocks.extend(self.nodes.iter().enumerate().filter_map(|(i, _)| self.clock_of(i)));
-        let (mut utc, mut local) = (Vec::new(), Vec::new());
-        for c in &clocks {
-            let (o, n) = (old.get(c), new.get(c));
-            match (o.kind == clock::Kind::Absolute, n.kind == clock::Kind::Absolute) {
-                (false, true) => {
-                    if let Some(&t) = self.ph.floating.get(c) {
-                        utc.push((Some(c) == active.as_ref(), n.at(t), c.clone()));
-                    }
-                }
-                (true, false) => {
-                    if let Some(u) = self.ph.utc {
-                        local.push((c.clone(), o.back(u)));
-                    }
-                }
-                _ => {}
-            }
-        }
-        utc.sort_by_key(|x| !x.0);
-        for (i, (is_active, at, c)) in utc.into_iter().enumerate() {
-            if i == 0 && (is_active || self.ph.utc.is_none()) {
-                self.ph.set(true, "", at);
-            }
-            self.ph.floating.remove(&c);
-        }
-        for (c, t) in local {
-            self.ph.set(false, &c, t);
-        }
     }
 
     /// Same clock: sources `nodes` share one clock (named by the smallest of their clocks), with
@@ -214,199 +78,45 @@ impl App {
         self.ev.share.contains_key(&self.nodes[i].uid)
     }
 
-    /// The project lines for clocks and evidence (see the top of this file).
+    /// The project lines for clocks (see the top of this file).
     pub(crate) fn evidence_text(&self) -> String {
-        // `format|2`: Audio match's rows have a time each (older files are converted on loading).
+        // `format|2`: Audio match's rows have a time each.
         let mut t = String::from("format|2\n");
         for (n, c) in &self.ev.share {
             t.push_str(&format!("clock|{}|{}\n", clean(n), clean(c)));
         }
-        for k in &self.ev.off {
-            t.push_str(&format!("off|{}\n", clean(k)));
-        }
-        for a in &self.ev.manual_anchors {
-            t.push_str(&format!("anchor|{}|{}|{}|{}\n", clean(&a.clock), a.t, a.utc, a.error_s));
-        }
-        for l in &self.ev.manual_links {
-            t.push_str(&format!("link|{}|{}|{}|{}|{}\n", clean(&l.a), l.t_a, clean(&l.b), l.t_b, l.error_s));
-        }
         t
     }
 
-    /// Reads one project line of clocks and evidence; false when it is not one.
+    /// Reads one project line of clocks; an old evidence line is counted and dropped. False when
+    /// it is not one.
     pub(crate) fn evidence_line(&mut self, f: &[&str]) -> bool {
-        let num = |s: &str| s.trim().parse::<f64>().ok();
         match f {
             ["clock", n, c] => {
                 self.ev.share.insert(n.to_string(), c.to_string());
             }
-            ["off", k] => {
-                self.ev.off.insert(k.to_string());
-            }
-            ["format", _] => {}
-            ["stamp-end", u] => {
-                self.ev.stamp_end.insert(u.to_string());
-            }
-            ["anchor", c, t, u, e] => {
-                if let (Some(t), Some(utc), Some(error_s)) = (num(t), num(u), num(e)) {
-                    self.ev.manual_anchors.push(ClockAnchor { clock: c.to_string(), t, utc, error_s, from: "manual".into(), enabled: true });
-                }
-            }
-            ["link", a, ta, b, tb, e] => {
-                if let (Some(t_a), Some(t_b), Some(error_s)) = (num(ta), num(tb), num(e)) {
-                    self.ev.manual_links.push(Link { a: a.to_string(), t_a, b: b.to_string(), t_b, error_s, from: "manual".into(), enabled: true });
-                }
-            }
+            ["format", _] | ["stamp-end", _] => {}
+            ["anchor", ..] => self.ev.dropped.0 += 1,
+            ["link", ..] => self.ev.dropped.1 += 1,
+            ["off", _] => self.ev.dropped.2 += 1,
             _ => return false,
         }
         true
     }
-}
 
-/// The groups of `clocks` (empty ones skipped) when they are not all one group: times on
-/// different groups cannot be compared, as nothing links them. Each: (group, its clocks).
-pub fn not_comparable(clocks: &clock::Clocks, used: &[String]) -> Vec<(String, Vec<String>)> {
-    let mut g: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for c in used.iter().filter(|c| !c.is_empty()) {
-        let i = clocks.get(c);
-        let key = if i.kind == clock::Kind::Absolute { clock::UTC.to_string() } else { i.group };
-        g.entry(key).or_default().insert(c.clone());
-    }
-    if g.len() < 2 {
-        return Vec::new();
-    }
-    g.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
-}
-
-impl App {
-    /// The result file's time part: every clock, every piece of evidence (with its switch and
-    /// contradictions), the events of the nodes `ids` with their clock and UTC ± error when known,
-    /// and the clock groups that cannot be compared.
-    pub(crate) fn clocks_json(&self, ids: &[NodeId]) -> String {
-        let c = &self.ev.clocks;
-        let ev_key = |e: &clock::Ev| match *e {
-            clock::Ev::Anchor(i) => self.ev.anchors.get(i).map(|a| a.key()),
-            clock::Ev::Link(i) => self.ev.links.get(i).map(|l| l.key()),
-        };
-        let clocks: Vec<String> = c
-            .clocks
-            .iter()
-            .map(|(id, i)| {
-                let bd: Vec<String> = i.breakdown.iter().map(|(e, v)| format!("{{\"evidence\":\"{}\",\"variance\":{v}}}", json_escape(&ev_key(e).unwrap_or_default()))).collect();
-                format!(
-                    "{{\"id\":\"{}\",\"kind\":\"{}\",\"group\":\"{}\",\"offset\":{},\"error_s\":{},\"rate\":{},\"rate_error\":{},\"center\":{},\"speed_share\":{},\"breakdown\":[{}]}}",
-                    json_escape(id),
-                    match i.kind {
-                        clock::Kind::Absolute => "absolute",
-                        clock::Kind::Relative => "relative",
-                        clock::Kind::None => "unanchored",
-                    },
-                    json_escape(&i.group),
-                    i.offset,
-                    i.error_s,
-                    i.rate,
-                    i.rate_error,
-                    i.center,
-                    i.speed_share,
-                    bd.join(",")
-                )
-            })
-            .collect();
-        let z = |e: clock::Ev| c.contradictions.iter().find(|(x, _)| *x == e).map_or("null".to_string(), |(_, z)| format!("{z:.2}"));
-        let mut evidence: Vec<String> = self
-            .ev
-            .anchors
-            .iter()
-            .enumerate()
-            .map(|(k, a)| {
-                format!(
-                    "{{\"type\":\"anchor\",\"key\":\"{}\",\"from\":\"{}\",\"clock\":\"{}\",\"t\":{},\"utc\":{},\"error_s\":{},\"enabled\":{},\"contradiction_z\":{}}}",
-                    json_escape(&a.key()),
-                    json_escape(&a.from),
-                    json_escape(&a.clock),
-                    a.t,
-                    a.utc,
-                    a.error_s,
-                    a.enabled,
-                    z(clock::Ev::Anchor(k))
-                )
-            })
-            .collect();
-        evidence.extend(self.ev.links.iter().enumerate().map(|(k, l)| {
-            format!(
-                "{{\"type\":\"link\",\"key\":\"{}\",\"from\":\"{}\",\"a\":\"{}\",\"t_a\":{},\"b\":\"{}\",\"t_b\":{},\"error_s\":{},\"enabled\":{},\"contradiction_z\":{}}}",
-                json_escape(&l.key()),
-                json_escape(&l.from),
-                json_escape(&l.a),
-                l.t_a,
-                json_escape(&l.b),
-                l.t_b,
-                l.error_s,
-                l.enabled,
-                z(clock::Ev::Link(k))
-            )
-        }));
-        let events = self.all_events();
-        let events: Vec<_> = events.into_iter().filter(|(i, _)| ids.contains(i)).collect();
-        let ev_j: Vec<String> = events
-            .iter()
-            .map(|(i, e)| {
-                let utc = c.to_utc(&e.clock, e.t_start).map_or("null".to_string(), |(u, ce)| format!("{u},\"utc_error_s\":{}", ce.hypot(e.error_s)));
-                format!(
-                    "{{\"node\":\"{}\",\"clock\":\"{}\",\"t_start\":{},\"t_end\":{},\"label\":\"{}\",\"error_s\":{},\"utc\":{utc}}}",
-                    json_escape(&self.nodes[*i].uid),
-                    json_escape(&e.clock),
-                    e.t_start,
-                    e.t_end,
-                    json_escape(&e.label),
-                    e.error_s
-                )
-            })
-            .collect();
-        let used: Vec<String> = events.iter().map(|(_, e)| e.clock.clone()).collect();
-        let nc: Vec<String> = not_comparable(c, &used)
-            .iter()
-            .map(|(g, cs)| format!("{{\"group\":\"{}\",\"clocks\":[{}]}}", json_escape(g), cs.iter().map(|x| format!("\"{}\"", json_escape(x))).collect::<Vec<_>>().join(",")))
-            .collect();
-        format!(
-            ",\"clocks\":[{}],\"evidence\":[{}],\"events\":[{}],\"not_comparable\":[{}]",
-            clocks.join(","),
-            evidence.join(","),
-            ev_j.join(","),
-            nc.join(",")
-        )
+    /// The message for old evidence lines dropped while loading, if any; resets the count.
+    pub(crate) fn dropped_evidence(&mut self) -> Option<String> {
+        let (a, l, o) = std::mem::take(&mut self.ev.dropped);
+        if a + l + o == 0 {
+            return None;
+        }
+        let n = |k: usize, one: &str, many: &str| (k > 0).then(|| format!("{k} {}", if k == 1 { one } else { many }));
+        let what: Vec<String> = [n(a, "anchor", "anchors"), n(l, "link", "links"), n(o, "evidence switch", "evidence switches")].into_iter().flatten().collect();
+        Some(format!("dropped from the old project: {} (there is no global clock solve any more; a time made by hand is a Value node of type time, wired where it is needed)", what.join(", ")))
     }
 
     /// A node's name, or its module's when it has none.
     pub(crate) fn node_name(&self, i: NodeId) -> String {
         if self.nodes[i].label.is_empty() { self.graph.nodes()[i].spec.name.to_string() } else { self.nodes[i].label.clone() }
-    }
-
-    /// Every event on an output of the project, with the node it came from.
-    pub(crate) fn all_events(&self) -> Vec<(NodeId, corroborate::data::Event)> {
-        let mut out = Vec::new();
-        for i in 0..self.nodes.len() {
-            let n = &self.nodes[i];
-            if n.hidden {
-                continue;
-            }
-            for p in &self.graph.nodes()[i].spec.outputs {
-                if p.kind != PortKind::Event {
-                    continue;
-                }
-                if let Ok(Data::Events(v)) = self.value_from(i, p.name) {
-                    out.extend(v.into_iter().map(|e| (i, e)));
-                }
-            }
-            if matches!(n.kind, Kind::Enf { .. }) {
-                let clock = self.clock_of(i).unwrap_or_default();
-                let s = n.state.lock().unwrap();
-                out.extend(s.enf.segments.iter().map(|g| {
-                    let (label, detail) = (format!("{:.3} Hz", g.mean_hz), format!("hum {:.3} Hz ({:.3}–{:.3}), harmonic {}", g.mean_hz, g.min_hz, g.max_hz, g.harmonic));
-                    (i, corroborate::data::Event { clock: clock.clone(), t_start: g.t_start, t_end: g.t_end, label, detail, error_s: 0.0 })
-                }));
-            }
-        }
-        out
     }
 }

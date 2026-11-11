@@ -368,9 +368,6 @@ pub struct Manifest {
     /// How the node looks ([look] and the port look keys).
     pub frame: FrameLook,
     pub port_looks: Vec<(String, PortLook)>,
-    /// Time inputs that anchor another input's clock (`[[input]] anchors = "audio"`): (time
-    /// input, anchored input). The wired time is when that input's audio starts.
-    pub anchors: Vec<(String, String)>,
     /// The last inputs' names when they are `many = true`: they grow as they are wired ("in 1",
     /// "in 2", …), together, one row at a time, when there are several.
     pub many: Vec<String>,
@@ -525,7 +522,6 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         }
     };
     let mut port_looks: Vec<(String, PortLook)> = Vec::new();
-    let mut anchors: Vec<(String, String)> = Vec::new();
     let mut many: Vec<String> = Vec::new();
     let mut many_out: Vec<String> = Vec::new();
     let mut sockets: Vec<Socket> = Vec::new();
@@ -577,10 +573,8 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             if v.iter().any(|q| q.name == name) {
                 return Err(format!("[[{k}]] {name} is declared twice"));
             }
-            match p.get("anchors") {
-                None => {}
-                Some(toml::Value::String(a)) if k == "input" && kind == PortKind::Time => anchors.push((name.to_string(), a.clone())),
-                Some(_) => return Err(format!("[[{k}]] {name}: `anchors` goes on a time input and names another input")),
+            if p.get("anchors").is_some() {
+                return Err(format!("[[{k}]] {name}: `anchors` is retired (2026-11-11): a wired time is an input like any other; give a time output instead"));
             }
             match p.get("many") {
                 None | Some(toml::Value::Boolean(false)) => {}
@@ -615,9 +609,6 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         if outputs.get(first_out + k).map(|p| p.name) != Some(m.as_str()) {
             return Err(format!("[[output]] {m}: `many` goes on the last outputs only"));
         }
-    }
-    if let Some((t, a)) = anchors.iter().find(|(_, a)| !inputs.iter().any(|p| p.name == a)) {
-        return Err(format!("[[input]] {t}: anchors \"{a}\", which is not an input"));
     }
     let frame = match t.get("look") {
         None => FrameLook::default(),
@@ -735,7 +726,6 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         protocol,
         frame,
         port_looks,
-        anchors,
         many,
         many_out,
         script: None,
@@ -858,7 +848,7 @@ about = "Where the hum is used."
 min_quality = "weak"
 [[output]]
 name = "sync"
-kind = "link"
+kind = "time"
 status = "planned"
 needs = ["audio", "audio 2"]
 [[output]]
@@ -908,7 +898,6 @@ kind = "text"
             protocol: 1,
             frame: FrameLook::default(),
             port_looks: vec![],
-            anchors: vec![],
             many: vec![],
             many_out: vec![],
             script: None,

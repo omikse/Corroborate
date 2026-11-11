@@ -330,6 +330,36 @@ Tests:
 
 ### 4 · Remove the pool
 
+Done 2026-11-11. As planned, with these differences:
+- Manual anchors and links in old projects are dropped and counted ("dropped from the old
+  project: 2 anchors, 1 link, 1 evidence switch"); they are not turned into Value nodes. A time made
+  by hand is a Value node of type time, wired where it is needed.
+- A wire from a retired output (Audio match `links`, ADS-B check `anchors`, and the five from
+  stage 3) is dropped and named in one message. ENF's `time of recording` is renamed `audio start
+  time`, and saved wires follow the new name. A project saved before Audio match's rows had a time
+  each is no longer converted: its old time wire is dropped, with a message.
+- Audio match's links go to the result file (`links`, with each link's source) instead of a wire.
+- The Timeline gains an `end` input per row (media, start, end). A recording follows the real-time
+  playhead while its start is wired into a Timeline: Follow {t0, u0, k}, refreshed every frame, k
+  from the start and end when both are wired, else 1. Its clock is its media's (a Time node's result
+  is on UTC, so the time's own clock cannot say which recording it is). One that starts or stops
+  following moves its playhead over at the same moment (a small `update_follow`, in place of
+  `carry_playheads`). A recording in two Timelines follows the first.
+- ENF's `audio end time` is planned (greyed): the log match finds an offset only, and measuring the
+  hum's speed against the grid is its own job. `sync recordings` and `clock drift` are gone.
+- ADS-B check gives `audio start time` and, at the end of the audio with two passes or more, `audio
+  end time`, from `clock::solve` on its passes (the 100 ppm speed prior); the drift it measured is
+  in the source line. No gate on how long the passes span: the end's error shows it.
+- A manifest with `anchors` is refused with a message, not ignored; kinds `anchor` and `link` are
+  unknown.
+- `clock::solve_devices` stays: the Jiku evaluation (tests/jiku.rs) uses it on all its links at
+  once. `anchors_from_json` and `links_from_json` are gone.
+- Tests: Same clock and dropped evidence; no time without a wire; the pool types retired; the
+  result file with no pool; one real-time playhead (start and end wired, joining and leaving); the
+  Timeline click moves only the recordings wired in; the old project's wires dropped and named. Not
+  written: an ENF → Time → Audio match chain (ENF needs the grid logs to date anything; the
+  Hillingdon project, ignored, covers ENF into a Timeline).
+
 What the global solve touches today, module by module, and what each becomes. Surveyed
 2026-11-11 from the code: every caller of `ev.clocks`, `ev.links`, `gather_evidence`, the
 playheads and the `anchor`/`link` types.

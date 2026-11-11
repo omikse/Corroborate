@@ -1,9 +1,11 @@
 //! Playheads. There is one real-time playhead, in UTC (Coordinated Universal Time), shared by all
-//! Timeline nodes and followed by anything with a real time. A clock with no real time keeps its
-//! own, linked to nothing. A view asks for the playhead on its own clock and the solved clocks
-//! convert it. The selected node's clock has the active playhead. When new evidence gives a clock
-//! real time or takes it away, its playhead moves over at the same moment (evidence.rs
-//! `carry_playheads`).
+//! Timeline nodes. A recording follows it only when its start time (and, if known, its end time)
+//! is wired into a Timeline: its moment t is then at start + t, or with an end,
+//! t = (playhead − start) × length ÷ (end − start) (`Follow`, refreshed every frame by
+//! `update_follow`). Every other recording keeps its own playhead, on its own clock, linked to
+//! nothing. A view asks for the playhead on its own clock (`playhead_on`). The selected node's
+//! clock has the active playhead. When a recording starts or stops following, its playhead moves
+//! over at the same moment.
 //!
 //! Play on a SOURCER (or Space) plays and pauses: the active playhead moves in real time and
 //! linked views follow. A live source's playhead stops at "now", the newest audio received, and
@@ -11,15 +13,37 @@
 //! jumps back to now. A recording (a simulation) plays to its end and pauses there.
 
 use super::*;
-use corroborate::clock::Kind as Ck;
 use std::collections::BTreeMap;
+
+/// How a recording follows the real-time playhead: its moment `t0` is at `u0` (UTC), and it runs
+/// `k` of its seconds per real second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Follow {
+    pub t0: f64,
+    pub u0: f64,
+    pub k: f64,
+}
+
+impl Follow {
+    /// The moment on the recording at real time `utc`.
+    pub fn t(&self, utc: f64) -> f64 {
+        self.t0 + (utc - self.u0) * self.k
+    }
+
+    /// The real time of moment `t` on the recording.
+    pub fn utc(&self, t: f64) -> f64 {
+        self.u0 + (t - self.t0) / self.k
+    }
+}
 
 #[derive(Default)]
 pub struct Playheads {
-    /// Where every absolute group is, in UTC.
+    /// The real-time playhead, in UTC.
     pub utc: Option<f64>,
-    /// Clock with no real time → position on it.
-    pub floating: BTreeMap<String, f64>,
+    /// Clock not following it → position on it.
+    pub own: BTreeMap<String, f64>,
+    /// Clocks following the real-time playhead, from the Timelines' wired times.
+    pub follow: BTreeMap<String, Follow>,
     /// Counts the moves, so views that follow the playhead (Planes) know when it moved.
     pub rev: u64,
     pub playing: bool,
@@ -33,7 +57,7 @@ impl Playheads {
         if absolute {
             self.utc = Some(pos);
         } else {
-            self.floating.insert(clock.to_string(), pos);
+            self.own.insert(clock.to_string(), pos);
         }
         self.rev += 1;
     }
@@ -43,29 +67,80 @@ impl Playheads {
         if absolute {
             self.utc
         } else {
-            self.floating.get(clock).copied()
+            self.own.get(clock).copied()
         }
     }
 }
 
 impl App {
+    /// Which recordings follow the real-time playhead now: those whose start time is wired into
+    /// a Timeline (the first Timeline that has it). A start and end on one clock give its speed.
+    pub(crate) fn follows_now(&self) -> BTreeMap<String, Follow> {
+        let mut out = BTreeMap::new();
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].hidden || !matches!(self.nodes[i].kind, Kind::Timeline { .. }) {
+                continue;
+            }
+            for r in self.timeline_rows(i) {
+                let (Some(c), Some((u0, _))) = (r.clock.clone(), r.at) else { continue };
+                let k = match (r.end, r.t1) {
+                    (Some((u1, _)), Some(t1)) if u1 != u0 && t1 != r.t0 && ((t1 - r.t0) / (u1 - u0)) > 0.0 => (t1 - r.t0) / (u1 - u0),
+                    _ => 1.0,
+                };
+                out.entry(c).or_insert(Follow { t0: r.t0, u0, k });
+            }
+        }
+        out
+    }
+
+    /// Refreshes which recordings follow the real-time playhead. One that starts following moves
+    /// its playhead over at the same moment (the active one's wins the real-time playhead); one
+    /// that stops keeps its place on its own clock.
+    pub(crate) fn update_follow(&mut self) {
+        let new = self.follows_now();
+        if new == self.ph.follow {
+            return;
+        }
+        let active = self.active_clock();
+        let old = std::mem::take(&mut self.ph.follow);
+        for (c, f) in &old {
+            if !new.contains_key(c) {
+                if let Some(u) = self.ph.utc {
+                    self.ph.set(false, c, f.t(u));
+                }
+            }
+        }
+        let mut joined: Vec<(bool, f64, String)> = new
+            .iter()
+            .filter(|(c, _)| !old.contains_key(*c))
+            .filter_map(|(c, f)| self.ph.own.get(c).map(|&t| (Some(c) == active.as_ref(), f.utc(t), c.clone())))
+            .collect();
+        joined.sort_by_key(|x| !x.0);
+        for (k, (is_active, at, c)) in joined.into_iter().enumerate() {
+            if k == 0 && (is_active || self.ph.utc.is_none()) {
+                self.ph.set(true, "", at);
+            }
+            self.ph.own.remove(&c);
+        }
+        for c in new.keys() {
+            self.ph.own.remove(c);
+        }
+        self.ph.follow = new;
+    }
+
     /// The playhead in `clock`'s own time.
     pub(crate) fn playhead_on(&self, clock: &str) -> Option<f64> {
-        let c = self.ev.clocks.get(clock);
-        if c.kind == Ck::Absolute {
-            self.ph.utc.map(|p| c.back(p))
-        } else {
-            self.ph.floating.get(clock).copied()
+        match self.ph.follow.get(clock) {
+            Some(f) => self.ph.utc.map(|u| f.t(u)),
+            None => self.ph.own.get(clock).copied(),
         }
     }
 
     /// Moves `clock`'s playhead to `t` on that clock.
     pub(crate) fn set_playhead(&mut self, clock: &str, t: f64) {
-        let c = self.ev.clocks.get(clock);
-        if c.kind == Ck::Absolute {
-            self.ph.set(true, "", c.at(t));
-        } else {
-            self.ph.set(false, clock, t);
+        match self.ph.follow.get(clock).copied() {
+            Some(f) => self.ph.set(true, "", f.utc(t)),
+            None => self.ph.set(false, clock, t),
         }
     }
 
@@ -83,7 +158,7 @@ impl App {
     /// clock selected, the real-time one when it has a position.
     pub(crate) fn active_key(&self) -> Option<(bool, String)> {
         match self.active_clock() {
-            Some(c) if self.ev.clocks.get(&c).kind == Ck::Absolute => Some((true, String::new())),
+            Some(c) if self.ph.follow.contains_key(&c) => Some((true, String::new())),
             Some(c) => Some((false, c)),
             None => self.ph.utc.is_some().then(|| (true, String::new())),
         }
@@ -107,9 +182,13 @@ impl App {
             .filter_map(|i| {
                 let (live, a) = self.nodes[i].state.lock().map(|s| (s.live, s.audio_s)).ok()?;
                 let id = self.clock_of(i)?;
-                let c = self.ev.clocks.get(&id);
-                let same = if absolute { c.kind == Ck::Absolute } else { c.kind != Ck::Absolute && id == clock };
-                ((live || !live_only) && same && a > 0.0).then_some(if absolute { c.at(a) } else { a })
+                let f = self.ph.follow.get(&id);
+                let end = match (absolute, f) {
+                    (true, Some(f)) => f.utc(a),
+                    (false, None) if id == clock => a,
+                    _ => return None,
+                };
+                ((live || !live_only) && a > 0.0).then_some(end)
             })
             .reduce(f64::max)
     }
@@ -137,9 +216,9 @@ impl App {
                 self.ph.utc = Some(now);
             }
         }
-        let over: Vec<(String, f64)> = self.ph.floating.iter().filter_map(|(g, &p)| self.live_now(false, g).filter(|n| p > *n).map(|n| (g.clone(), n))).collect();
+        let over: Vec<(String, f64)> = self.ph.own.iter().filter_map(|(g, &p)| self.live_now(false, g).filter(|n| p > *n).map(|n| (g.clone(), n))).collect();
         for (g, n) in over {
-            self.ph.floating.insert(g, n);
+            self.ph.own.insert(g, n);
         }
     }
 
@@ -180,8 +259,10 @@ impl App {
         self.ph.playing = !self.ph.playing;
     }
 
-    /// Each frame: Space plays or pauses (when no text box has the keys), the playhead moves on.
+    /// Each frame: which recordings follow the real-time playhead, Space plays or pauses (when
+    /// no text box has the keys), the playhead moves on.
     pub(crate) fn playhead_tick(&mut self, ctx: &egui::Context) {
+        self.update_follow();
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) && ctx.memory(|m| m.focused().is_none()) {
             self.ph.playing = !self.ph.playing;
         }
@@ -204,10 +285,11 @@ impl App {
         }
     }
 
-    /// Whether `clock` follows the active playhead (every clock with real time does together).
+    /// Whether `clock` follows the active playhead (every clock following real time does
+    /// together).
     pub(crate) fn is_active_clock(&self, clock: &str) -> bool {
         let Some(a) = self.active_clock() else { return false };
-        let (x, y) = (self.ev.clocks.get(&a), self.ev.clocks.get(clock));
-        (x.kind == Ck::Absolute && y.kind == Ck::Absolute) || a == clock
+        let f = &self.ph.follow;
+        (f.contains_key(&a) && f.contains_key(clock)) || a == clock
     }
 }

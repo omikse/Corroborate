@@ -18,9 +18,14 @@ Passes heard with no aircraft in the data are listed too (planes without ADS-B, 
 status sums it up as heard/expected by distance: the detector's real range at that site.
 
 Ports: inputs `audio` (required), `place` (the site: a location) and `time` (when the audio
-starts: wire SOURCER's time); outputs `findings` (events), `facts` (JSON) and `anchors`: each heard
-pass matched to an aircraft anchors the audio's clock to UTC, with error √(pass error² + flight-log
-timing error²).
+starts: wire SOURCER's time); outputs `findings` (events), `facts` (JSON), `audio start time` and
+`audio end time`. Each heard pass matched to an aircraft says its closest approach on the audio's
+clock is at the aircraft's heard UTC, with error √(pass error² + flight-log timing error²). The
+clock solve of those (its speed prior: 100 ppm) gives where the audio starts, and, once the audio
+has ended and with two passes or more, where it ends, with the drift it measured in the source
+line; the end's error shows how well the passes pin the clock's speed. (Before 2026-11-11 the
+passes went to a project-wide clock solve on an `anchors` output; a saved wire from it is dropped
+with a message.)
 
 To try it: a SOURCER on a live stream from a known site (for example the Cornell Lab FeederWatch
 stream, 42.4797, -76.4514, 335 m), wired into Planes and this module, with a Value node of type

@@ -362,7 +362,7 @@ fn groups_on_a_big_project() {
     assert!(d.app().nodes[m].state.lock().unwrap().done, "the match inside the group ends");
     println!("{n} frames while it ran, worst {:.0} ms; the match took {:.1} s", worst * 1000.0, started.elapsed().as_secs_f64());
     d.frames(3);
-    println!("{} links; {}", d.app().ev.links.len(), d.app().nodes[m].state.lock().unwrap().status);
+    println!("{}", d.app().nodes[m].state.lock().unwrap().status);
     d.frames(3);
     d.shot("groups_jiku_top_matched");
     // Inside, framed.

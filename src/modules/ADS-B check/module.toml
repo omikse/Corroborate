@@ -25,10 +25,16 @@ kind = "event"
 name = "facts"
 kind = "json"
 
-# Each heard pass matched to an aircraft: evidence for the audio's clock.
+# When the audio starts and ends (UTC), from the heard passes matched to aircraft: each pass's
+# closest approach is at the aircraft's heard time. The end needs two passes or more (it waits
+# for the end of the audio); its error shows how well the passes measure the clock's speed.
 [[output]]
-name = "anchors"
-kind = "anchor"
+name = "audio start time"
+kind = "time"
+
+[[output]]
+name = "audio end time"
+kind = "time"
 
 [processing]
 program = "adsb-check.exe"

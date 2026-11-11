@@ -126,7 +126,8 @@ error shifts the track), in parallel blocks; blind over all of GB 2014–2026 ta
 counts when its error is under 10 mHz and the next best (2 min away, or in another grid) is at
 least 2× worse. The node shows GRID LOG MATCH: the verdict (time confirmed / not; dated / no clear
 match), what was searched, the best start and grid, its error, the runner-up, the offset. A clear
-match gives the `time of recording` output; with no place wired it also sets the location output
+match gives the `audio start time` output (called `time of recording` before 2026-11-11; saved
+wires follow the new name); with no place wired it also sets the location output
 to that grid's area at that time (blind place).
 
 Hillingdon council stream (YouTube, 7 July 2016, on-screen timer 18:29:08 UTC): found 18:29:07 UTC
@@ -142,16 +143,15 @@ signal each needs live in `module.toml` and show on the node.
 | Use case | What it gives | Needs | Status |
 |---|---|---|---|
 | Grid nominal frequency (50 or 60 Hz) | location: area of that frequency | hum in the audio | now |
-| Sync recordings to each other | link: offset between two clocks ± error | two recordings overlapping in time, same grid | planned |
-| Time of recording | anchor: audio moment = UTC ± error | grid frequency log for that time | planned |
+| Audio start time | time: the recording's start in UTC ± error | grid frequency log for that time | now |
+| Audio end time | time: the start plus the length at the recording's own speed against the grid | a long clear match against a log | planned |
 | Which grid within one nominal frequency (e.g. Great Britain or continental Europe or Nordic) | location: that grid's area | logs of the candidate grids for that time | possible |
 | Edits: cuts, splices, inserts | events: breaks in hum frequency or phase (for the cut detector) | clear hum | possible |
 | Speed change or resampling | fact: speed factor (a steady 50.4 Hz hum means 0.8 % faster) | clear hum | possible |
-| Device clock drift | fact: sample-rate error in ppm, for the clocks | long recording plus a log or a second recording | possible |
 | Tape speed wander (old analogue recordings) | fact: speed over time, to correct it | clear hum | possible |
-| Claimed time check | contradiction (red) when the hum doesn't match the log at the claimed time | log | possible (falls out of anchors) |
+| Claimed time check | contradiction (red) when the hum doesn't match the log at the claimed time | log | possible (falls out of the start time against the wired time) |
 | Fake live stream (a pre-recorded loop) | contradiction: hum doesn't match the grid's near-real-time data | near-real-time grid data | possible |
-| Time from grid events (power plant trips) | anchor: a published frequency dip found in the audio | event list with times | possible |
+| Time from grid events (power plant trips) | time: a published frequency dip found in the audio | event list with times | possible |
 | Re-recording (audio played back and recorded again) | fact: two hum signatures overlaid | clear hum | possible |
 | Synthetic or deepfake audio | weak hint: no or incoherent hum where one is expected | expectation of mains nearby | possible, weak |
 | Location within one grid | location: rough, by trilateration | simultaneous recordings at known sites | possible, research stage |

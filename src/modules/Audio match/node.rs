@@ -4,9 +4,9 @@
 //! Once the graph runs it takes the audio each wired source decodes (16 kHz, kept by the SOURCER) as
 //! soon as that source is done, brings it to 8 kHz (the fingerprints' rate, `audio_match::halve`), and
 //! fingerprints it, a core per recording; a source that gave no audio has its file decoded here
-//! instead. Then it matches every pair (`corroborate::audio_match`) on its own thread, puts the
-//! links (with both clocks named) on its links output, and keeps them with what else it found
-//! (`Found`: same recording, speed change, gaps, the quality) in the node's state. Files only for
+//! instead. Then it matches every pair (`corroborate::audio_match`) on its own thread and keeps
+//! the links (with both clocks named) with what else it found (`Found`: same recording, speed
+//! change, gaps, the quality) in the node's state; the links go to the result file, not to a wire. Files only for
 //! now: a stream or microphone wired in is named in the status and left out. Compiled into the
 //! `corroborate` program.
 //!
@@ -204,8 +204,10 @@ pub struct Mark {
 /// What a match found, kept with the node's state once it ends.
 #[derive(Clone, Debug, Default)]
 pub struct Found {
-    /// Every link, both clocks named.
+    /// Every link, both clocks named, and the same as JSON (with each link's source) for the
+    /// result file.
     pub links: Vec<Link>,
+    pub links_json: String,
     pub same: Vec<Event>,
     pub speed: Vec<Event>,
     pub gaps: Vec<Event>,
@@ -699,27 +701,6 @@ impl App {
         MatchView { rows, groups, done, running, real, spreads, leftover }
     }
 
-    /// The anchors node `i`'s groups have: the audio's start is at that row's time.
-    pub(crate) fn match_anchors(&self, i: NodeId) -> Vec<corroborate::clock::Anchor> {
-        let v = self.match_view(i);
-        let uid = self.nodes[i].uid.clone();
-        v.groups
-            .iter()
-            .filter_map(|g| match (g.anchor, g.average) {
-                (Some(a), _) => {
-                    let r = &v.rows[a];
-                    Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.meta?, error_s: r.meta_err, from: uid.clone(), enabled: true })
-                }
-                // On the average: where it puts the reference recording.
-                (None, Some(avg)) => {
-                    let r = &v.rows[g.reference?];
-                    Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.start?, error_s: avg.error, from: uid.clone(), enabled: true })
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     /// The better time on output `out`: "synced 3" is row 3's audio start time, "end 3" its audio
     /// end time. Anchored, from the anchor's time along the group's own fit; unanchored, where the
     /// group's metadata (or a drag) puts it, with the row's own metadata error. The end is the
@@ -913,44 +894,6 @@ impl App {
         }
     }
 
-    /// A project saved before rows had a time each: every recording's time is wired to its row
-    /// (through a Time node taking its length away when the person read its stamp as the end), and
-    /// the recording whose time was wired into the old time input holds the anchor.
-    pub(crate) fn migrate_match(&mut self, i: NodeId, old_time: &[NodeId]) {
-        let inputs = self.graph.nodes()[i].spec.inputs.clone();
-        let origin = self.nodes[i].pos;
-        let mut made = 0.0;
-        for ports in inputs.chunks(PER_ROW) {
-            let (Some(audio), Some(time)) = (ports.first(), ports.get(1)) else { continue };
-            let Some((f, _)) = self.graph.feeder(i, audio.name) else { continue };
-            if !matches!(self.nodes[f].kind, Kind::Sourcer { .. }) {
-                continue;
-            }
-            let uid = self.nodes[f].uid.clone();
-            if self.ev.stamp_end.contains(&uid) {
-                let mut rows = corroborate::modules::time::defaults();
-                corroborate::modules::time::add_row(&mut rows);
-                made += 1.0;
-                let view = self.view;
-                self.view = self.nodes[i].parent;
-                let t = self.add(Kind::Time { rows }, origin - Vec2::new(0.0, made * 200.0));
-                self.view = view;
-                self.nodes[t].label = format!("Time: end of {}", self.nodes[f].label);
-                let inputs = self.nodes[t].kind.spec().inputs;
-                self.graph.set_inputs_keep(t, inputs);
-                self.wire(f, "time", t, "time");
-                self.wire(f, "length", t, "row 1");
-                self.wire(t, "result", i, time.name);
-            } else {
-                self.wire(f, "time", i, time.name);
-            }
-        }
-        let anchors: Vec<String> = old_time.iter().map(|&s| anchor_key(&self.nodes[s].uid)).collect();
-        if let Kind::AudioMatch { rows } = &mut self.nodes[i].kind {
-            rows.extend(anchors.into_iter().map(|k| (k, "on".to_string())));
-        }
-    }
-
     /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
     /// source's run before this run started.
     pub(crate) fn audio_match_inputs(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> (Vec<Wired>, Vec<String>) {
@@ -1092,7 +1035,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         }
         let r = results(&used, &found, &errors);
         set(&|s| {
-            s.outbox = vec![("links", Data::Custom { kind: "link", json: r.links.clone() })];
+            s.outbox = Vec::new();
             s.found = Some(Arc::new(r.found.clone()));
             s.outbox_rev += 1;
             s.status = format!("{}{note}", r.status);
@@ -1142,15 +1085,13 @@ fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
     if out.is_empty() { Err("no audio".into()) } else { Ok(out) }
 }
 
-/// What the match gives: its links output, and what it found, kept with the node's state.
+/// What the match gives: what it found, kept with the node's state.
 /// `found`'s quality is the `quality` type's fields, then the counts it rests on and each pair's;
 /// its drift a JSON list, one per pair with a long enough span of links, of how fast a's clock
 /// runs against b's (`audio_match::drift`); its same recording an event on each of the two clocks
 /// over the matched stretch, its speed change one on b's clock, its gaps one on the recording
 /// that lacks the stretch.
 struct Results {
-    /// JSON list of the `link` type, both clocks named.
-    links: String,
     found: Found,
     status: String,
 }
@@ -1306,7 +1247,7 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
     if !gaps.is_empty() {
         status += &format!(", {} gap{}", gaps.len(), if gaps.len() == 1 { "" } else { "s" });
     }
-    Results { links: format!("[{}]", links.join(",")), found: Found { links: fitted, same, speed, gaps, quality, drift: format!("[{}]", drifts.join(",")) }, status }
+    Results { found: Found { links: fitted, links_json: format!("[{}]", links.join(",")), same, speed, gaps, quality, drift: format!("[{}]", drifts.join(",")) }, status }
 }
 
 /// The node's part of the result file: what it gave on each output, and each row's better time.
@@ -1343,7 +1284,7 @@ pub fn json(app: &App, i: NodeId) -> String {
     let found = app.nodes[i].state.lock().unwrap().found.clone();
     let found = found.map_or(String::new(), |f| {
         let ev = |v: &[Event]| Data::Events(v.to_vec()).to_json();
-        format!(",\"quality\":{},\"clock_drift\":{},\"same_recording\":{},\"speed_change\":{},\"gaps\":{}", f.quality, f.drift, ev(&f.same), ev(&f.speed), ev(&f.gaps))
+        format!(",\"quality\":{},\"clock_drift\":{},\"same_recording\":{},\"speed_change\":{},\"gaps\":{},\"links\":{}", f.quality, f.drift, ev(&f.same), ev(&f.speed), ev(&f.gaps), f.links_json)
     });
     format!(",\"outputs\":{{{}}}{found},\"rows\":[{}]", outs.join(","), rows.join(","))
 }
@@ -1966,8 +1907,7 @@ impl crate::look::NodeLook for Look {
         if let Some(n) = number("end ") {
             return at(Side::Right, row(n) + lead + (room + END_H) * 0.75);
         }
-        // The links: on the bottom edge, at the right.
-        (name == "links").then(|| PortLook { side: Some(Side::Bottom), at: Some(NODE_W - 50.0), ..Default::default() })
+        None
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {

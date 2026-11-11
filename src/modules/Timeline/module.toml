@@ -3,8 +3,10 @@ label = "Timeline"
 category = "View"
 role = "view"
 
-# Each row is one recording: its standard audio or video output, and the time to draw it at
-# (usually a yellow output of Audio match).
+# Each row is one recording: its standard audio or video output, the time it starts (usually an
+# Audio match row's audio start time) and, if known, the time it ends (audio end time). A recording
+# with a start wired follows the real-time playhead: its moment t is at start + t, or with an end,
+# t = (playhead - start) x length / (end - start).
 [[input]]
 name = "media"
 kind = "any"
@@ -12,6 +14,11 @@ many = true
 
 [[input]]
 name = "time"
+kind = "time"
+many = true
+
+[[input]]
+name = "end"
 kind = "time"
 many = true
 

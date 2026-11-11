@@ -21,7 +21,10 @@
 //! smallest at its evidence (`center`) and grows away from it; `at`, `back` and `error_at` give
 //! time and error at any moment. `offset` is where the clock's 0 lands, `error_s` the error at
 //! `center`. Clocks of one device (several files of one phone, the cut parts of one file) run at
-//! one speed: `solve_devices` gives the clocks of a group that share a device one rate.
+//! one speed: `fit_against` gives the clocks of a group that share a device one rate.
+//!
+//! There is no project-wide pool of evidence any more: Audio match fits its own links
+//! (`fit_against`) and ADS-B check its own passes (`solve`); times reach other nodes on wires.
 
 use crate::sync::{self, AnchorObs, Fit, Obs, Offset};
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,7 +205,7 @@ fn offsets(m: usize, anchors: &[LocalAnchor], links: &[LocalLink], rate_of: &[us
 
 /// Solve every clock from the anchors and links (switched-off ones are ignored).
 pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
-    solve_devices(anchors, links, &BTreeMap::new())
+    solve_inner(anchors, links, &BTreeMap::new(), true)
 }
 
 /// As `solve`, without each piece of evidence's share of the error (`breakdown` stays empty and
@@ -259,16 +262,17 @@ pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>, device: &BTreeMap<C
     (out, leftover)
 }
 
+/// As `solve`, but clocks with the same `device` run at one speed (each keeps its own offset),
+/// within a group of linked clocks. Used by the Jiku evaluation (tests/jiku.rs) on all its links
+/// at once; in the app, Audio match fits each of its groups with `fit_against`.
+pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>) -> Clocks {
+    solve_inner(anchors, links, device, true)
+}
+
 /// Fit `c` read in the seconds of clock `r` (both fitted to one time): moment t on `c` is moment
 /// `at(t)` on `r`. Keeps `c`'s errors.
 pub fn read_in(c: &Fit, r: &Fit) -> Fit {
     Fit { offset: r.back(c.at(c.center)) - c.center, rate: (1.0 + c.rate) / (1.0 + r.rate) - 1.0, ..*c }
-}
-
-/// As `solve`, but clocks with the same `device` run at one speed (each keeps its own offset).
-/// The speed is shared within a group of linked clocks.
-pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>) -> Clocks {
-    solve_inner(anchors, links, device, true)
 }
 
 fn solve_inner(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>, shares: bool) -> Clocks {
@@ -395,59 +399,6 @@ impl Link {
     pub fn key(&self) -> String {
         format!("link {} {} {:.3} {} {:.3}", self.from, self.a, self.t_a, self.b, self.t_b)
     }
-}
-
-/// Anchors in the JSON form of the `anchor` type: a list (or one) of
-/// `{"t", "utc", "error_s"?, "clock"?, "source"?}`. A missing or empty clock is `default_clock`
-/// (the clock of the audio the module heard); a missing error is 1 s. Items without `t` or
-/// `utc` are skipped.
-pub fn anchors_from_json(json: &str, default_clock: &str, from: &str) -> Vec<Anchor> {
-    items(json)
-        .iter()
-        .filter_map(|j| {
-            Some(Anchor {
-                clock: text_or(j, "clock", default_clock),
-                t: j.get("t")?.num()?,
-                utc: j.get("utc")?.num()?,
-                error_s: j.get("error_s").and_then(|x| x.num()).unwrap_or(1.0),
-                from: from.to_string(),
-                enabled: true,
-            })
-        })
-        .collect()
-}
-
-/// Links in the JSON form of the `link` type: a list (or one) of
-/// `{"t_a", "b", "t_b", "error_s"?, "a"?, "source"?}`. A missing or empty `a` is `default_clock`;
-/// a missing error is 1 s. Items without `t_a`, `b` or `t_b` are skipped.
-pub fn links_from_json(json: &str, default_clock: &str, from: &str) -> Vec<Link> {
-    items(json)
-        .iter()
-        .filter_map(|j| {
-            Some(Link {
-                a: text_or(j, "a", default_clock),
-                t_a: j.get("t_a")?.num()?,
-                b: j.get("b")?.str().filter(|b| !b.is_empty())?.to_string(),
-                t_b: j.get("t_b")?.num()?,
-                error_s: j.get("error_s").and_then(|x| x.num()).unwrap_or(1.0),
-                from: from.to_string(),
-                enabled: true,
-            })
-        })
-        .collect()
-}
-
-fn items(json: &str) -> Vec<crate::plugin::Json> {
-    use crate::plugin::Json;
-    match crate::plugin::parse_json(json) {
-        Some(Json::Arr(v)) => v,
-        Some(j @ Json::Obj(_)) => vec![j],
-        _ => Vec::new(),
-    }
-}
-
-fn text_or(j: &crate::plugin::Json, k: &str, default: &str) -> String {
-    j.get(k).and_then(|x| x.str()).filter(|x| !x.is_empty()).unwrap_or(default).to_string()
 }
 
 #[cfg(test)]
@@ -612,7 +563,7 @@ mod tests {
         }).collect();
         l.push(link("a", 5000.0, "b2", (5000.0 - 4000.0) / (1.0 + 300e-6), 0.005));
         let phone: BTreeMap<ClockId, String> = [("b1".into(), "phone".into()), ("b2".into(), "phone".into())].into();
-        let (alone, shared) = (solve(&[], &l).get("b2"), solve_devices(&[], &l, &phone).get("b2"));
+        let (alone, shared) = (solve(&[], &l).get("b2"), solve_inner(&[], &l, &phone, true).get("b2"));
         assert!(alone.rate.abs() < 1e-9 && (shared.rate - 300e-6).abs() < 3e-6, "{} {}", alone.rate, shared.rate);
         let t = shared.center + 1800.0;
         assert!(shared.error_at(t) < 0.02 && alone.error_at(t) > 0.15, "{} {}", shared.error_at(t), alone.error_at(t));
@@ -626,17 +577,5 @@ mod tests {
         let (_, e) = c.to_utc("a", 100.0 + 3600.0).unwrap();
         // An hour from its anchor, an unknown speed adds 0.36 s (100 ppm).
         assert!((e - 0.36).abs() < 0.01, "{e}");
-    }
-
-    #[test]
-    fn evidence_from_json() {
-        let a = anchors_from_json(r#"[{"t":12.5,"utc":1000,"error_s":2},{"clock":"n7","t":1,"utc":5},{"t":3}]"#, "n2", "n9");
-        assert_eq!(a.len(), 2);
-        assert_eq!((a[0].clock.as_str(), a[0].t, a[0].utc, a[0].error_s, a[0].from.as_str()), ("n2", 12.5, 1000.0, 2.0, "n9"));
-        assert_eq!((a[1].clock.as_str(), a[1].error_s), ("n7", 1.0));
-        let l = links_from_json(r#"{"t_a":1,"b":"n3","t_b":4,"error_s":0.1}"#, "n2", "n9");
-        assert_eq!((l[0].a.as_str(), l[0].t_a, l[0].b.as_str(), l[0].t_b, l[0].error_s), ("n2", 1.0, "n3", 4.0, 0.1));
-        assert!(links_from_json(r#"[{"t_a":1,"t_b":2}]"#, "n2", "x").is_empty());
-        assert_ne!(a[0].key(), a[1].key());
     }
 }

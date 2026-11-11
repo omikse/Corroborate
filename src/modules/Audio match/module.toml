@@ -24,16 +24,6 @@ kind = "time"
 many = true
 
 [[output]]
-name = "links"
-kind = "link"
-title = "links"
-about = "Where two recordings hear the same sound: moment t_a on one clock is moment t_b on the other, each with an error from how clearly the audio matched. The node fits its own groups from them; until the global clock solve goes, they go into it too (wired or not)."
-needs = ["audio", "audio 2"]
-when = "recordings overlap in time and hear the same sounds"
-source = "Wang 2003 (landmarks); Guggenberger, Lux, Böszörmenyi (AudioAlign); Knapp, Carter 1976 (GCC-PHAT)"
-min_quality = "weak"
-
-[[output]]
 name = "edits"
 kind = "event"
 status = "possible"

@@ -60,23 +60,23 @@ source = "Grigoras 2005; libhum"
 min_quality = "weak"
 
 [[output]]
-name = "sync recordings"
-kind = "link"
-status = "planned"
-about = "Offset between two recordings' clocks from how their hum drifts together, with its error."
-needs = ["audio", "audio 2"]
-when = "recordings overlap in time, same grid"
-source = "Su et al. 2014"
-min_quality = "good"
-
-[[output]]
-name = "time of recording"
+name = "audio start time"
 at = 98
 kind = "time"
 about = "Start of the recording (UTC) found by matching the hum track against the grid log store: around the wired time (confirms it or not), or blind over all the logs of the hum's grids (those meeting the wired place, if any). Given only for a clear match."
 needs = ["audio", "grid logs (time, location optional)"]
 when = "a log of the recording's grid covers the time"
 source = "Grigoras 2005; Hajj-Ahmad et al."
+min_quality = "good"
+
+[[output]]
+name = "audio end time"
+kind = "time"
+status = "planned"
+about = "End of the recording (UTC): the start plus the length at the recording's own speed, measured from how its hum drifts against the grid log."
+needs = ["audio", "grid logs"]
+when = "a long clear match against a log"
+source = "Su et al. 2014"
 min_quality = "good"
 
 [[output]]
@@ -109,16 +109,6 @@ when = "clear hum"
 min_quality = "good"
 
 [[output]]
-name = "clock drift"
-kind = "link"
-status = "possible"
-about = "The device's sample-rate error in ppm, for the clocks; also tape speed wander."
-needs = ["audio", "grid log or audio 2"]
-when = "long recording"
-source = "Su et al. 2014"
-min_quality = "good"
-
-[[output]]
 name = "claimed time check"
 kind = "event"
 status = "possible"
@@ -138,7 +128,7 @@ min_quality = "good"
 
 [[output]]
 name = "grid event time"
-kind = "anchor"
+kind = "time"
 status = "possible"
 about = "Time from a published grid event (a power plant trip) found in the audio."
 needs = ["audio", "grid event list"]

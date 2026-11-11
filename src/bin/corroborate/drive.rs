@@ -332,7 +332,7 @@ fn enf_date() {
         }
         println!("area: {}", s.enf.area_note);
     }
-    println!("time of recording: {:?}", d.app().value_from(e, "time of recording"));
+    println!("audio start time: {:?}", d.app().value_from(e, "audio start time"));
     d.frames(3);
     d.shot("enf_date");
 }

@@ -9,11 +9,11 @@ name = "audio"
 kind = "audio"
 required = true
 
-# A time wired in anchors the clock of the audio: the audio's start is at that time.
+# When the audio starts. Kept with the node; the passes stay in seconds into the recording (a
+# node that needs them in real time takes the recording's start and end beside them).
 [[input]]
 name = "time"
 kind = "time"
-anchors = "audio"
 
 [[output]]
 name = "aircrafts"

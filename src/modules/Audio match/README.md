@@ -88,17 +88,20 @@ start + length would end; the bit past it is hatched, a bar ending short of it i
 4 px either way, with the size beside it ("end +47 ms"). The speed reference has none.
 
 Outputs:
-- `links`: one link per matched chunk, both clocks named, each with its error (1 sigma) from how
-  clearly the audio matched (4 ms for a clear match, more for a weak one) and where it came from
-  (the two recordings, the cross-correlation's PSR, the fingerprint votes). Until the global clock
-  solve goes they go into it too.
-- `synced N`, `end N`: the row's audio start time and audio end time.
+- `synced N`, `end N`: the row's audio start time and audio end time. These are the only way the
+  node's times reach other nodes: there is no global clock solve any more (2026-11-11), so a
+  recording is placed elsewhere only by wiring its times there (a Timeline, say).
 - Possible (drawn greyed): edits (for the cut detector), shared sounds, sound source.
 
-Gone (2026-11-11): quality, clock drift, same recording, speed change and gaps. The marks show them;
-the result file keeps the quality (level, verdict, counts per pair), each pair's own clock drift
-(for pairs whose links span 30 s or more; on Jiku within 24 ppm of the truth, median), and the
-events. A saved wire into one is dropped when the project opens, with a message.
+Gone (2026-11-11): quality, clock drift, same recording, speed change, gaps and links. The marks
+show the findings; the result file keeps the quality (level, verdict, counts per pair), each pair's
+own clock drift (for pairs whose links span 30 s or more; on Jiku within 24 ppm of the truth,
+median), the events, and every link: one per matched chunk, both clocks named, each with its error
+(1 sigma) from how clearly the audio matched (4 ms for a clear match, more for a weak one) and
+where it came from (the two recordings, the cross-correlation's PSR, the fingerprint votes). A
+saved wire from one is dropped when the project opens, with a message naming it. A project saved
+before rows had a time each (before 2026-11-10) is no longer converted: its wire into the old
+single time input is dropped, with a message.
 
 How: Wang landmark fingerprints (audiofp) of each recording at 8 kHz; every 15 s of one
 recording is matched against the whole other; each clear match is refined with GCC-PHAT

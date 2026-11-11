@@ -1,5 +1,6 @@
 //! The Timeline node in the workbench: a row per recording, bars with their margins, one real-time
-//! playhead. Compiled into the `corroborate` program.
+//! playhead. A recording whose start time is wired in follows that playhead (playhead.rs
+//! `update_follow`); one that is not keeps its own. Compiled into the `corroborate` program.
 
 use super::*;
 use crate::audio_match_node::{fit_axis, row_slider, scale_button, tick_step, tick_text};
@@ -41,6 +42,14 @@ pub struct Row {
     pub len: f64,
     /// When it starts and that time's error.
     pub at: Option<(f64, f64)>,
+    /// When it ends and that time's error, when wired.
+    pub end: Option<(f64, f64)>,
+    /// The recording's clock: its media's, else the start time's own (not UTC).
+    pub clock: Option<String>,
+    /// The moments on that clock the start and end times are of: 0 and the length, or the times'
+    /// own when they are on that clock.
+    pub t0: f64,
+    pub t1: Option<f64>,
 }
 
 impl App {
@@ -48,11 +57,11 @@ impl App {
     pub(crate) fn timeline_rows(&self, i: NodeId) -> Vec<Row> {
         let spec = &self.graph.nodes()[i].spec;
         spec.inputs
-            .chunks(2)
+            .chunks(3)
             .enumerate()
-            .map(|(k, pair)| {
+            .map(|(k, ports)| {
                 let mut r = Row { n: k + 1, ..Default::default() };
-                if let [media, time] = pair {
+                if let [media, time, end] = ports {
                     if let Some((f, _)) = self.graph.feeder(i, media.name) {
                         r.wired = true;
                         let path = self.source_file(f);
@@ -61,12 +70,28 @@ impl App {
                             _ => self.nodes[f].label.clone(),
                         };
                         r.len = self.source_length(f).unwrap_or(0.0);
+                        r.clock = self.clock_of(f);
                     }
-                    if let Some((f, o)) = self.graph.feeder(i, time.name) {
-                        r.wired = true;
-                        if let Ok(Data::Time { utc: Some(u), error_s, .. }) = self.value_from(f, o) {
-                            r.at = Some((u, error_s));
+                    let time_in = |port: &str| {
+                        let (f, o) = self.graph.feeder(i, port)?;
+                        match self.value_from(f, o) {
+                            Ok(Data::Time { clock, t, utc: Some(u), error_s, .. }) => Some(Some((clock, t, u, error_s))),
+                            _ => Some(None),
                         }
+                    };
+                    let start = time_in(time.name);
+                    let stop = time_in(end.name);
+                    r.wired |= start.is_some() || stop.is_some();
+                    if let Some(Some((c, t, u, e))) = start {
+                        if r.clock.is_none() && c != corroborate::clock::UTC {
+                            r.clock = Some(c.clone());
+                        }
+                        r.t0 = if r.clock.as_ref() == Some(&c) { t } else { 0.0 };
+                        r.at = Some((u, e));
+                    }
+                    if let Some(Some((c, t, u, e))) = stop {
+                        r.t1 = if r.clock.as_ref() == Some(&c) { Some(t) } else { (r.len > 0.0).then_some(r.len) };
+                        r.end = Some((u, e));
                     }
                 }
                 r
@@ -91,11 +116,14 @@ impl crate::look::NodeLook for Look {
             place_y(app.match_ui.slots.get(&i).and_then(|s| s.get(k)).copied().unwrap_or(k), rh)
         };
         let number = |base: &str| name.strip_prefix(base).and_then(|n| n.parse::<usize>().ok());
-        let at = |y: f32| Some(PortLook { side: Some(Side::Left), at: Some(y), label: Some(PortLabel::Hidden), dot_size: Some((rh * 0.14).clamp(2.5, 5.0)), ..Default::default() });
+        let at = |y: f32| Some(PortLook { side: Some(Side::Left), at: Some(y), label: Some(PortLabel::Hidden), dot_size: Some((rh * 0.12).clamp(2.5, 5.0)), ..Default::default() });
         if let Some(n) = number("media ") {
-            return at(row(n) + rh * 0.3);
+            return at(row(n) + rh * 0.22);
         }
-        at(row(number("time ")?) + rh * 0.7)
+        if let Some(n) = number("time ") {
+            return at(row(n) + rh * 0.52);
+        }
+        at(row(number("end ")?) + rh * 0.82)
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
@@ -128,7 +156,9 @@ impl crate::look::NodeLook for Look {
         if track.width() <= 10.0 {
             return;
         }
-        let bars: Vec<(f64, f64)> = rows.iter().filter_map(|r| r.at.map(|(t, e)| (t - e, t + r.len + e))).collect();
+        // A row's bar runs from its start to its wired end, else to start + length.
+        let stop = |r: &Row, t: f64, e: f64| r.end.unwrap_or((t + r.len, e));
+        let bars: Vec<(f64, f64)> = rows.iter().filter_map(|r| r.at.map(|(t, e)| (t - e, stop(r, t, e).0 + stop(r, t, e).1))).collect();
         let fit = fit_axis(&bars);
         let (v0, v1) = app.match_ui.views.get(&i).copied().unwrap_or(fit);
         let span = (v1 - v0).max(1e-3);
@@ -174,7 +204,7 @@ impl crate::look::NodeLook for Look {
             let cy = (top + bottom) * 0.5;
             let label_x = body.left() + 12.0 * z;
             if !r.wired {
-                p.text(Pos2::new(label_x, cy), Align2::LEFT_CENTER, format!("audio or video {0}, time {0}", r.n), font(11.5), alpha(DIM, 0.8));
+                p.text(Pos2::new(label_x, cy), Align2::LEFT_CENTER, format!("audio or video {0}, start time {0}, end time {0}", r.n), font(11.5), alpha(DIM, 0.8));
                 continue;
             }
             let dim = r.at.is_none();
@@ -188,19 +218,18 @@ impl crate::look::NodeLook for Look {
             };
             let band = |a: f64, b: f64| Rect::from_min_max(Pos2::new(tx(a).max(track.left()), top + 3.0 * z), Pos2::new(tx(b).min(track.right()), bottom - 2.0 * z));
             let vis = |a: f64, b: f64| b >= v0 && a <= v1;
-            if e > 0.0 {
-                for (a, b) in [(t - e, t), (t + r.len, t + r.len + e)] {
-                    if vis(a, b) {
-                        p.rect_filled(band(a, b), 0.0, alpha(BAR, 0.3));
-                    }
+            let (u1, e1) = stop(r, t, e);
+            for (a, b, m) in [(t - e, t, e), (u1, u1 + e1, e1)] {
+                if m > 0.0 && vis(a, b) {
+                    p.rect_filled(band(a, b), 0.0, alpha(BAR, 0.3));
                 }
             }
-            if vis(t, t + r.len) {
-                let mut rect = band(t, t + r.len);
+            if vis(t, u1) {
+                let mut rect = band(t, u1);
                 rect.set_right(rect.right().max(rect.left() + 2.0 * z));
                 p.rect_filled(rect, 0.0, alpha(BAR, 0.88));
             } else {
-                let (at, side, text) = if t + r.len < v0 { (track.left() + 6.0 * z, Align2::LEFT_CENTER, "<") } else { (track.right() - 6.0 * z, Align2::RIGHT_CENTER, ">") };
+                let (at, side, text) = if u1 < v0 { (track.left() + 6.0 * z, Align2::LEFT_CENTER, "<") } else { (track.right() - 6.0 * z, Align2::RIGHT_CENTER, ">") };
                 p.text(Pos2::new(at, cy), side, text, mono(11.0), DIM);
             }
         }

@@ -34,8 +34,8 @@
 //!   report.
 //! - Phones in a crowd move: walking 10 m in 200 s changes the sound's delay by 29 ms, which
 //!   looks like 145 ppm of drift. One phone's files on GT_090912 disagree by 50–130 ppm, so
-//!   drift learnt from short overlaps is partly motion; the clock solve gives one phone's files
-//!   one speed (`clock::solve_devices`).
+//!   drift learnt from short overlaps is partly motion; Audio match's fit gives one phone's files
+//!   one speed (`clock::fit_against` with the phone ids).
 //! - This method, blind (no ground truth used), on all 50 recordings: 498 links on all 78 pairs
 //!   overlapping 20 s or more and on no other pair, none over 50 ms off the truth (median
 //!   5.4 ms); 42 of the ground truth's 44 spanning-tree edges (95 %, against 52 % in the paper);

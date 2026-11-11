@@ -588,19 +588,26 @@ impl App {
                 self.graph.set_inputs_keep(i, inputs);
             }
         }
-        // Saved before Audio match's rows had a time each.
+        // Saved before Audio match's rows had a time each (before 2026-11-10): no longer read.
         let old_file = keep_ids && !text.lines().any(|l| l.starts_with("format|"));
-        let mut old_time: Vec<(NodeId, NodeId)> = Vec::new();
-        // Audio match's outputs that became marks in its Status cells (2026-11-11).
-        let mut gone = 0;
-        for (a, o, b, i) in wires {
+        let mut old_time = 0;
+        // Outputs retired on 2026-11-11: Audio match's that became marks in its Status cells, and
+        // the evidence outputs of the global clock solve (Audio match's links, ADS-B check's
+        // anchors). Each wire from one is dropped and named.
+        const RETIRED: [&str; 7] = ["quality", "clock drift", "same recording", "speed change", "gaps", "links", "anchors"];
+        let mut gone: Vec<String> = Vec::new();
+        for (a, mut o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                if matches!(self.nodes[a].kind, Kind::AudioMatch { .. }) && ["quality", "clock drift", "same recording", "speed change", "gaps"].contains(&o.as_str()) {
-                    gone += 1;
+                if matches!(self.nodes[a].kind, Kind::Enf { .. }) && o == "time of recording" {
+                    o = "audio start time".to_string();
+                }
+                let has = self.graph.nodes()[a].spec.outputs.iter().any(|p| p.name == o);
+                if !has && RETIRED.contains(&o.as_str()) && !matches!(self.nodes[a].kind, Kind::Missing { .. }) {
+                    gone.push(format!("{} › {o}", self.node_name(a)));
                     continue;
                 }
                 if i == "time" && matches!(self.nodes[b].kind, Kind::AudioMatch { .. }) {
-                    old_time.push((a, b));
+                    old_time += 1;
                     continue;
                 }
                 let many = self.nodes[b].kind.many_rows();
@@ -613,18 +620,26 @@ impl App {
                 }
             }
         }
-        if gone > 0 {
-            self.msg = format!("{gone} wire{} dropped: Audio match no longer has the outputs quality, clock drift, same recording, speed change and gaps (they show as marks in its Status column)", if gone == 1 { "" } else { "s" });
+        let mut said: Vec<String> = Vec::new();
+        if !gone.is_empty() {
+            gone.dedup();
+            said.push(format!(
+                "{} wire{} dropped from outputs that are gone: {} (Audio match shows its findings as marks in its Status column and its links in the result file; times travel on time outputs)",
+                gone.len(),
+                if gone.len() == 1 { "" } else { "s" },
+                gone.join(", ")
+            ));
         }
-        if old_file {
-            for &i in &new {
-                if matches!(self.nodes[i].kind, Kind::AudioMatch { .. }) {
-                    let from: Vec<NodeId> = old_time.iter().filter(|(_, b)| *b == i).map(|(a, _)| *a).collect();
-                    self.migrate_match(i, &from);
-                }
-            }
+        if old_file && new.iter().any(|&i| matches!(self.nodes[i].kind, Kind::AudioMatch { .. })) {
+            said.push(format!(
+                "saved before Audio match's rows had a time each: {old_time} wire{} into its old time input dropped; wire each recording's time into its row",
+                if old_time == 1 { "" } else { "s" }
+            ));
         }
-        self.ev.stamp_end.clear();
+        said.extend(self.dropped_evidence());
+        if !said.is_empty() {
+            self.msg = said.join("; ");
+        }
         // A group's ports name the nodes inside by id: their new ids (its rows are read by now).
         for &i in &new {
             if let Kind::Group { rows, .. } = &self.nodes[i].kind {
@@ -893,12 +908,11 @@ impl App {
             })
             .collect();
         format!(
-            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires and setting changes are the evidence trail; anchor error_s is an estimate from the anchor's source\",\"nodes\":[\n{}\n],\"wires\":[{}],\"setting_changes\":{}{}}}\n",
+            "{{\"app\":\"corroborate\",\"written_utc\":\"{}\",\"note\":\"every node with its results; wires and setting changes are the evidence trail; a time's error_s is 1 sigma, and its trace says where along the wires it came from\",\"nodes\":[\n{}\n],\"wires\":[{}],\"setting_changes\":{}}}\n",
             timebase::fmt_utc(timebase::now_unix()),
             nodes_j.join(",\n"),
             wires.join(","),
-            self.changes_json(ids),
-            self.clocks_json(ids)
+            self.changes_json(ids)
         )
     }
 
@@ -1682,7 +1696,6 @@ impl App {
         self.history_tick(&ctx);
         self.keep_running();
         self.feed_programs();
-        self.update_clocks();
         self.playhead_tick(&ctx);
         self.sound_tick();
         self.record_tick();

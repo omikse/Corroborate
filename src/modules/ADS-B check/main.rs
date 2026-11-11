@@ -14,15 +14,18 @@
 //! A module on the data bus (protocol 2, see module.toml). Inputs: `audio`; `place`, the site (a
 //! location with latitude, longitude and, for close passes, elevation in metres above sea level);
 //! `time`, when the audio starts (wire the SOURCER's time; live sources without one use this PC's
-//! clock). Outputs: `findings` (events), `facts` (json) and `anchors`: each heard pass matched to
-//! an aircraft says that the pass's closest approach on the audio's clock is at the aircraft's
-//! heard UTC, ± the pass's own error and the flight data's timing error, so the project's clocks
-//! can be checked and tightened by it. Flight data: files: every `adsb*.jsonl` next to the source
+//! clock). Outputs: `findings` (events), `facts` (json), `audio start time` and `audio end time`:
+//! each heard pass matched to an aircraft says that the pass's closest approach on the audio's
+//! clock is at the aircraft's heard UTC, ± the pass's own error and the flight data's timing
+//! error. The clock solve of those (`corroborate::clock::solve`, its 100 ppm speed prior) gives
+//! where the audio starts, and, with two passes or more once the audio has ended, where it ends;
+//! the error says how well the passes pin the clock's speed. Flight data: files: every `adsb*.jsonl` next to the source
 //! (`--source`; `tools/adsb-log.py` writes them); live: polls adsb.lol every 10 s (backing off
 //! when refused) and logs to `adsb-logs/` in the working folder. Aircraft without ADS-B Out, or
 //! too low for any receiver, are not in the data.
 
 use corroborate::modules::planes::Planes;
+use corroborate::clock::{self, Anchor};
 use corroborate::plugin::{self, In, Json, PluginFinding};
 use corroborate::{timebase, Config, Event, Finding, Module};
 use std::collections::HashMap;
@@ -286,6 +289,10 @@ struct Check<W: Write> {
     last_status: String,
     /// What goes on the `facts` output.
     facts: Vec<(String, String)>,
+    /// Each matched pass: its closest approach on the audio's clock, the aircraft's heard UTC,
+    /// the error, the aircraft; and how many of them the times sent last were from.
+    pins: Vec<(f64, f64, f64, String)>,
+    pins_sent: (usize, bool),
 }
 
 impl<W: Write> Check<W> {
@@ -394,12 +401,7 @@ impl<W: Write> Check<W> {
                     // The pass's closest approach on the audio's clock is at the aircraft's heard UTC.
                     let err = (e.t_err.powi(2) + ADSB_TIMING_S.powi(2)).sqrt();
                     if err.is_finite() {
-                        let a = format!(
-                            "[{{\"t\":{:.3},\"utc\":{heard_utc:.3},\"error_s\":{err:.3},\"source\":\"ADS-B {}\"}}]",
-                            e.t_cpa,
-                            timebase::json_escape(&name)
-                        );
-                        self.line(plugin::out("anchors", &a));
+                        self.pins.push((e.t_cpa, heard_utc, err, name.clone()));
                     }
                     if let Some(a) = adsb.ac.get(&hex) {
                         let track = format!("#{} {}", e.id, a.name());
@@ -477,7 +479,34 @@ impl<W: Write> Check<W> {
             self.heard[hi].done = true;
         }
         drop(adsb);
+        self.send_times(audio_t, fin);
         self.status(fin);
+    }
+
+    /// The audio's start, and with two passes or more at the end of the audio its end, from the
+    /// matched passes (the clock solve of their anchors), when they changed.
+    fn send_times(&mut self, audio_t: f64, fin: bool) {
+        if self.pins.is_empty() || self.pins_sent == (self.pins.len(), fin) {
+            return;
+        }
+        self.pins_sent = (self.pins.len(), fin);
+        let an: Vec<Anchor> = self.pins.iter().map(|p| Anchor { clock: "audio".into(), t: p.0, utc: p.1, error_s: p.2, from: p.3.clone(), enabled: true }).collect();
+        let c = clock::solve(&an, &[]);
+        let n = self.pins.len();
+        let names: Vec<&str> = self.pins.iter().map(|p| p.3.as_str()).collect();
+        let source = format!("ADS-B check: {n} pass{} matched to aircraft ({})", if n == 1 { "" } else { "es" }, names.join(", "));
+        let time = |u: f64, e: f64, how: &str| format!("{{\"utc\":{u:.3},\"error_s\":{e:.3},\"source\":\"{}\"}}", timebase::json_escape(&format!("{source}{how}")));
+        if let Some((u, e)) = c.to_utc("audio", 0.0) {
+            let t = time(u, e, "");
+            self.line(plugin::out("audio start time", &t));
+        }
+        if fin && n >= 2 {
+            if let Some((u, e)) = c.to_utc("audio", audio_t) {
+                let info = c.get("audio");
+                let t = time(u, e, &format!("; the audio's {audio_t:.1} s at the measured speed, drift {:+.2} ± {:.2} s/h (negative: the clock loses time)", -info.rate * 3600.0, info.rate_error * 3600.0));
+                self.line(plugin::out("audio end time", &t));
+            }
+        }
     }
 
     fn status(&mut self, fin: bool) {
@@ -660,6 +689,8 @@ fn main() {
         next_id: 0,
         last_status: String::new(),
         facts: Vec::new(),
+        pins: Vec::new(),
+        pins_sent: (0, false),
     };
     let rules = format!("expected = closest approach ≤ {EXPECT_KM:.0} km; heard = a pass within ±{MATCH_S:.0} s of closest approach + sound travel");
     ck.fact("rules", &rules);

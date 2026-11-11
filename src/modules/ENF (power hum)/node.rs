@@ -221,7 +221,7 @@ pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data:
                 .map(|p| TrackPoint { clock: clock.to_string(), id: "hum".into(), t: p.t, value: p.hz, ok: p.ok })
                 .collect(),
         )),
-        "time of recording" => match &s.enf.dated {
+        "audio start time" => match &s.enf.dated {
             Some(Ok(d)) if d.confirmed => Ok(Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(d.start()), error_s: 1.0, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()) }),
             Some(Ok(d)) => Err(format!("{}: best {} in {}, not clear enough", d.verdict(), timebase::fmt_utc(d.start()), d.best.grid)),
             Some(Err(e)) => Err(e.clone()),

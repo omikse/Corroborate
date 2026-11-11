@@ -1,9 +1,9 @@
-//! The project's clocks (evidence.rs): which clock each node's times are on, the evidence nodes
-//! give, the solve, Same clock, the on/off switches, and how they are saved.
+//! The project's clocks (evidence.rs, playhead.rs): which clock each node's times are on, Same
+//! clock, old evidence lines dropped, which recordings follow the real-time playhead (their times
+//! wired into a Timeline), and Audio match.
 //! Run: cargo test --bin corroborate clock_tests
 
 use super::*;
-use corroborate::clock::Kind as Ck;
 use corroborate::data::Data;
 use corroborate::module_manifest as mm;
 
@@ -19,49 +19,44 @@ fn uid(app: &App, i: NodeId) -> String {
     app.nodes[i].uid.clone()
 }
 
-/// A source's anchor makes its clock absolute; Same clock puts another source on it, and it is
-/// saved with the project; Separate clocks undoes it.
+/// Same clock puts a source on another's clock, saved with the project (not with pasted nodes);
+/// Separate clocks undoes it. An old project's evidence lines (anchors, links, switches) are read,
+/// dropped, and counted in a message.
 #[test]
-fn sources_anchor_and_share_clocks() {
+fn sources_share_clocks_and_old_evidence_is_dropped() {
     let mut app = App::empty();
     let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
-    anchor(&app, a, 1000.0, 2.0);
-    app.update_clocks();
-    assert_eq!(app.ev.anchors.len(), 1);
     let (ua, ub) = (uid(&app, a), uid(&app, b));
-    let (utc, err) = app.ev.clocks.to_utc(&ua, 5.0).expect("absolute");
-    assert!((utc - 1005.0).abs() < 1e-6 && (err - 2.0).abs() < 1e-6, "{utc} ± {err}");
-    assert_eq!(app.ev.clocks.get(&ub).kind, Ck::None);
-
     app.same_clock(&[a, b]);
     assert_eq!(app.clock_of(b), Some(ua.clone()), "b is on a's clock");
     assert!(app.shares_clock(a) && app.shares_clock(b));
-    app.update_clocks();
-    assert!(app.ev.clocks.to_utc(&app.clock_of(b).unwrap(), 5.0).is_some(), "b's times are on UTC now");
-
-    app.ev.off.insert("anchor n9 n1 0.000".into());
-    app.ev.manual_anchors.push(corroborate::clock::Anchor { clock: ub.clone(), t: 3.0, utc: 2000.0, error_s: 0.5, from: "manual".into(), enabled: true });
-    app.ev.manual_links.push(corroborate::clock::Link { a: ua.clone(), t_a: 1.0, b: "n7".into(), t_b: 2.0, error_s: 0.25, from: "manual".into(), enabled: true });
     let mut back = App::empty();
     assert!(back.load_project_text(&app.project_text()));
     assert_eq!(back.ev.share, app.ev.share);
-    assert_eq!(back.ev.off, app.ev.off);
-    assert_eq!(back.ev.manual_anchors, app.ev.manual_anchors);
-    assert_eq!(back.ev.manual_links, app.ev.manual_links);
+    assert!(back.msg.is_empty() || !back.msg.contains("dropped"), "{}", back.msg);
     // Pasting the nodes does not bring the project's clocks.
     let mut pasted = App::empty();
     pasted.append_text(&app.project_text(), false);
-    assert!(pasted.ev.share.is_empty() && pasted.ev.manual_anchors.is_empty());
+    assert!(pasted.ev.share.is_empty());
+
+    let old = format!("{}anchor|{ub}|3|2000|0.5\nanchor|{ua}|0|1000|1\nlink|{ua}|1|n7|2|0.25\noff|anchor n9 n1 0.000\nstamp-end|{ua}\n", app.project_text());
+    let mut back = App::empty();
+    assert!(back.load_project_text(&old));
+    assert!(back.msg.contains("2 anchors, 1 link, 1 evidence switch"), "{}", back.msg);
+    let again = back.project_text();
+    assert!(!again.contains("anchor|") && !again.contains("link|") && !again.contains("off|") && !again.contains("stamp-end"), "{again}");
+    assert_eq!(back.ev.share, app.ev.share, "the clock lines are kept");
 
     app.separate_clocks(&[b]);
     assert_eq!(app.clock_of(b), Some(ub), "b has its own clock again");
     assert!(app.ev.share.is_empty(), "a shares with no one: back to its own");
 }
 
-/// A time wired into Planes' time input anchors the clock of its audio; switching that evidence
-/// off unanchors it again, and the switch is logged.
+/// No time reaches a recording without a wire: a time wired into Planes is an input like any
+/// other, and the recording keeps its own playhead. Wired into a Timeline with the recording, the
+/// recording follows the real-time playhead.
 #[test]
-fn a_wired_time_anchors_the_audio() {
+fn no_time_reaches_a_recording_without_a_wire() {
     let mut app = App::empty();
     let s = source(&mut app, 40.0);
     let p = app.add(Kind::Planes, Pos2::new(300.0, 40.0));
@@ -69,17 +64,27 @@ fn a_wired_time_anchors_the_audio() {
     app.wire(s, "audio", p, "audio");
     app.wire(v, "value", p, "time");
     assert_eq!(app.graph.wires().len(), 2, "{}", app.msg);
-    app.update_clocks();
-    let us = uid(&app, s);
-    assert_eq!(app.ev.anchors.len(), 1, "{:?}", app.ev.anchors);
-    let an = app.ev.anchors[0].clone();
-    assert_eq!((an.clock.as_str(), an.t, an.error_s, an.from.clone()), (us.as_str(), 0.0, 0.5, uid(&app, p)));
-    assert_eq!(app.ev.clocks.get(&us).kind, Ck::Absolute);
+    app.update_follow();
+    assert!(app.ph.follow.is_empty(), "wired into Planes only: its own playhead");
+    let tl = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(700.0, 40.0));
+    app.wire_many(s, "audio", tl);
+    app.wire(v, "value", tl, "time 1");
+    app.update_follow();
+    let f = app.ph.follow.get(&uid(&app, s)).copied().expect("wired into a Timeline: it follows");
+    assert_eq!((f.t0, f.k), (0.0, 1.0));
+    assert!((f.u0 - 1_793_966_400.0).abs() < 1e-6, "{}", f.u0);
+}
 
-    app.ev.off.insert(an.key());
-    app.update_clocks();
-    assert_eq!(app.ev.clocks.get(&us).kind, Ck::None, "switched off");
-    assert!(!app.ev.anchors[0].enabled);
+/// A manifest can no longer feed a pool: the `anchors` key and the anchor and link types are gone.
+#[test]
+fn the_pool_types_are_retired() {
+    let head = "id = \"x\"\nlabel = \"X\"\ncategory = \"Checks\"\n[[input]]\nname = \"audio\"\nkind = \"audio\"\n";
+    let e = mm::parse(&format!("{head}[[input]]\nname = \"time\"\nkind = \"time\"\nanchors = \"audio\"\n")).unwrap_err();
+    assert!(e.contains("retired"), "{e}");
+    for k in ["anchor", "link"] {
+        assert!(mm::parse(&format!("{head}[[output]]\nname = \"out\"\nkind = \"{k}\"\n")).is_err(), "{k} is no type");
+    }
+    assert!(mm::parse(&format!("{head}[[output]]\nname = \"audio start time\"\nkind = \"time\"\n")).is_ok());
 }
 
 /// Planes' passes are readable on its output, on the clock of its audio, with the fit's error.
@@ -109,40 +114,6 @@ fn planes_passes_on_the_bus() {
     app.nodes[p].state.lock().unwrap().planes.passes.push(pass);
     let Ok(Data::Events(v)) = app.value_from(p, "aircrafts") else { panic!("no passes") };
     assert_eq!((v[0].clock.clone(), v[0].t_start, v[0].error_s), (uid(&app, s), 80.0, 0.3));
-}
-
-/// A module's anchor output is evidence, wired or not; an anchor without a clock is on the
-/// clock of the module's audio.
-#[test]
-fn anchor_outputs_are_evidence() {
-    let m = mm::parse(
-        r#"id = "anchorer"
-label = "Anchorer"
-category = "Checks"
-
-[[input]]
-name = "audio"
-kind = "audio"
-
-[[output]]
-name = "anchors"
-kind = "anchor"
-
-[processing]
-program = "none.exe"
-protocol = 2
-"#,
-    )
-    .unwrap();
-    let mut app = App::empty();
-    let s = source(&mut app, 40.0);
-    let k = app.add(Kind::module(m).unwrap(), Pos2::new(300.0, 40.0));
-    app.wire(s, "audio", k, "audio");
-    app.nodes[k].state.lock().unwrap().outbox.push(("anchors", Data::Custom { kind: "anchor", json: r#"[{"t":3,"utc":500,"error_s":0.2}]"#.into() }));
-    app.update_clocks();
-    let (utc, err) = app.ev.clocks.to_utc(&uid(&app, s), 3.0).expect("anchored by the module");
-    assert!((utc - 500.0).abs() < 1e-6 && (err - 0.2).abs() < 1e-6, "{utc} ± {err}");
-    assert_eq!(app.ev.anchors[0].from, uid(&app, k));
 }
 
 /// Moving the playhead in SOURCER's waveform moves it on the timeline and in Planes, which is on
@@ -178,8 +149,11 @@ fn playhead_links_sourcer_planes_and_timeline() {
 fn play_and_live_playheads() {
     let mut app = App::empty();
     let a = source(&mut app, 40.0);
-    anchor(&app, a, 1000.0, 1.0);
-    app.update_clocks();
+    let tl = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(700.0, 40.0));
+    let v = app.add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01 00:16:40".into())] }, Pos2::new(30.0, 300.0));
+    app.wire_many(a, "audio", tl);
+    app.wire(v, "value", tl, "time 1");
+    app.update_follow();
     app.pick_only(a);
     let c = uid(&app, a);
     assert!(!app.is_live());
@@ -210,7 +184,6 @@ fn recording_plays_to_its_end() {
     let mut app = App::empty();
     let a = source(&mut app, 40.0);
     app.nodes[a].state.lock().unwrap().audio_s = 10.0;
-    app.update_clocks();
     let c = app.clock_of(a).unwrap();
     app.ensure_playheads();
     assert_eq!(app.playhead_on(&c), Some(0.0), "a playhead at the start");
@@ -238,7 +211,6 @@ fn sound_follows_the_selected_node() {
     let pl = app.add(Kind::Planes, Pos2::new(600.0, 40.0));
     app.wire(s, "audio", pl, "audio");
     app.nodes[s].state.lock().unwrap().source.push_audio(&[0.5; 1600]);
-    app.update_clocks();
     app.pick_only(pl);
     let c = app.clock_of(s).unwrap();
     app.set_playhead(&c, 0.05);
@@ -248,28 +220,15 @@ fn sound_follows_the_selected_node() {
     assert_eq!((a.lock().unwrap().len(), t), (1600, 0.05));
 }
 
-/// Times on clock groups with nothing linking them are listed as not comparable; the result file
-/// carries the clocks, the evidence and the events with their UTC.
+/// The result file carries no solved clocks or evidence pool any more: each time carries its own
+/// trace.
 #[test]
-fn not_comparable_and_the_result_file() {
-    use crate::evidence::not_comparable;
-    use corroborate::clock::{solve, Anchor as An, Link};
-    let clocks = solve(
-        &[An { clock: "a".into(), t: 0.0, utc: 1000.0, error_s: 1.0, from: "n1".into(), enabled: true }],
-        &[Link { a: "b".into(), t_a: 0.0, b: "c".into(), t_b: 1.0, error_s: 1.0, from: "manual".into(), enabled: true }],
-    );
-    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    assert!(not_comparable(&clocks, &s(&["b", "c", ""])).is_empty(), "linked: comparable");
-    assert!(not_comparable(&clocks, &s(&["a", "utc"])).is_empty(), "both absolute");
-    let nc = not_comparable(&clocks, &s(&["a", "b", "z"]));
-    assert_eq!(nc.len(), 3);
-
+fn the_result_file_has_no_pool() {
     let mut app = App::empty();
     let a = source(&mut app, 40.0);
-    anchor(&app, a, 1000.0, 2.0);
-    app.update_clocks();
     let j = app.result_json(&[a]);
-    assert!(j.contains("\"clocks\":[{") && j.contains("\"kind\":\"absolute\"") && j.contains("\"type\":\"anchor\"") && j.contains("\"not_comparable\":[]"), "{j}");
+    assert!(!j.contains("\"clocks\":[") && !j.contains("\"evidence\":[") && !j.contains("not_comparable"), "{j}");
+    assert!(j.trim_end().ends_with('}'), "{j}");
 }
 
 /// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start; b's
@@ -320,7 +279,6 @@ fn audio_match_links_two_recordings() {
     d.frames(5);
     d.shot("audio_match");
     // On the node: each row placed by audio once the match has ended. These files have no stamp.
-    d.app().update_clocks();
     d.frames(2);
     let view = d.app().match_view(m);
     let wired: Vec<_> = view.rows.iter().filter(|r| r.wired).collect();
@@ -372,12 +330,8 @@ fn audio_match_links_two_recordings() {
     assert!((undone_b - free_b).abs() < 0.01, "Ctrl+Z puts the group back: {undone_b}");
 
     // The group anchored on row 1's time: every recording of the group has real time.
-    let ub = uid(d.app(), b);
-    assert_ne!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "a time on a row is a claim only");
     d.app().toggle_anchor(m, 0);
-    d.app().update_clocks();
     d.frames(3);
-    assert_eq!(d.app().ev.clocks.get(&ub).kind, Ck::Absolute, "anchored: the linked recording has real time");
     let Ok(Data::Time { utc: Some(ub_utc), error_s, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time out of row 2") };
     assert!((ub_utc - 1020.5).abs() < 0.01 && error_s >= 2.0, "b starts 20.5 s after a: {ub_utc} ± {error_s}");
     let Ok(Data::Time { utc: Some(ua_utc), .. }) = d.app().value_from(m, "synced 1") else { panic!("no time out of row 1") };
@@ -499,7 +453,6 @@ fn audio_match_links_two_recordings() {
     d.app().toggle_anchor(m, 0);
     d.app().graph.disconnect(m, "time 1");
     d.app().sync_many_ports();
-    d.app().update_clocks();
     d.frames(2);
     assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
     let app = d.app();
@@ -545,10 +498,10 @@ fn audio_match_links_two_recordings() {
 }
 
 /// A row's audio and time, and the wire out of its yellow output, survive save and load by name;
-/// a project saved before rows had a time each gets each recording's time wired to its row, a Time
-/// node where the stamp was read as the end, and the anchor on the recording whose time was wired.
+/// a project saved before rows had a time each is not converted any more: its old time wire is
+/// dropped and named, and so is a wire from the retired links output.
 #[test]
-fn audio_match_rows_are_saved_and_old_projects_converted() {
+fn audio_match_rows_are_saved_and_old_wires_dropped() {
     let mut app = App::empty();
     let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
     let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(460.0, 120.0));
@@ -570,18 +523,15 @@ fn audio_match_rows_are_saved_and_old_projects_converted() {
 
     let ids = [uid(&app, a), uid(&app, b)];
     let old = format!(
-        "node|sourcer|30|40|one|a.mp4|id={}\nnode|sourcer|30|300|two|b.mp4|id={}\nnode|audio-match|460|120|Audio match||id=n9\nnext|10\nwire|0|audio|2|audio 1\nwire|1|audio|2|audio 2\nwire|1|time|2|time\nstamp-end|{}\n",
+        "node|sourcer|30|40|one|a.mp4|id={}\nnode|sourcer|30|300|two|b.mp4|id={}\nnode|audio-match|460|120|Audio match||id=n9\nnext|10\nwire|0|audio|2|audio 1\nwire|1|audio|2|audio 2\nwire|1|time|2|time\nwire|2|links|1|audio\nstamp-end|{}\n",
         ids[0], ids[1], ids[0]
     );
     let mut conv = App::empty();
     assert!(conv.load_project_text(&old));
-    assert_eq!(conv.graph.feeder(2, "time 2"), Some((1, "time")), "a stamp read as the start: wired straight");
-    let (t, o) = conv.graph.feeder(2, "time 1").expect("the end stamp goes through a Time node");
-    assert!(matches!(conv.nodes[t].kind, Kind::Time { .. }) && o == "result");
-    assert_eq!(conv.graph.feeder(t, "time"), Some((0, "time")));
-    assert_eq!(conv.graph.feeder(t, "row 1"), Some((0, "length")));
-    assert!(conv.nodes[2].kind.rows().iter().any(|(k, _)| *k == format!("anchor {}", ids[1])), "the old time input's recording holds the anchor");
-    assert!(conv.ev.stamp_end.is_empty());
+    assert_eq!(conv.graph.feeder(2, "audio 2"), Some((1, "audio")));
+    assert_eq!(conv.graph.feeder(2, "time 1"), None, "no longer converted");
+    assert!(conv.msg.contains("1 wire into its old time input dropped"), "{}", conv.msg);
+    assert!(conv.msg.contains("Audio match › links"), "{}", conv.msg);
     assert!(!conv.project_text().contains("stamp-end"));
 }
 
@@ -739,27 +689,42 @@ fn an_old_time_node_reads_the_same() {
     assert!(!rows.iter().any(|(k, _)| k == "error_s"));
 }
 
-/// A clock with no real time keeps its own playhead, linked to nothing, even to a clock audio ties
-/// it to. Once it has real time it is on the one real-time playhead, at the same moment.
+/// A recording follows the real-time playhead only while its start time is wired into a Timeline;
+/// with its end wired too, at the speed they give. One that starts following moves its playhead
+/// over at the same moment, one that stops keeps its place; a recording only in another row's
+/// media, with no time, keeps its own.
 #[test]
 fn one_real_time_playhead() {
-    use corroborate::clock::{Anchor as An, Link};
+    use corroborate::timebase::FileFacts;
     let mut app = App::empty();
-    let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
+    app.facts.put("a.mp4", FileFacts { stamp: None, len: Some(100.0), source: String::new() });
+    let a = app.add(Kind::Sourcer { input: "a.mp4".into() }, Pos2::new(30.0, 40.0));
+    let b = source(&mut app, 300.0);
     let (ca, cb) = (uid(&app, a), uid(&app, b));
-    app.ev.manual_links.push(Link { a: ca.clone(), t_a: 20.0, b: cb.clone(), t_b: 0.0, error_s: 0.01, from: "manual".into(), enabled: true });
-    app.update_clocks();
+    let time = |utc: &str| Kind::Value { ty: "time".into(), rows: vec![("utc".into(), utc.into())] };
+    let (start, end) = (app.add(time("1970-01-01 00:16:40"), Pos2::new(30.0, 600.0)), app.add(time("1970-01-01 00:18:21"), Pos2::new(30.0, 800.0)));
+    let tl = app.add(Kind::Timeline { rows: Vec::new() }, Pos2::new(700.0, 40.0));
+    app.wire_many(a, "audio", tl);
+    app.wire_many(b, "audio", tl);
     app.set_playhead(&ca, 12.0);
     assert_eq!(app.playhead_on(&ca), Some(12.0));
-    assert_eq!(app.playhead_on(&cb), None, "linked by audio, but no real time: its own");
-    app.ev.manual_anchors.push(An { clock: ca.clone(), t: 0.0, utc: 1000.0, error_s: 0.01, from: "manual".into(), enabled: true });
-    app.update_clocks();
-    assert!((app.ph.utc.unwrap() - 1012.0).abs() < 1e-6, "{:?}", app.ph.utc);
-    assert!(app.ph.floating.is_empty());
-    assert!((app.playhead_on(&cb).unwrap() + 8.0).abs() < 1e-3, "{:?}", app.playhead_on(&cb));
-    app.set_utc_playhead(1030.0);
-    assert!((app.playhead_on(&ca).unwrap() - 30.0).abs() < 1e-3);
-    assert!((app.playhead_on(&cb).unwrap() - 10.0).abs() < 1e-3);
+    assert_eq!(app.playhead_on(&cb), None, "its own: none yet");
+    app.wire(start, "value", tl, "time 1");
+    app.wire(end, "value", tl, "end 1");
+    app.update_follow();
+    // 100 s of file in 101 real seconds.
+    assert!((app.ph.utc.unwrap() - 1012.12).abs() < 1e-6, "{:?}", app.ph.utc);
+    assert!(app.ph.own.is_empty());
+    assert!((app.playhead_on(&ca).unwrap() - 12.0).abs() < 1e-9);
+    assert_eq!(app.playhead_on(&cb), None, "b has no time wired");
+    app.set_utc_playhead(1050.5);
+    assert!((app.playhead_on(&ca).unwrap() - 50.0).abs() < 1e-9, "{:?}", app.playhead_on(&ca));
+    app.pick_only(a);
+    assert!(app.is_active_clock(&ca) && !app.is_active_clock(&cb));
+    app.graph.disconnect(tl, "time 1");
+    app.update_follow();
+    assert!(app.ph.follow.is_empty());
+    assert!((app.playhead_on(&ca).unwrap() - 50.0).abs() < 1e-9, "it keeps its place on its own clock");
 }
 
 /// A clock's error is smallest at its evidence and grows with unknown drift.
@@ -789,7 +754,7 @@ fn timeline_node_draws_what_it_is_given() {
     for s in [a, b, c] {
         app.wire_many(s, "audio", t);
     }
-    assert_eq!(app.graph.nodes()[t].spec.inputs.len(), 8, "rows of media and time: three wired, one free");
+    assert_eq!(app.graph.nodes()[t].spec.inputs.len(), 12, "rows of media, start and end: three wired, one free");
     app.wire(a, "time", t, "time 1");
     app.wire(b, "time", t, "time 2");
     app.wire(c, "time", t, "time 3");
@@ -804,11 +769,17 @@ fn timeline_node_draws_what_it_is_given() {
         rows.push(("sort by time".into(), "true".into()));
     }
     d.frames(3);
-    assert!((d.app().port_place(o, t, 2, false).0.y - y1).abs() < 0.01 && d.app().port_place(o, t, 0, false).0.y > y1, "row 2 is earlier, so it is drawn first and its ports follow");
+    assert!((d.app().port_place(o, t, 3, false).0.y - y1).abs() < 0.01 && d.app().port_place(o, t, 0, false).0.y > y1, "row 2 is earlier, so it is drawn first and its ports follow");
     let track = *d.app().match_ui.tracks.last().unwrap();
     d.click_at(track.center().x, track.top() + 8.0);
     let u = d.app().ph.utc.expect("a click on the ruler sets the real-time playhead");
     assert!(u > 500.0 && u < 1100.0, "{u}");
+    // The click moves the playheads of the recordings whose times are wired in, and only those.
+    d.frames(1);
+    let (ua, uc) = (uid(d.app(), a), uid(d.app(), c));
+    let on_a = d.app().playhead_on(&ua).expect("a follows");
+    assert!((on_a - (u - 1000.0)).abs() < 1e-6, "{on_a}");
+    assert!(!d.app().ph.follow.contains_key(&uc), "c's time has no date: it keeps its own");
     d.shot("timeline_node_sorted");
 }
 
@@ -865,9 +836,8 @@ fn make_jiku_project() {
         let e = json.find("\"errors\"").unwrap_or(0);
         println!("{}", &json[e..json.len().min(e + 3000)]);
     }
-    app.update_clocks();
-    let groups: std::collections::BTreeSet<String> = sources.iter().map(|&s| app.ev.clocks.get(&uid(app, s)).group.clone()).collect();
-    println!("{} recordings in {} groups", sources.len(), groups.len());
+    let v = app.match_view(m);
+    println!("{} recordings in {} synced groups", sources.len(), v.groups.iter().filter(|g| g.number > 0).count());
     d.frames(5);
     d.shot("jiku_project");
     let app = d.app();
@@ -985,7 +955,7 @@ fn make_hillingdon_project() {
         app.wire(s, "audio", e, "audio");
         app.wire(place, "value", e, "location");
         app.wire_many(s, "audio", tl);
-        app.wire(e, "time of recording", tl, &format!("time {}", k + 1));
+        app.wire(e, "audio start time", tl, &format!("time {}", k + 1));
         enfs.push((*title, e));
     }
     assert_eq!(app.graph.wires().len(), 8, "{}", app.msg);
@@ -1007,7 +977,7 @@ fn make_hillingdon_project() {
     let app = d.app();
     for &(title, e) in &enfs {
         let status = app.nodes[e].state.lock().unwrap().status.clone();
-        println!("{title}: {status} -> {:?}", app.value_from(e, "time of recording"));
+        println!("{title}: {status} -> {:?}", app.value_from(e, "audio start time"));
     }
     d.frames(5);
     d.shot("hillingdon_run");
@@ -1015,8 +985,8 @@ fn make_hillingdon_project() {
     assert!(ended, "both files ended");
 }
 
-/// The time written in a file never anchors its clock, wired or not; a live source's own time
-/// does. The file's time is on the output from before any Run, raw, with an error of 0, and a Run
+/// The time written in a file is a claim only, wired or not; a live source's own time is on its
+/// time output too. The file's time is on the output from before any Run, raw, with an error of 0, and a Run
 /// does not clear it; so is the file's length.
 #[test]
 fn a_file_stamp_is_a_claim_only() {
@@ -1030,20 +1000,17 @@ fn a_file_stamp_is_a_claim_only() {
     let c = app.clock_of(s).unwrap();
     assert_eq!(app.value_from(s, "time"), Ok(Data::Time { clock: c, t: 0.0, utc: Some(1000.0), error_s: 0.0, source: "the file's creation_time".into() }));
     assert_eq!(app.value_from(s, "length"), Ok(Data::Custom { kind: "length", json: "{\"seconds\":60}".into() }));
-    app.nodes[s].state.lock().unwrap().anchor = Some(Anchor { utc0: 1000.0, error_s: 60.0, source: "file".into() });
-    app.update_clocks();
-    assert!(app.ev.anchors.is_empty(), "unwired: not used {:?}", app.ev.anchors);
     app.wire(s, "time", p, "time");
     assert_eq!(app.graph.wires().len(), 2, "{}", app.msg);
-    app.update_clocks();
-    assert!(app.ev.anchors.is_empty(), "wired: still only a claim {:?}", app.ev.anchors);
+    app.update_follow();
+    assert!(app.ph.follow.is_empty(), "wired into Planes: still only a claim");
     app.nodes[s].state.lock().unwrap().reset();
     assert!(app.value_from(s, "time").is_ok(), "a Run clears the state, not what the file says");
-    // Not a file: its own time counts.
+    // Not a file: its own time is on its time output.
     let live = source(&mut app, 300.0);
     anchor(&app, live, 2000.0, 1.0);
-    app.update_clocks();
-    assert_eq!(app.ev.anchors.len(), 1);
+    let Ok(Data::Time { utc, error_s, .. }) = app.value_from(live, "time") else { panic!("no time from the live source") };
+    assert_eq!((utc, error_s), (Some(2000.0), 1.0));
 }
 
 /// Opens a copy of the Jiku project (made by make_jiku_project; the copy in target\drive, so
@@ -1132,11 +1099,11 @@ fn make_jiku_group6() {
     assert!(d.wait_until(300.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.frames(3);
     let app = d.app();
-    app.update_clocks();
-    let group_of = |app: &App, s: NodeId| app.ev.clocks.get(&uid(app, s)).group;
+    let v = app.match_view(m);
+    let group_of = |s: NodeId| v.rows.iter().find(|r| r.uid.as_deref() == Some(app.nodes[s].uid.as_str())).map(|r| r.group);
     let key = videos.iter().position(|v| v.to_string_lossy().contains("GT_090912_0_1347196530871")).expect("the video");
-    let group = group_of(app, sources[key]);
-    let members: Vec<PathBuf> = (0..50).filter(|&k| group_of(app, sources[k]) == group).map(|k| videos[k].clone()).collect();
+    let group = group_of(sources[key]);
+    let members: Vec<PathBuf> = (0..50).filter(|&k| group_of(sources[k]) == group).map(|k| videos[k].clone()).collect();
     app.stop_run();
     assert_eq!(members.len(), 12, "group 6 has 12 recordings");
 
@@ -1211,7 +1178,6 @@ fn audio_match_timeline() {
     d.shot("am_2_running");
     assert!(d.wait_until(120.0, |a| a.nodes[m].state.lock().unwrap().done), "the match ends");
     d.wait(1.0);
-    d.app().update_clocks();
     d.frames(3);
     let v = d.app().match_view(m);
     for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
@@ -1227,7 +1193,8 @@ fn audio_match_timeline() {
     let track = d.app().match_ui.tracks[0];
     let k = v.rows.iter().position(|r| r.meta.is_some()).expect("a row with a time");
     let on = d.app().match_ui.anchor_at[&(m, k)];
-    let (t0, links0) = (v.rows[k].start.unwrap(), d.app().ev.links.len());
+    let links_of = |app: &App| app.nodes[m].state.lock().unwrap().found.as_ref().map_or(0, |f| f.links.len());
+    let (t0, links0) = (v.rows[k].start.unwrap(), links_of(d.app()));
     let (v0, v1) = d.app().match_ui.views.get(&m).copied().unwrap_or((0.0, 1.0));
     let _ = (v0, v1);
     let y = on.center().y;
@@ -1245,32 +1212,33 @@ fn audio_match_timeline() {
     let v = d.app().match_view(m);
     println!("dragged the group by {:.1} s", v.rows[k].start.unwrap() - t0);
     assert!(v.rows[k].start.unwrap() > t0, "the group moved");
-    assert_eq!(d.app().ev.links.len(), links0, "and no data did");
+    assert_eq!(links_of(d.app()), links0, "and no data did");
     d.shot("am_4_group_dragged");
 
     // A click on a row's anchor: the group has real time and the yellow outputs give it.
     d.click_at(on.center().x, on.center().y);
-    d.frames(3);
-    d.app().update_clocks();
-    d.frames(3);
+    d.frames(6);
     let v = d.app().match_view(m);
     assert_eq!(cell(&v, k).0, Cell::Anchor, "{}", d.msg());
     assert!((v.rows[k].start.unwrap() - v.rows[k].meta.unwrap()).abs() < 0.01, "the audio's start snaps to the time");
     for r in v.rows.iter().filter(|r| r.wired) {
         assert!(d.app().value_from(m, &format!("synced {}", r.n)).is_ok(), "row {} gives a time", r.n);
     }
-    assert!(d.app().ev.clocks.contradictions.is_empty(), "{:?}", d.app().ev.clocks.contradictions.len());
     for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
         println!("{:28} {:?} {:?}", x.name, cell(&v, k).0, crate::audio_match_node::drift_cell(&v, k));
     }
-    // The node's own fit of its group against the global clock solve: each row's start from the
-    // anchor's, in real seconds. Both count the group's average clock as running true.
+    // The node's own fit of its group against the clock solve of all its links at once (what the
+    // global solve did), anchored on the same time: each row's start from the anchor's, in real
+    // seconds. Both count the group's average clock as running true.
     let a = v.groups.iter().find_map(|g| g.anchor).expect("anchored");
     let meta_a = v.rows[a].meta.unwrap();
-    let ga = d.app().ev.clocks.get(v.rows[a].clock.as_deref().unwrap());
+    let links = d.app().nodes[m].state.lock().unwrap().found.as_ref().unwrap().links.clone();
+    let ca = v.rows[a].clock.clone().unwrap();
+    let solved = corroborate::clock::solve(&[corroborate::clock::Anchor { clock: ca.clone(), t: 0.0, utc: meta_a, error_s: 1.0, from: "test".into(), enabled: true }], &links);
+    let ga = solved.get(&ca);
     let mut worst = 0.0f64;
     for r in v.rows.iter().filter(|r| r.wired) {
-        let gr = d.app().ev.clocks.get(r.clock.as_deref().unwrap());
+        let gr = solved.get(r.clock.as_deref().unwrap());
         let (own, global) = (r.start.unwrap() - meta_a, gr.at(0.0) - ga.at(0.0));
         println!("{:28} {:?} own fit {own:+.4} s, global {global:+.4} s from the anchor's start: {:+.3} ms", r.name, crate::audio_match_node::drift_cell(&v, v.rows.iter().position(|x| x.n == r.n).unwrap()), (own - global) * 1000.0);
         worst = worst.max((own - global).abs());
