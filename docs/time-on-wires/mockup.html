@@ -22,7 +22,7 @@ section{display:flex;flex-direction:column;gap:12px}
 .tag{font:11px var(--mono);color:var(--accent);letter-spacing:.06em;text-transform:uppercase}
 
 /* the node */
-.am{min-width:900px;background:var(--node);border:2px solid var(--edge);border-radius:6px;font:11px var(--mono);overflow:visible;position:relative}
+.am{min-width:1040px;background:var(--node);border:2px solid var(--edge);border-radius:6px;font:11px var(--mono);overflow:visible;position:relative}
 .am .title{display:flex;justify-content:space-between;padding:5px 10px;font:12.5px var(--sans);border-bottom:1px solid var(--seam)}
 .am .title span:last-child{color:var(--dim);font-size:11px}
 .bar{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--seam);font-family:var(--sans);position:relative}
@@ -30,7 +30,7 @@ section{display:flex;flex-direction:column;gap:12px}
 .sw{display:inline-block;width:12px;height:12px;vertical-align:-2px;margin-right:5px}
 .menu{position:absolute;left:96px;top:31px;background:var(--strip);border:1px solid #4a505a;border-radius:4px;padding:4px 0;z-index:3;min-width:200px;font-family:var(--sans)}
 .menu div{padding:4px 12px}.menu .on{background:#4a505a}
-.grid{display:grid;grid-template-columns:150px minmax(0,1fr) 120px 128px}
+.grid{display:grid;grid-template-columns:190px minmax(0,1fr) 104px 104px 210px}
 .hd{background:var(--track);color:var(--dim);display:flex;align-items:center;justify-content:center;font-family:var(--sans);height:22px}
 .ruler{background:var(--track);color:var(--dim);position:relative;height:22px}
 .ruler span{position:absolute;top:4px}
@@ -47,7 +47,7 @@ section{display:flex;flex-direction:column;gap:12px}
 .out .f{position:relative;flex:1;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:var(--ink);min-height:18px}
 .out .f+.f{border-top:1px solid var(--seam)}
 .out .mk{position:absolute;left:5px;top:2px;line-height:1;font-weight:600}
-.dot{position:absolute;right:-7px;width:10px;height:10px;border-radius:50%;border:2px solid var(--amber);background:var(--node)}
+.dot{position:absolute;right:-7px;width:10px;height:10px;border-radius:50%;border:2px solid var(--blue);background:var(--node)}
 .dia{position:absolute;right:-7px;width:9px;height:9px;transform:rotate(45deg);border:2px solid var(--amber);background:var(--node)}
 .foot{padding:8px 10px 12px;color:var(--dim);font-family:var(--sans)}
 .tip{position:absolute;z-index:4;background:#23262b;border:1px solid #4a505a;border-radius:5px;padding:8px 10px;font:11.5px/1.55 var(--mono);color:var(--text);box-shadow:0 6px 20px rgba(0,0,0,.45);width:390px}
@@ -75,7 +75,7 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>1 · The Audio match node</h2>
-    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Each row gives two outputs: audio corrected for its clock's drift, and its time. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status.</p></div>
+    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: audio (stretch corrected), and time (recalculated start), blue like every time port. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status.</p></div>
     <div class="scroll">
       <div class="am" id="node">
         <div class="title"><span>Audio match</span><span>detector</span></div>
@@ -184,7 +184,8 @@ const rows=[
 ];
 const col=d=>{const a=Math.min(Math.abs(d)/30,1);return `hsl(${130*(1-a)},62%,46%)`};
 const ticks=['12:16','12:18','12:20','12:22','12:24'];
-let h=`<div class="hd" style="background:var(--node)"></div><div class="ruler">${ticks.map((t,i)=>`<span style="left:${4+i*20}%">${t}</span>`).join('')}</div><div class="hd">Status</div><div class="hd">output</div>`;
+let h=`<div class="hd" style="background:var(--node)"></div><div class="ruler">${ticks.map((t,i)=>`<span style="left:${4+i*20}%">${t}</span>`).join('')}</div><div class="hd">Status</div><div class="hd">Stretch</div><div class="hd">output</div>`;
+const ppmCol=p=>{const a=Math.min(Math.abs(p)/1000,1);return `hsl(${130*(1-a)},62%,46%)`};
 const marks={gap:'<span title="0.4 s missing against …4408059" style="color:var(--text)">⟂ gap</span>',same:'<span style="color:var(--text)">= same recording</span>'};
 h+=rows.map((r,k)=>{
   const bar=(x,c)=>x?`<div class="b" style="left:${x[0]}%;width:${x[1]-x[0]}%;background:${c}"></div>`:'';
@@ -196,15 +197,18 @@ h+=rows.map((r,k)=>{
   else if(r.none) st=`<div class="h" style="color:var(--dim)">no time metadata</div>`;
   else{cls+=' split';const t=(r.d>0?'+':'−')+Math.abs(r.d).toFixed(1)+' s';const c=`<div class="h" style="background:${col(r.d)};color:var(--ink)">${t}</div>`,e=`<div class="h">${r.mark?marks[r.mark]:''}</div>`;st=r.d<0?c+e:e+c}
   if(r.none&&r.mark) st=`<div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no time metadata</span>${marks[r.mark]}</div>`;
-  const meta=r.b?`<span style="background:var(--blue)">time</span>`:`<span style="background:var(--off);color:var(--dim)">time</span>`;
+  const meta=r.b?`<span style="background:var(--blue)">time (start of recording)</span>`:`<span style="background:var(--off);color:var(--dim)">time (start of recording)</span>`;
   const mk=r.anc?'⚓':'?';
-  const ppm=r.ppm?`${r.ppm>0?'+':'−'}${Math.abs(r.ppm)} ppm`:'';
+  let sx;
+  if(r.anchor) sx=`<div class="st" style="background:var(--node)"><div class="h" style="flex-direction:column;gap:0;color:var(--dim)"><span style="color:var(--text)">reference</span><span style="font-size:10.5px">0 ppm by definition</span></div></div>`;
+  else{const t=(r.ppm>0?'+':'−')+Math.abs(r.ppm)+' ppm';const c=`<div class="h" style="background:${ppmCol(r.ppm)};color:var(--ink);font-size:11px">${t}</div>`,e=`<div class="h"></div>`;sx=`<div class="st split">${r.ppm<0?c+e:e+c}</div>`}
   return `<div class="name" style="height:58px">${r.n}<div class="ports"><span style="background:var(--amber)">audio</span>${meta}</div></div>`
    +`<div class="lane">${lane}</div>`
    +`<div class="${cls}" ${r.anchor?'style="background:var(--node)"':''}>${st}</div>`
+   +sx
    +`<div class="out" style="position:relative${r.hl?';outline:2px solid var(--text);outline-offset:-2px':''}"><div class="nm">…${r.n.slice(-7)}</div>`
-   +`<div class="f" style="background:var(--amber)"><span style="position:absolute;left:6px;font-size:10px;opacity:.75">${ppm}</span>audio<span class="dia"></span></div>`
-   +`<div class="f" style="background:var(--amber)"><span class="mk">${mk}</span>time<span class="dot"></span></div></div>`;
+   +`<div class="f" style="background:var(--amber)">audio (stretch corrected)<span class="dia"></span></div>`
+   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated start)<span class="dot"></span></div></div>`;
 }).join('');
 document.getElementById('g').innerHTML=h;
 </script>

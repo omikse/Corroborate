@@ -49,6 +49,13 @@ After the change:
   - The Status cell is split at zero: − colours the left half, + the right half.
   - The blue start line in the lanes goes.
   - The output field shows an anchor or ? in its upper left corner.
+  - Port names: the inputs are "audio" and "time (start of recording)"; the outputs are
+    "audio (stretch corrected)" and "time (recalculated start)".
+  - The time output is blue, the colour of every time port (it was amber).
+  - A second status column, Stretch, shows the row's speed against its group's anchor in ppm.
+    - It is split at zero: slower on the left, faster on the right.
+    - It is green near 0 and red toward 1000 ppm (`SPEED_CHANGE_PPM`, where a sped-up file begins).
+    - The anchor row reads "reference".
 - **The six bottom outputs** (links, quality, clock drift, same recording, speed change, gaps) are
   proposed to go, with their findings shown as marks in Status. This is not yet confirmed; see Open.
 
@@ -74,7 +81,11 @@ Only `src/modules/Audio match/node.rs` and its tests.
    - The row `order` takes `group-meta-start | start-group | group-off | wired`.
    - An old `order by group = true` reads as `group-meta-start`.
    - The sort keys are added to the `order` sort in `body`.
-4. The output mark: an anchor or ? in the upper left of the amber field.
+4. The output mark: an anchor or ? in the upper left of the output's time field.
+   - The time output turns blue.
+   - The port names change. The saved port names (`audio n`, `time n`, `synced n`) stay, so wires
+     in old projects hold.
+   - Only the labels drawn on the node and the hover texts change.
 5. Unanchored outputs: `synced_time` stops refusing groups with no anchor.
    - The time is `rows[k].start`, with the row's own `meta_err`.
    - The source says "unanchored: average of metadata" or "moved by hand".
@@ -109,7 +120,8 @@ Tests:
    - Out of the fit come each row's offset and speed against the anchor, with errors, and the
      leftover per link.
 2. The fit is shown in the row's hover and in the time output's step: links, leftover, ppm. The foot
-   line gives the median leftover.
+   line gives the median leftover. The Stretch column is added here, once the speeds exist, with
+   room in the node's width for it.
 3. Placement (`match_view_now`) uses the group's own fit instead of `ev.clocks`.
 4. The corrected audio output.
    - Audio is not a value on a wire today: a SOURCER streams it (`PortKind::Audio` "is not sent as a
@@ -121,6 +133,7 @@ Tests:
    on hover, if the bottom outputs go.
 
 Tests:
+- a `drive` PNG of the Stretch column;
 - on Jiku GT_090912, the per-group fit agrees with today's solve to within 1 ms per row;
 - the corrected audio of a phone at −250 ppm is 0.6 s longer per 40 min;
 - `drive` PNGs.
