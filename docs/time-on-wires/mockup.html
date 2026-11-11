@@ -1,0 +1,210 @@
+<title>Time on Wires</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a single column of annotated panels, each a slice of the dark workbench canvas. */
+:root{
+  --canvas:#16181c; --node:#2a2d33; --strip:#353a42; --track:#1d2025; --seam:#101215; --grid:#31353c;
+  --text:#d8dbe0; --dim:#8a9099; --ink:#101214;
+  --amber:#e9a84c; --blue:#7db4e6; --off:#41464e; --edge:#3fb39a; --accent:#5cc8b0; --red:#e0524f;
+  --g1:#b58cff; --g2:#f08bc0;
+  --sans:"Inter",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace; --head:"Space Grotesk","Inter",sans-serif;
+  color-scheme:dark;
+}
+body{background:var(--canvas);color:var(--text);font:14px/1.6 var(--sans);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px 48px}
+main{max-width:1060px;margin:0 auto;display:flex;flex-direction:column;gap:36px}
+h1{font:600 26px/1.2 var(--head);margin:0;text-wrap:balance}
+h2{font:600 17px/1.3 var(--head);margin:0 0 6px;text-wrap:balance}
+p{margin:0;max-width:68ch;color:var(--dim)}
+.lead p{color:var(--text)}
+section{display:flex;flex-direction:column;gap:12px}
+.scroll{overflow-x:auto;padding-bottom:4px}
+.note{font-size:12.5px;color:var(--dim)}
+.tag{font:11px var(--mono);color:var(--accent);letter-spacing:.06em;text-transform:uppercase}
+
+/* the node */
+.am{min-width:900px;background:var(--node);border:2px solid var(--edge);border-radius:6px;font:11px var(--mono);overflow:visible;position:relative}
+.am .title{display:flex;justify-content:space-between;padding:5px 10px;font:12.5px var(--sans);border-bottom:1px solid var(--seam)}
+.am .title span:last-child{color:var(--dim);font-size:11px}
+.bar{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--seam);font-family:var(--sans);position:relative}
+.btn{background:#3a3f47;padding:3px 8px;border-radius:3px;white-space:nowrap}
+.sw{display:inline-block;width:12px;height:12px;vertical-align:-2px;margin-right:5px}
+.menu{position:absolute;left:96px;top:31px;background:var(--strip);border:1px solid #4a505a;border-radius:4px;padding:4px 0;z-index:3;min-width:200px;font-family:var(--sans)}
+.menu div{padding:4px 12px}.menu .on{background:#4a505a}
+.grid{display:grid;grid-template-columns:150px minmax(0,1fr) 120px 128px}
+.hd{background:var(--track);color:var(--dim);display:flex;align-items:center;justify-content:center;font-family:var(--sans);height:22px}
+.ruler{background:var(--track);color:var(--dim);position:relative;height:22px}
+.ruler span{position:absolute;top:4px}
+.name{background:var(--strip);padding:3px 6px;white-space:nowrap;overflow:hidden;border-top:2px solid var(--seam)}
+.ports{display:flex;flex-direction:column;gap:0;margin:3px -6px -3px -6px}
+.ports span{padding:1px 8px;color:var(--ink)}
+.lane{background:var(--track);position:relative;border-top:2px solid var(--seam)}
+.lane .b{position:absolute;top:5px;bottom:5px;opacity:.6}
+.st{position:relative;border-top:2px solid var(--seam);background:var(--track);display:flex}
+.st .h{flex:1;display:flex;align-items:center;justify-content:center;font-size:12px;gap:4px}
+.st.split::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#4a505a}
+.out{border-top:2px solid var(--seam);display:flex;flex-direction:column}
+.out .nm{background:var(--strip);padding:2px 6px;white-space:nowrap;overflow:hidden}
+.out .f{position:relative;flex:1;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:var(--ink);min-height:18px}
+.out .f+.f{border-top:1px solid var(--seam)}
+.out .mk{position:absolute;left:5px;top:2px;line-height:1;font-weight:600}
+.dot{position:absolute;right:-7px;width:10px;height:10px;border-radius:50%;border:2px solid var(--amber);background:var(--node)}
+.dia{position:absolute;right:-7px;width:9px;height:9px;transform:rotate(45deg);border:2px solid var(--amber);background:var(--node)}
+.foot{padding:8px 10px 12px;color:var(--dim);font-family:var(--sans)}
+.tip{position:absolute;z-index:4;background:#23262b;border:1px solid #4a505a;border-radius:5px;padding:8px 10px;font:11.5px/1.55 var(--mono);color:var(--text);box-shadow:0 6px 20px rgba(0,0,0,.45);width:390px}
+.tip .s{display:grid;grid-template-columns:18px 1fr auto;gap:2px 6px}
+.tip .s .n{color:var(--dim)}
+.tip .s .v{text-align:right;color:var(--amber)}
+.tip hr{border:0;border-top:1px solid #4a505a;margin:6px 0}
+
+/* wiring diagram */
+.wires{min-width:820px}
+.wires svg{width:100%;height:auto;display:block}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.card{background:var(--node);border:1px solid #3a3f47;border-radius:6px;padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+.card h3{margin:0;font:600 13.5px var(--head)}
+.card p{font-size:13px}
+code{font:12px var(--mono);color:var(--amber)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<main>
+  <header class="lead" style="display:flex;flex-direction:column;gap:8px">
+    <span class="tag">Corroborate · mockup · 2026-11-11</span>
+    <h1>Time on wires</h1>
+    <p>The hidden clock solve goes. Every time a node uses arrives on a wire you can see, and every time carries the steps that made it. Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of every row.</p>
+  </header>
+
+  <section>
+    <div><h2>1 · The Audio match node</h2>
+    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Each row gives two outputs: audio corrected for its clock's drift, and its time. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status.</p></div>
+    <div class="scroll">
+      <div class="am" id="node">
+        <div class="title"><span>Audio match</span><span>detector</span></div>
+        <div class="bar">
+          <span class="btn">View all ○</span>
+          <span class="btn">Order: Group › metadata › start ⏷</span>
+          <span style="color:var(--dim);margin-left:6px">row height</span>
+          <span style="display:inline-block;width:80px;height:4px;background:#4a505a;border-radius:2px;position:relative"><span style="position:absolute;left:44px;top:-6px;width:10px;height:16px;background:var(--text);border-radius:2px"></span></span>
+          <span style="margin-left:12px"><span class="sw" style="background:var(--amber)"></span>time calculated from audio</span>
+          <span><span class="sw" style="background:var(--blue)"></span>time from metadata</span>
+          <span style="margin-left:auto;color:var(--dim);font-family:var(--mono)">12:15:43 to 12:24:10</span>
+          <div class="menu"><div class="on">Group › metadata › start</div><div>Start › group</div><div>Group › how far off</div><div>As wired</div></div>
+        </div>
+        <div class="grid" id="g"></div>
+        <div class="foot">491 links, 78 of 1225 pairs, 8 groups · fitted per group: median leftover 5.1 ms</div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start">
+        <div class="tip" id="tip" style="position:static;max-width:100%">
+          <div style="color:var(--dim);margin-bottom:4px">hover on row 3's time output (outlined) · phone 0 …3263724</div>
+          <div class="s">
+            <span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±0 s</span>
+            <span class="n">2</span><span>Time: − length 166.2 s</span><span class="v">12:17:54.8</span>
+            <span class="n">3</span><span>Time: error set</span><span class="v">±1 s</span>
+            <span class="n">4</span><span>Audio match: group 1, anchored on …3092640</span><span class="v">+0.21 s</span>
+            <span class="n"></span><span style="color:var(--dim)">14 links to 3 rows, leftover 4.8 ms, −250 ppm</span><span></span>
+          </div>
+          <hr>
+          <div style="display:flex;justify-content:space-between"><span>out</span><span style="color:var(--amber)">2012-09-09 12:17:55.0 UTC ±1 s</span></div>
+        </div>
+        <p class="note" style="flex:1;min-width:220px">Hovering a time output lists its steps, one per node it passed, each with the number it changed. The same list travels on the wire. The audio output's hover says how much it was stretched or squeezed, and against which clock: the group's anchor counts as running true.</p>
+    </div>
+  </section>
+
+  <section>
+    <div><h2>2 · Unanchored groups</h2>
+    <p>A group with no anchor still sends times out. At first its yellow bars sit on the average of the group's metadata; dragging the group moves them, and the drag is saved, logged and undoable. Each output keeps its own metadata ±, and its steps say how it was placed.</p></div>
+    <div class="cols">
+      <div class="card"><h3>Placed by metadata</h3>
+        <p><code>4 · Audio match: group 2, unanchored, placed on the average of 3 metadata times  −0.4 s</code></p></div>
+      <div class="card"><h3>Moved by hand</h3>
+        <p><code>4 · Audio match: group 2, unanchored, moved by hand +12.0 s (logged 14:02)  +11.6 s</code></p></div>
+      <div class="card"><h3>Anchored</h3>
+        <p><code>4 · Audio match: group 1, anchored on …3092640  +0.21 s</code></p></div>
+    </div>
+  </section>
+
+  <section>
+    <div><h2>3 · Where time comes from, before and after</h2>
+    <p>Before: links and anchors from any node, wired or not, plus links dropped on the timeline, went into one pool and a single solve moved every clock. After: a node's time reaches a recording only along a wire.</p></div>
+    <div class="scroll"><div class="wires">
+      <svg viewBox="0 0 1000 330" role="img" aria-labelledby="wt wd">
+        <title id="wt">Wiring before and after</title>
+        <desc id="wd">Left: ENF, ADS-B and Audio match feed a hidden clock solve. Right: ENF's time output is wired into a Time node and then into an Audio match row's time input; Audio match's outputs go to a Timeline.</desc>
+        <g font-family="Inter,system-ui,sans-serif" font-size="12">
+          <text x="20" y="22" fill="#8a9099">BEFORE</text>
+          <rect x="20" y="40" width="120" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="80" y="62" text-anchor="middle" fill="#d8dbe0">ENF</text>
+          <rect x="20" y="96" width="120" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="80" y="118" text-anchor="middle" fill="#d8dbe0">ADS-B check</text>
+          <rect x="20" y="152" width="120" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="80" y="174" text-anchor="middle" fill="#d8dbe0">Audio match</text>
+          <rect x="20" y="208" width="120" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="80" y="230" text-anchor="middle" fill="#d8dbe0">timeline links</text>
+          <rect x="230" y="110" width="150" height="62" rx="4" fill="none" stroke="#8a9099" stroke-dasharray="4 4"/>
+          <text x="305" y="137" text-anchor="middle" fill="#8a9099">hidden pool</text><text x="305" y="155" text-anchor="middle" fill="#8a9099">one solve</text>
+          <g stroke="#8a9099" stroke-dasharray="3 4" fill="none">
+            <path d="M140 57 C190 57 190 130 230 130"/><path d="M140 113 C190 113 190 136 230 136"/><path d="M140 169 C190 169 190 146 230 146"/><path d="M140 225 C190 225 190 152 230 152"/>
+            <path d="M380 141 C410 141 410 80 440 80"/><path d="M380 141 C410 141 410 200 440 200"/>
+          </g>
+          <text x="440" y="84" fill="#8a9099">playheads</text><text x="440" y="204" fill="#8a9099">every clock</text>
+          <line x1="520" y1="20" x2="520" y2="310" stroke="#31353c"/>
+          <text x="545" y="22" fill="#5cc8b0">AFTER</text>
+          <rect x="545" y="40" width="110" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="600" y="62" text-anchor="middle" fill="#d8dbe0">SOURCER</text>
+          <rect x="545" y="110" width="110" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="600" y="132" text-anchor="middle" fill="#d8dbe0">ENF</text>
+          <rect x="690" y="110" width="90" height="34" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="735" y="132" text-anchor="middle" fill="#d8dbe0">Time</text>
+          <rect x="815" y="40" width="120" height="104" rx="4" fill="#2a2d33" stroke="#3fb39a"/><text x="875" y="62" text-anchor="middle" fill="#d8dbe0">Audio match</text>
+          <text x="823" y="88" fill="#8a9099" font-size="11">audio 1</text><text x="823" y="128" fill="#8a9099" font-size="11">time 1</text>
+          <rect x="815" y="200" width="120" height="40" rx="4" fill="#2a2d33" stroke="#4a505a"/><text x="875" y="225" text-anchor="middle" fill="#d8dbe0">Timeline</text>
+          <g fill="none" stroke-width="2">
+            <path d="M655 57 C740 57 740 84 815 84" stroke="#e9a84c"/>
+            <path d="M655 127 L690 127" stroke="#7db4e6"/><path d="M780 127 L815 124" stroke="#7db4e6"/>
+            <path d="M935 100 C975 100 975 215 935 215" stroke="#e9a84c"/>
+          </g>
+          <text x="600" y="168" text-anchor="middle" fill="#8a9099" font-size="11">time output</text>
+          <text x="545" y="290" fill="#8a9099">Playheads follow wired times. Two recordings move together only when wires give both a time.</text>
+        </g>
+      </svg>
+    </div></div>
+  </section>
+
+  <section>
+    <div><h2>4 · The Time type</h2>
+    <p>A moment, one ± figure, and the steps that made it. No speed: drift travels in the corrected audio instead.</p></div>
+    <div class="cols">
+      <div class="card"><h3>Today</h3><p><code>clock, t, utc?, error_s, source</code></p><p>One line of source text, overwritten by each node.</p></div>
+      <div class="card"><h3>After</h3><p><code>clock, t, utc?, error_s, steps[ ]</code></p><p>Each step: the node, what it did in words, and the number it changed. Nodes append; nothing is overwritten.</p></div>
+      <div class="card"><h3>Still open</h3><p>Whether a Time on a wire must always be a real (UTC) moment. Until a node needs otherwise, the type keeps its clock and utc fields as they are.</p></div>
+    </div>
+  </section>
+</main>
+<script>
+const rows=[
+ {n:"phone 0 1347193092640",grp:1,a:[38,47],b:[38,47],anchor:true,anc:true,ppm:0},
+ {n:"phone 0 1347194022621",a:[20,52],b:[23,55],d:-3.4,anc:true,ppm:-12},
+ {n:"phone 0 1347193263724",a:[62,99],b:[62.3,99.3],d:0.2,anc:true,ppm:-250,hl:true},
+ {n:"phone 0 1347194274656",grp:2,a:[10,30],b:[10.8,30.8],d:0.6,ppm:31,mark:"gap"},
+ {n:"phone 0 1347194408059",a:[44,70],b:[43.6,69.6],d:-0.4,ppm:-80},
+ {n:"phone 0 1347194561200",a:[70,92],b:null,none:true,ppm:5,mark:"same"},
+];
+const col=d=>{const a=Math.min(Math.abs(d)/30,1);return `hsl(${130*(1-a)},62%,46%)`};
+const ticks=['12:16','12:18','12:20','12:22','12:24'];
+let h=`<div class="hd" style="background:var(--node)"></div><div class="ruler">${ticks.map((t,i)=>`<span style="left:${4+i*20}%">${t}</span>`).join('')}</div><div class="hd">Status</div><div class="hd">output</div>`;
+const marks={gap:'<span title="0.4 s missing against …4408059" style="color:var(--text)">⟂ gap</span>',same:'<span style="color:var(--text)">= same recording</span>'};
+h+=rows.map((r,k)=>{
+  const bar=(x,c)=>x?`<div class="b" style="left:${x[0]}%;width:${x[1]-x[0]}%;background:${c}"></div>`:'';
+  let lane=bar(r.b,'var(--blue)')+bar(r.a,'var(--amber)');
+  if(r.grp) lane+=`<span style="position:absolute;left:3px;top:3px;background:${r.grp==1?'var(--g1)':'var(--g2)'};color:var(--ink);padding:0 4px">${r.grp}</span>`;
+  if(r.anchor) lane+=`<span style="position:absolute;left:calc(${r.a[1]}% - 16px);top:6px;color:var(--ink)">⚓</span>`;
+  let st,cls='st';
+  if(r.anchor) st=`<div class="h" style="font-size:18px">⚓</div>`;
+  else if(r.none) st=`<div class="h" style="color:var(--dim)">no time metadata</div>`;
+  else{cls+=' split';const t=(r.d>0?'+':'−')+Math.abs(r.d).toFixed(1)+' s';const c=`<div class="h" style="background:${col(r.d)};color:var(--ink)">${t}</div>`,e=`<div class="h">${r.mark?marks[r.mark]:''}</div>`;st=r.d<0?c+e:e+c}
+  if(r.none&&r.mark) st=`<div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no time metadata</span>${marks[r.mark]}</div>`;
+  const meta=r.b?`<span style="background:var(--blue)">time</span>`:`<span style="background:var(--off);color:var(--dim)">time</span>`;
+  const mk=r.anc?'⚓':'?';
+  const ppm=r.ppm?`${r.ppm>0?'+':'−'}${Math.abs(r.ppm)} ppm`:'';
+  return `<div class="name" style="height:58px">${r.n}<div class="ports"><span style="background:var(--amber)">audio</span>${meta}</div></div>`
+   +`<div class="lane">${lane}</div>`
+   +`<div class="${cls}" ${r.anchor?'style="background:var(--node)"':''}>${st}</div>`
+   +`<div class="out" style="position:relative${r.hl?';outline:2px solid var(--text);outline-offset:-2px':''}"><div class="nm">…${r.n.slice(-7)}</div>`
+   +`<div class="f" style="background:var(--amber)"><span style="position:absolute;left:6px;font-size:10px;opacity:.75">${ppm}</span>audio<span class="dia"></span></div>`
+   +`<div class="f" style="background:var(--amber)"><span class="mk">${mk}</span>time<span class="dot"></span></div></div>`;
+}).join('');
+document.getElementById('g').innerHTML=h;
+</script>
