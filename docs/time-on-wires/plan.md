@@ -125,19 +125,15 @@ The Time type does not change.
    - **Every row shows all seven boxes:** a 0 where nothing changes, not an empty box.
    - **A ± (s) column on every row**, the input row included, saved as `n.error_s` (0 by default).
      The ± box under Result goes.
-   - **A note on every row**, saved as `n.note`. Notes document the node like comments and do not
-     travel on the wire; the trace reads them from the node.
    - **The date stack**, as today: each row's boxes are added or taken away, top to bottom, into
      the Result's date. Years and months move on the calendar; days and smaller are exact seconds.
    - **The error stack:** every row's ± adds as squares into the Result's ±, √(Σ ±²).
      - The row's sign does not matter here: an uncertainty is never subtracted.
-     - A row of zeros with only a ± is how a judgement goes in ("phone clocks are often a second
-       off").
+     - A row of zeros with only a ± is how a judgement goes in, such as phone clocks being often a
+       second off.
    - **Wired rows** (SOURCER's `length`) lock their boxes and their ±, both from the wire. The input
      row's ± is whatever came in.
-   - Under Result, both sums written out:
-     - "12:20:41.000 − 0:02:46.200 − 1:00:00.000 + 0 = 11:17:54.800";
-     - "√(0² + 0.02² + 0² + 1²) = 1.000 s".
+   - There are no notes and no written-out sums: the boxes and the ± column are the whole node.
 3. Old projects: the old single `error_s` becomes a row of zeros with that ±, so the Result's ± is
    unchanged.
 

@@ -216,24 +216,22 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>5 · The Time node</h2>
-    <p>Today's boxes, every row showing all seven (a 0 where nothing changes), plus a ± on every row and a note. Two sums run down the same stack and each gives its own result: the date boxes add and subtract into the Result's date; the ± column adds as squares into the Result's ±.</p></div>
+    <p>Today's boxes, every row showing all seven (a 0 where nothing changes), plus a ± on every row. Two sums run down the same stack and each gives its own result: the date boxes add and subtract into the Result's date; the ± column adds as squares into the Result's ±.</p></div>
     <div class="scroll"><div class="tn">
       <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
       <div class="tb">
-        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span class="pmh">± s</span><span>note</span></div>
-        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><b class="lk pm">0</b><span class="dimt">wired from SOURCER · …3263724.mp4</span></div>
-        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><b class="lk pm">0.02</b><span class="tnote">length of the file · the stamp marks the end</span></div>
-        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>1</b><b>0</b><b>0</b><b>000</b><span class="sg">−</span><b class="pm">0</b><span class="tnote">camera wrote local time (BST), not UTC</span></div>
-        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 3</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>000</b><span class="sg">+</span><b class="pm">1</b><span class="tnote">phone clocks are often a second off</span></div>
+        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span class="pmh">± s</span><span></span></div>
+        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><b class="lk pm">0</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><b class="lk pm">0.02</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>1</b><b>0</b><b>0</b><b>000</b><span class="sg">−</span><b class="pm">0</b><span></span></div>
+        <div class="trow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>row 3</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>000</b><span class="sg">+</span><b class="pm">1</b><span></span></div>
         <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><b></b><span></span></div>
         <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><span></span><b class="pm">1.000</b><span class="dimt">time <i class="port t out"></i></span></div>
-        <div class="sum"><span style="color:var(--text)">date</span>  12:20:41.000 − 0:02:46.200 − 1:00:00.000 + 0 = 11:17:54.800</div>
-        <div class="sum"><span style="color:var(--text)">±   </span>  √( 0² + 0.02² + 0² + 1² ) = 1.000 s</div>
       </div>
     </div></div>
     <div class="cols">
       <div class="card"><h3>Date stack</h3><p>As today: each row's boxes are added or taken away, top to bottom. Years and months move on the calendar; days and smaller are exact seconds. Empty boxes read 0 and show it.</p></div>
-      <div class="card"><h3>Error stack</h3><p>Each row's ± (0 by default) adds as squares, the input's included, into Result's ±. The sign of the row does not matter here: an uncertainty is never subtracted. A row of zeros with only a ± (row 3) is how a judgement like "phone clocks are often a second off" goes in.</p></div>
+      <div class="card"><h3>Error stack</h3><p>Each row's ± (0 by default) adds as squares, the input's included, into Result's ±. The sign of the row does not matter here: an uncertainty is never subtracted. A row of zeros with only a ± (row 3) is how a judgement goes in, such as phone clocks being often a second off.</p></div>
       <div class="card"><h3>Wired rows</h3><p>A wired row (a length) locks its boxes and its ±, both from the wire. The input's ± is whatever came in; a node before this one decided it.</p></div>
     </div>
   </section>
