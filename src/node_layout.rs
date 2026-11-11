@@ -1,15 +1,23 @@
 //! Lays nodes out by their wires, left to right: the layered method of Sugiyama, Tagawa and Toda
-//! (1981), with the port heights as they are, which the Rust crates for it do not take.
+//! (1981), with the socket heights as they are, which the Rust crates for it do not take. Each step
+//! is the one Graphviz dot and ELK (Eclipse Layout Kernel) use:
 //!
-//! A node's column is how many steps it is from the start of the graph; a node with no inputs
-//! stands just before what it feeds. Each column is ordered to reduce crossings (barycentre sweeps,
-//! keeping the best seen), then each node slides to where its wires run straightest, without
-//! overlapping its neighbours or changing the order (pool adjacent violators).
+//! - Columns by network simplex (Gansner et al. 1993): every wire at least one column long and all
+//!   of them together as short as they can be (`simplex`).
+//! - A wire longer than one column gets a stand-in node in each column it passes, which keeps a
+//!   lane for it there, so it runs between nodes and not behind them.
+//! - Each column is ordered to reduce crossings: barycentre sweeps on where the wires want each
+//!   node, keeping the best order seen, then neighbours swapped while that undoes more (dot's
+//!   transpose).
+//! - The heights by network simplex on Gansner's auxiliary graph: every wire as level as it can be,
+//!   exactly, a long wire's lanes weighing most so that it runs straight.
 //!
-//! A column far taller than the rest of its piece is dealt out into several side by side, so that
-//! fifty recordings stand next to the rows they feed. Separate pieces of the graph are packed in
-//! rows the shape of a screen; nodes with no wires are parked in rows underneath.
+//! Our own on top: a column far taller than the rest of its piece is dealt out into several side by
+//! side, so that fifty recordings stand next to the rows they feed. Separate pieces of the graph
+//! are packed in rows the shape of a screen; nodes with no wires are parked in rows underneath.
 //! Pure geometry, in canvas units: no state, and the same input gives the same answer.
+
+mod simplex;
 
 /// Space between columns.
 const COLUMN_GAP: f32 = 140.0;
@@ -27,8 +35,12 @@ const SCREEN: f32 = 1.8;
 const WRAP_FROM: f32 = 2600.0;
 /// Nor one less than this many times the height the piece needs.
 const WRAP_OVER: f32 = 1.4;
+/// Space between a wire's lane and a node.
+const LANE_GAP: f32 = 20.0;
+/// Space between two wires' lanes.
+const WIRE_GAP: f32 = 10.0;
 const ORDER_SWEEPS: usize = 24;
-const PLACE_SWEEPS: usize = 40;
+const TRANSPOSE_PASSES: usize = 20;
 
 /// A node as it stands: its size and where it is now.
 #[derive(Clone, Copy, Debug)]
@@ -195,34 +207,51 @@ fn pieces(items: &[Item], links: &[Link]) -> (Vec<Vec<usize>>, Vec<usize>) {
     (pieces, parked)
 }
 
-/// Which column each node of a piece is in. A loop can only appear between groups, at the level
-/// they are shown: it is broken at the topmost node waiting.
-fn columns(piece: &[usize], links: &[Link], count: usize) -> Vec<usize> {
-    let mut column = vec![0usize; count];
+/// A wire of a piece, left to right: (left node, its socket's height, right node, its socket's
+/// height).
+type Wire = (usize, f32, usize, f32);
+
+/// The piece's wires, each pointing right. A loop can only appear between groups, at the level
+/// they are shown: it is broken at the first node waiting, and the wire closing it is turned round.
+fn forward(piece: &[usize], links: &[Link], count: usize) -> Vec<Wire> {
+    let mut inside = vec![false; count];
+    for &n in piece {
+        inside[n] = true;
+    }
+    let links: Vec<&Link> = links.iter().filter(|l| inside[l.from]).collect();
     let mut waiting = vec![0usize; count];
-    let mut done = vec![false; count];
-    for l in links {
+    for l in &links {
         waiting[l.to] += 1;
     }
+    let mut seq = vec![0usize; count];
+    let mut done = vec![false; count];
     let mut left: Vec<usize> = piece.to_vec();
-    let mut fed = vec![false; count];
-    while !left.is_empty() {
-        let k = left.iter().position(|&n| waiting[n] == 0).unwrap_or(0);
-        let n = left.remove(k);
+    for k in 0..piece.len() {
+        let i = left.iter().position(|&n| waiting[n] == 0).unwrap_or(0);
+        let n = left.remove(i);
         done[n] = true;
+        seq[n] = k;
         for l in links.iter().filter(|l| l.from == n && !done[l.to]) {
-            column[l.to] = column[l.to].max(column[n] + 1);
             waiting[l.to] = waiting[l.to].saturating_sub(1);
-            fed[l.to] = true;
         }
     }
-    // A node with no inputs stands just before the first thing it feeds, not at the far left.
-    for &n in piece {
-        if !fed[n] {
-            if let Some(first) = links.iter().filter(|l| l.from == n).map(|l| column[l.to]).min() {
-                column[n] = first.saturating_sub(1);
-            }
-        }
+    links.iter().map(|l| if seq[l.from] < seq[l.to] { (l.from, l.from_y, l.to, l.to_y) } else { (l.to, l.to_y, l.from, l.from_y) }).collect()
+}
+
+/// Which column each node of a piece is in: every wire at least one column long and all of them
+/// together as short as they can be (network simplex, as Graphviz dot ranks). A node with no
+/// inputs so stands just before what it feeds, and a node at the end of a branch just after what
+/// feeds it.
+fn columns(piece: &[usize], wires: &[Wire], count: usize) -> Vec<usize> {
+    let mut slot = vec![usize::MAX; count];
+    for (k, &n) in piece.iter().enumerate() {
+        slot[n] = k;
+    }
+    let edges: Vec<simplex::Edge> = wires.iter().map(|w| simplex::Edge { tail: slot[w.0], head: slot[w.2], minlen: 1, weight: 1 }).collect();
+    let r = simplex::solve(piece.len(), &edges);
+    let mut column = vec![0usize; count];
+    for (k, &n) in piece.iter().enumerate() {
+        column[n] = r[k] as usize;
     }
     column
 }
@@ -262,168 +291,364 @@ fn place_piece(piece: &[usize], items: &[Item], links: &[Link], out: &mut [(f32,
     let mut piece = piece.to_vec();
     piece.sort_unstable();
     let piece = &piece[..];
-    let column = columns(piece, links, items.len());
-    let last = piece.iter().map(|&n| column[n]).max().unwrap_or(0);
-    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); last + 1];
-    for &n in piece {
-        cols[column[n]].push(n);
-    }
-    let mut touching: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
-    for (k, l) in links.iter().enumerate() {
-        touching[l.from].push(k);
-        touching[l.to].push(k);
-    }
-    let mut y = vec![0.0f32; items.len()];
-    stack(&cols, items, &mut y);
-    relax(&cols, items, links, &touching, &mut y, ORDER_SWEEPS);
+    let wires = forward(piece, links, items.len());
+    let column = columns(piece, &wires, items.len());
+    let mut lay = Layered::build(piece, &column, &wires, items);
+    lay.order();
 
-    // The order of each column: sweep both ways and keep the fewest crossings. Measured settled,
-    // so that a layout already at its best is not traded for an equal one.
-    let mut best = cols.clone();
-    let mut fewest = crossings(links, &column, &y);
-    for sweep in 0..ORDER_SWEEPS {
-        let k = cols.len();
-        for c in 0..k {
-            let col = &mut cols[if sweep % 2 == 0 { c } else { k - 1 - c }];
-            let mut keyed: Vec<(f32, usize)> = col.iter().map(|&n| (wanted(n, links, &touching, &y).0 + items[n].h / 2.0, n)).collect();
-            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
-            *col = keyed.into_iter().map(|(_, n)| n).collect();
-            settle(col, items, links, &touching, &mut y);
-        }
-        let now = crossings(links, &column, &y);
-        if now < fewest {
-            fewest = now;
-            best = cols.clone();
-        }
-    }
-
-    // Columns much taller than the piece needs are dealt out, then the heights are found.
+    // Columns much taller than the piece needs are dealt out into several side by side. The lanes
+    // of wires passing such a column keep a column of their own: the room is between its nodes'
+    // wires, not between the nodes, so a lane there would only push them off the rows they feed.
     let area: f32 = piece.iter().map(|&n| (items[n].w + COLUMN_GAP) * (items[n].h + NODE_GAP)).sum();
     let tallest = piece.iter().map(|&n| items[n].h).fold(0.0, f32::max);
     let limit = tallest.max((area / SCREEN).sqrt());
     let mut feeds_on = vec![false; items.len()];
-    for l in links.iter().filter(|l| column[l.to] > column[l.from]) {
-        feeds_on[l.from] = true;
+    for w in &wires {
+        feeds_on[w.0] = true;
     }
-    // (nodes, the gap after them)
-    let mut stacks: Vec<(Vec<usize>, f32)> = Vec::new();
-    for col in &best {
-        let dealt = deal(col, items, limit, &feeds_on);
-        let last = dealt.len() - 1;
-        stacks.extend(dealt.into_iter().enumerate().map(|(k, c)| (c, if k == last { COLUMN_GAP } else { DEALT_GAP })));
-    }
-    let placed: Vec<Vec<usize>> = stacks.iter().map(|s| s.0.clone()).collect();
-    stack(&placed, items, &mut y);
-    relax(&placed, items, links, &touching, &mut y, PLACE_SWEEPS);
-
-    let up = piece.iter().map(|&n| y[n]).fold(f32::INFINITY, f32::min);
-    let down = piece.iter().map(|&n| y[n] + items[n].h).fold(f32::NEG_INFINITY, f32::max);
-    let (mut x, mut right) = (0.0f32, 0.0f32);
-    for (col, gap) in &stacks {
-        for &n in col {
-            out[n] = (x, y[n] - up);
+    // The gap after each column.
+    let mut gaps = Vec::new();
+    let mut split = Vec::new();
+    for layer in &lay.layers {
+        let col: Vec<usize> = layer.iter().filter_map(|&v| lay.vn[v].item).collect();
+        let dealt = deal(&col, items, limit, &feeds_on);
+        if dealt.len() == 1 {
+            split.push(layer.clone());
+            gaps.push(COLUMN_GAP);
+            continue;
         }
-        let w = col.iter().map(|&n| items[n].w).fold(0.0, f32::max);
+        let mut slot = vec![usize::MAX; items.len()];
+        for &v in layer {
+            if let Some(n) = lay.vn[v].item {
+                slot[n] = v;
+            }
+        }
+        let last = dealt.len() - 1;
+        for (k, c) in dealt.into_iter().enumerate() {
+            split.push(c.into_iter().map(|n| slot[n]).collect());
+            gaps.push(if k == last { COLUMN_GAP } else { DEALT_GAP });
+        }
+        split.push(layer.iter().copied().filter(|&v| lay.vn[v].item.is_none()).collect());
+        gaps.push(0.0);
+    }
+    lay.layers = split;
+
+    let y = lay.heights();
+    let real = || lay.vn.iter().enumerate().filter_map(|(v, n)| n.item.map(|i| (v, i)));
+    let up = real().map(|(v, _)| y[v]).fold(f32::INFINITY, f32::min);
+    let down = real().map(|(v, n)| y[v] + items[n].h).fold(f32::NEG_INFINITY, f32::max);
+    let (mut x, mut right) = (0.0f32, 0.0f32);
+    for (layer, gap) in lay.layers.iter().zip(&gaps) {
+        let nodes: Vec<(usize, usize)> = layer.iter().filter_map(|&v| lay.vn[v].item.map(|n| (v, n))).collect();
+        // A column only wires pass through takes no room.
+        if nodes.is_empty() {
+            continue;
+        }
+        for &(v, n) in &nodes {
+            out[n] = (x, y[v] - up);
+        }
+        let w = nodes.iter().map(|&(_, n)| items[n].w).fold(0.0, f32::max);
         right = x + w;
         x += w + gap;
     }
     (right, down - up)
 }
 
-/// Every column stacked from the top.
-fn stack(cols: &[Vec<usize>], items: &[Item], y: &mut [f32]) {
-    for col in cols {
-        let mut at = 0.0;
-        for &n in col {
-            y[n] = at;
-            at += items[n].h + NODE_GAP;
+/// A node of the layered graph: a real node, or a stand-in where a long wire passes a column
+/// (Sugiyama's dummy node), keeping a lane for it there. The wires of one pair of nodes share one
+/// lane, as tall as their sockets are spread.
+#[derive(Clone, Copy, Debug)]
+struct Vn {
+    item: Option<usize>,
+    h: f32,
+}
+
+/// A wire from one column to the next: from `a` at `a_y` below its top to `b` at `b_y`; `w`: how
+/// many wires it stands for.
+#[derive(Clone, Copy, Debug)]
+struct Seg {
+    a: usize,
+    a_y: f32,
+    b: usize,
+    b_y: f32,
+    w: u32,
+}
+
+/// A piece as columns of nodes and lanes, every wire from one column to the next.
+struct Layered {
+    vn: Vec<Vn>,
+    seg: Vec<Seg>,
+    /// Each column, top to bottom.
+    layers: Vec<Vec<usize>>,
+    /// The segments at each node.
+    touching: Vec<Vec<usize>>,
+}
+
+impl Layered {
+    /// `nodes` in the order they start in; `column`: each node's column.
+    fn build(nodes: &[usize], column: &[usize], wires: &[Wire], items: &[Item]) -> Self {
+        let mut vn = Vec::new();
+        let mut slot = vec![usize::MAX; items.len()];
+        let count = nodes.iter().map(|&n| column[n] + 1).max().unwrap_or(0);
+        let mut layers = vec![Vec::new(); count];
+        for &n in nodes {
+            slot[n] = vn.len();
+            layers[column[n]].push(vn.len());
+            vn.push(Vn { item: Some(n), h: items[n].h });
+        }
+        let mut pairs: std::collections::BTreeMap<(usize, usize), Vec<(f32, f32)>> = Default::default();
+        for &(a, a_y, b, b_y) in wires {
+            pairs.entry((a, b)).or_default().push((a_y, b_y));
+        }
+        let mut seg = Vec::new();
+        for ((a, b), ends) in pairs {
+            let (from, to) = (column[a], column[b]);
+            if to <= from + 1 {
+                seg.extend(ends.iter().map(|&(a_y, b_y)| Seg { a: slot[a], a_y, b: slot[b], b_y, w: 1 }));
+                continue;
+            }
+            let lo = ends.iter().map(|e| e.0).fold(f32::INFINITY, f32::min);
+            let hi = ends.iter().map(|e| e.0).fold(f32::NEG_INFINITY, f32::max);
+            let lane: Vec<usize> = (from + 1..to)
+                .map(|c| {
+                    layers[c].push(vn.len());
+                    vn.push(Vn { item: None, h: hi - lo });
+                    vn.len() - 1
+                })
+                .collect();
+            for &(a_y, b_y) in &ends {
+                seg.push(Seg { a: slot[a], a_y, b: lane[0], b_y: a_y - lo, w: 1 });
+                seg.push(Seg { a: lane[lane.len() - 1], a_y: a_y - lo, b: slot[b], b_y, w: 1 });
+            }
+            for p in lane.windows(2) {
+                seg.push(Seg { a: p[0], a_y: 0.0, b: p[1], b_y: 0.0, w: ends.len() as u32 });
+            }
+        }
+        let mut touching = vec![Vec::new(); vn.len()];
+        for (k, s) in seg.iter().enumerate() {
+            touching[s.a].push(k);
+            touching[s.b].push(k);
+        }
+        Layered { vn, seg, layers, touching }
+    }
+
+    /// The least space between two neighbours in a column, the upper one first.
+    fn sep(&self, p: usize, q: usize) -> f32 {
+        match (self.vn[p].item.is_some(), self.vn[q].item.is_some()) {
+            (true, true) => NODE_GAP,
+            (false, false) => WIRE_GAP,
+            _ => LANE_GAP,
         }
     }
-}
 
-/// Sweeps the columns one way and the other, each node going where its wires want it.
-fn relax(cols: &[Vec<usize>], items: &[Item], links: &[Link], touching: &[Vec<usize>], y: &mut [f32], sweeps: usize) {
-    for sweep in 0..sweeps {
-        let k = cols.len();
-        for c in 0..k {
-            settle(&cols[if sweep % 2 == 0 { c } else { k - 1 - c }], items, links, touching, y);
+    /// Every column stacked from the top.
+    fn stack(&self, y: &mut [f32]) {
+        for col in &self.layers {
+            let mut at = 0.0;
+            for (k, &v) in col.iter().enumerate() {
+                y[v] = at;
+                at += self.vn[v].h + col.get(k + 1).map_or(0.0, |&q| self.sep(v, q));
+            }
         }
     }
-}
 
-/// Where node `n`'s top would make its wires level, on average, and how many wires say so. The
-/// mean, not the median: a recording and the Time node it feeds would otherwise agree with each
-/// other and drift away from the row they both lead to.
-fn wanted(n: usize, links: &[Link], touching: &[Vec<usize>], y: &[f32]) -> (f32, f32) {
-    let mut sum = 0.0;
-    for &k in &touching[n] {
-        let l = &links[k];
-        sum += if l.from == n { y[l.to] + l.to_y - l.from_y } else { y[l.from] + l.from_y - l.to_y };
+    /// Where node `v`'s top would make its wires level, on average, and how many wires say so. The
+    /// mean, not the median: a recording and the Time node it feeds would otherwise agree with each
+    /// other and drift away from the row they both lead to.
+    fn wanted(&self, v: usize, y: &[f32]) -> (f32, f32) {
+        let (mut sum, mut count) = (0.0, 0.0);
+        for &k in &self.touching[v] {
+            let s = &self.seg[k];
+            let w = s.w as f32;
+            sum += w * if s.a == v { y[s.b] + s.b_y - s.a_y } else { y[s.a] + s.a_y - s.b_y };
+            count += w;
+        }
+        if count == 0.0 {
+            (y[v], 1.0)
+        } else {
+            (sum / count, count)
+        }
     }
-    let count = touching[n].len();
-    if count == 0 {
-        (y[n], 1.0)
-    } else {
-        (sum / count as f32, count as f32)
-    }
-}
 
-/// Moves a column's nodes as near as they can get to where their wires want them, keeping the
-/// order and the gaps: weighted isotonic regression by pooling adjacent violators.
-fn settle(col: &[usize], items: &[Item], links: &[Link], touching: &[Vec<usize>], y: &mut [f32]) {
-    // Each pool is (sum of weight × target, sum of weight, nodes in it).
-    let mut pools: Vec<(f32, f32, usize)> = Vec::with_capacity(col.len());
-    let mut offset = Vec::with_capacity(col.len());
-    let mut stacked = 0.0;
-    for &n in col {
-        let (want, weight) = wanted(n, links, touching, y);
-        offset.push(stacked);
-        pools.push((weight * (want - stacked), weight, 1));
-        stacked += items[n].h + NODE_GAP;
-        while pools.len() > 1 {
-            let (a, b) = (pools[pools.len() - 2], pools[pools.len() - 1]);
-            if a.0 / a.1 <= b.0 / b.1 {
+    /// Moves column `c`'s nodes as near as they can get to where their wires want them, keeping
+    /// the order and the gaps: weighted isotonic regression by pooling adjacent violators.
+    fn settle(&self, c: usize, y: &mut [f32]) {
+        let col = &self.layers[c];
+        // Each pool is (sum of weight × target, sum of weight, nodes in it).
+        let mut pools: Vec<(f32, f32, usize)> = Vec::with_capacity(col.len());
+        let mut offset = Vec::with_capacity(col.len());
+        let mut stacked = 0.0;
+        for (k, &v) in col.iter().enumerate() {
+            let (want, weight) = self.wanted(v, y);
+            offset.push(stacked);
+            pools.push((weight * (want - stacked), weight, 1));
+            stacked += self.vn[v].h + col.get(k + 1).map_or(0.0, |&q| self.sep(v, q));
+            while pools.len() > 1 {
+                let (a, b) = (pools[pools.len() - 2], pools[pools.len() - 1]);
+                if a.0 / a.1 <= b.0 / b.1 {
+                    break;
+                }
+                pools.pop();
+                *pools.last_mut().unwrap() = (a.0 + b.0, a.1 + b.1, a.2 + b.2);
+            }
+        }
+        let mut k = 0;
+        for (sum, weight, nodes) in pools {
+            for _ in 0..nodes {
+                y[col[k]] = sum / weight + offset[k];
+                k += 1;
+            }
+        }
+    }
+
+    /// Sweeps the columns one way and the other, each node going where its wires want it.
+    fn relax(&self, y: &mut [f32], sweeps: usize) {
+        let k = self.layers.len();
+        for sweep in 0..sweeps {
+            for c in 0..k {
+                self.settle(if sweep % 2 == 0 { c } else { k - 1 - c }, y);
+            }
+        }
+    }
+
+    /// Each node's place in its column.
+    fn places(&self) -> Vec<usize> {
+        let mut at = vec![0; self.vn.len()];
+        for col in &self.layers {
+            for (k, &v) in col.iter().enumerate() {
+                at[v] = k;
+            }
+        }
+        at
+    }
+
+    /// Pairs of wires crossing, each weighted by how many wires it stands for. Between two
+    /// neighbouring columns two wires cross when their ends come in the opposite order on each
+    /// side, a node's sockets in the order they are down it.
+    fn crossings(&self) -> u64 {
+        let at = self.places();
+        let mut column = vec![0; self.vn.len()];
+        for (c, col) in self.layers.iter().enumerate() {
+            for &v in col {
+                column[v] = c;
+            }
+        }
+        let mut between = vec![Vec::new(); self.layers.len()];
+        for s in &self.seg {
+            between[column[s.a]].push(((at[s.a], s.a_y), (at[s.b], s.b_y), s.w as u64));
+        }
+        let mut n = 0;
+        for list in &between {
+            for (k, p) in list.iter().enumerate() {
+                for q in &list[k + 1..] {
+                    if (before(p.0, q.0) && before(q.1, p.1)) || (before(q.0, p.0) && before(p.1, q.1)) {
+                        n += p.2 * q.2;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// Crossings between `u`'s wires and `v`'s with `u` just above `v` in their column.
+    fn pair_crossings(&self, u: usize, v: usize, at: &[usize]) -> u64 {
+        let end = |k: usize, me: usize| {
+            let s = &self.seg[k];
+            if s.a == me {
+                (false, (at[s.b], s.b_y), s.w as u64)
+            } else {
+                (true, (at[s.a], s.a_y), s.w as u64)
+            }
+        };
+        let mut n = 0;
+        for &e in &self.touching[u] {
+            let (left_e, ke, we) = end(e, u);
+            for &f in &self.touching[v] {
+                let (left_f, kf, wf) = end(f, v);
+                if left_e == left_f && before(kf, ke) {
+                    n += we * wf;
+                }
+            }
+        }
+        n
+    }
+
+    /// Swaps neighbours in a column wherever that leaves fewer crossings (Graphviz dot's transpose
+    /// step), until no swap helps.
+    fn transpose(&mut self) {
+        let mut at = self.places();
+        for _ in 0..TRANSPOSE_PASSES {
+            let mut swapped = false;
+            for c in 0..self.layers.len() {
+                for i in 0..self.layers[c].len().saturating_sub(1) {
+                    let (u, v) = (self.layers[c][i], self.layers[c][i + 1]);
+                    if self.pair_crossings(v, u, &at) < self.pair_crossings(u, v, &at) {
+                        self.layers[c].swap(i, i + 1);
+                        (at[u], at[v]) = (i + 1, i);
+                        swapped = true;
+                    }
+                }
+            }
+            if !swapped {
                 break;
             }
-            pools.pop();
-            *pools.last_mut().unwrap() = (a.0 + b.0, a.1 + b.1, a.2 + b.2);
         }
     }
-    let mut k = 0;
-    for (sum, weight, nodes) in pools {
-        for _ in 0..nodes {
-            y[col[k]] = sum / weight + offset[k];
-            k += 1;
+
+    /// The order of each column: sweep both ways, each node to where its wires want it, keep the
+    /// order with the fewest crossings, then swap neighbours while that undoes more.
+    fn order(&mut self) {
+        let mut y = vec![0.0f32; self.vn.len()];
+        self.stack(&mut y);
+        self.relax(&mut y, ORDER_SWEEPS);
+        let mut best = self.layers.clone();
+        let mut fewest = self.crossings();
+        for sweep in 0..ORDER_SWEEPS {
+            let k = self.layers.len();
+            for c in 0..k {
+                let c = if sweep % 2 == 0 { c } else { k - 1 - c };
+                let mut keyed: Vec<(f32, usize)> = self.layers[c].iter().map(|&v| (self.wanted(v, &y).0 + self.vn[v].h / 2.0, v)).collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+                self.layers[c] = keyed.into_iter().map(|(_, v)| v).collect();
+                self.settle(c, &mut y);
+            }
+            let now = self.crossings();
+            if now < fewest {
+                fewest = now;
+                best = self.layers.clone();
+            }
         }
+        self.layers = best;
+        self.transpose();
+    }
+
+    /// Each node's top, the order of every column kept: the wires as level as they can be, a
+    /// long wire's lanes weighing most so that it runs straight (Gansner's priority 1, 2, 8), by
+    /// network simplex on Gansner's auxiliary graph. Exact, with every socket where it is.
+    fn heights(&self) -> Vec<f32> {
+        let nv = self.vn.len();
+        let mut edges = Vec::new();
+        for col in &self.layers {
+            for p in col.windows(2) {
+                edges.push(simplex::Edge { tail: p[0], head: p[1], minlen: (self.vn[p[0]].h + self.sep(p[0], p[1])).round() as i64, weight: 0 });
+            }
+        }
+        // Each wire becomes a node below both its ends, as far below them as the wire is out of
+        // level: pulling it up to both levels the wire.
+        for (k, s) in self.seg.iter().enumerate() {
+            let lanes = self.vn[s.a].item.is_none() as usize + self.vn[s.b].item.is_none() as usize;
+            let weight = [1, 2, 8][lanes] * s.w as i64;
+            let c = s.a_y.max(s.b_y);
+            edges.push(simplex::Edge { tail: nv + k, head: s.a, minlen: (c - s.a_y).round() as i64, weight });
+            edges.push(simplex::Edge { tail: nv + k, head: s.b, minlen: (c - s.b_y).round() as i64, weight });
+        }
+        simplex::solve(nv + self.seg.len(), &edges)[..nv].iter().map(|&r| r as f32).collect()
     }
 }
 
-/// How many pairs of wires cross, taking each wire as straight from column to column.
-fn crossings(links: &[Link], column: &[usize], y: &[f32]) -> usize {
-    // (left column, height there, right column, height there)
-    let spans: Vec<(f32, f32, f32, f32)> = links
-        .iter()
-        .filter(|l| column[l.from] != column[l.to])
-        .map(|l| {
-            let (a, b) = ((column[l.from] as f32, y[l.from] + l.from_y), (column[l.to] as f32, y[l.to] + l.to_y));
-            if a.0 < b.0 {
-                (a.0, a.1, b.0, b.1)
-            } else {
-                (b.0, b.1, a.0, a.1)
-            }
-        })
-        .collect();
-    let at = |s: &(f32, f32, f32, f32), c: f32| s.1 + (s.3 - s.1) * (c - s.0) / (s.2 - s.0);
-    let mut n = 0;
-    for (k, a) in spans.iter().enumerate() {
-        for b in &spans[k + 1..] {
-            let (lo, hi) = (a.0.max(b.0), a.2.min(b.2));
-            if lo < hi && (at(a, lo) - at(b, lo)) * (at(a, hi) - at(b, hi)) < 0.0 {
-                n += 1;
-            }
-        }
-    }
-    n
+/// Higher up: an earlier node in the column, or the same node and a higher socket.
+fn before(p: (usize, f32), q: (usize, f32)) -> bool {
+    p.0 < q.0 || (p.0 == q.0 && p.1 < q.1)
 }
 
 #[cfg(test)]
@@ -572,6 +797,28 @@ mod tests {
         assert!(apart(&items, &at), "{at:?}");
         let gap = at[1].0 - (at[0].0 + items[0].w);
         assert!((gap - COLUMN_GAP).abs() < 1.0, "the end node is in the first column after its feeder: gap {gap}");
+    }
+
+    /// A wire skipping columns gets a lane through them: it runs level and behind no node.
+    #[test]
+    fn a_long_wire_runs_in_a_lane() {
+        // 0 → 1 → 2 → 3 → 4, and 0 straight to 4; 5 and 6 hang off 2 so that its column is full.
+        let items: Vec<Item> = (0..7).map(|k| item(k as f32 * 50.0, 120.0)).collect();
+        let links = [link(0, 1, 60.0, 60.0), link(1, 2, 60.0, 60.0), link(2, 3, 60.0, 60.0), link(3, 4, 60.0, 30.0), link(0, 4, 90.0, 90.0), link(1, 5, 90.0, 60.0), link(1, 6, 30.0, 60.0)];
+        let at = place(&items, &links);
+        let r = measure(&items, &links, &at);
+        assert!(r.behind == 0 && r.overlaps == 0, "{r:?} {at:?}");
+        assert!((at[0].1 + 90.0 - (at[4].1 + 90.0)).abs() < 0.5, "the long wire is level: {at:?}");
+    }
+
+    /// A node fed early and feeding late stands next to what it feeds: two wires kept short
+    /// rather than one.
+    #[test]
+    fn columns_keep_the_wires_short() {
+        let items: Vec<Item> = (0..6).map(|k| item(k as f32 * 150.0, 100.0)).collect();
+        let links = [link(0, 1, 50.0, 50.0), link(1, 2, 50.0, 50.0), link(2, 3, 50.0, 50.0), link(3, 4, 50.0, 30.0), link(0, 5, 70.0, 50.0), link(5, 4, 30.0, 60.0), link(5, 4, 60.0, 80.0)];
+        let at = place(&items, &links);
+        assert_eq!(at[5].0, at[3].0, "{at:?}");
     }
 
     /// An ordinary column is left whole, even when it is a few nodes tall.
