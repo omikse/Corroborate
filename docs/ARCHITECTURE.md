@@ -55,12 +55,13 @@ adds typed ports and `Value` fields to these messages.
 
 Every time says which clock it is on and how sure it is (1 sigma). Each source is a clock, named
 by its node's stable id (`n1`, `n2`, … kept in the project file, never reused; the settings log
-uses it too), or shared by several sources. `src/clock.rs` solves the project's evidence, anchors
-(a moment on a clock is at a UTC) and links (the same moment on two clocks), through `sync::solve`
-into each clock's kind (absolute, relative, unanchored), offset, error, group and each piece of
-evidence's share of the error; evidence over 3 sigma off is a contradiction. Absolute times sit at
-their UTC with the clock error as a margin; relative and unanchored rows float on their own offset
-until a link places them.
+uses it too), or shared by several sources. Times travel on wires only: there is no project-wide
+pool of evidence and no global solve (removed 2026-11-11, [docs/time-on-wires/plan.md](time-on-wires/plan.md)).
+`src/clock.rs` fits clocks for the nodes that measure them, through `sync::solve`: Audio match fits
+each of its groups from its own links (`fit_against`: offsets and drifts in the group's average
+clock, one drift per phone), ADS-B check its matched passes (`solve`). A node gives what it learns
+as time outputs (audio start time, audio end time), each with its error and the trace of where it
+came from.
 
 ## Locations always carry a radius
 
@@ -98,6 +99,7 @@ colour, flow (value, list, stream) and fields give its dots and the Value node's
   needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
 
 - `src/bin/corroborate.rs`: the new workbench GUI (`cargo run --release --features gui --bin corroborate`).
-  Now `src/bin/corroborate/`: the node canvas, the clock glow and wire boxes (`clock_view.rs`), the
-  evidence and solve (`evidence.rs`), the timeline and Sync list (`timeline.rs`), linked playheads,
-  play and live (`playhead.rs`) and sound (`sound.rs`). See the README's Time section.
+  Now `src/bin/corroborate/`: the node canvas (`canvas.rs`), which clock a node is on and Same
+  clock (`evidence.rs`), a time's trace along the wires (`trace.rs`), the playheads, which
+  recordings follow the real-time one, play and live (`playhead.rs`) and sound (`sound.rs`). See
+  the README's Time section.

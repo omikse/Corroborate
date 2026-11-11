@@ -449,6 +449,12 @@ Tests:
 README, `docs/ARCHITECTURE.md`, the Audio match and ENF READMEs, and `docs/audio-match-redesign.md`
 (its Open list).
 
+Done 2026-11-11. The Audio match, ENF, ADS-B check and Timeline READMEs were updated with each
+stage; this stage rewrote the README's Time section (times on wires, no global solve, the
+Timeline's start and end, which recordings follow the real-time playhead), the ARCHITECTURE
+Timeline rule and workbench file list, and the redesign doc's Clock solve, Timeline, Migration
+(superseded: old projects are not converted any more) and Open list.
+
 ## Open
 
 - Must every Time on a wire be a real (UTC, Coordinated Universal Time) moment? This is "not sure

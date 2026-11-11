@@ -81,7 +81,7 @@ Canvas keys and mouse:
 | Play, pause | Space (or Play on a SOURCER or a Timeline node): the selected node's playhead runs and its sound plays |
 | Playhead | click or drag in SOURCER's waveform, or click in a Timeline node |
 | Same clock | select sources, right-click: Same clock (Separate clocks undoes it) |
-| Audio match's rows | one row per recording: blue is where its audio start time input puts it, amber where audio puts it after the match (the legend in the top bar says so). Under the start time, a thin stripe takes an optional audio end time; unwired it stays grey. Status is split at zero: metadata earlier than audio fills the left half, later the right. Each row gives an audio start time and an audio end time (start + length, or the wired end passed through), blue, marked with an anchor when its group is anchored and ? when it is placed by metadata or by hand. A row with no metadata that audio linked to nothing is greyed out and gives nothing. Drag an amber bar to move an unanchored group: the drag is saved with the project, logged and undone with Ctrl+Z. The anchor button on a row's time anchors its synced group there. Order sorts the rows: group › metadata › start, start › group, group › how far off, or as wired. Wheel zooms, drag pans, double-click views all. View all fits the axis to every bar; the circle inside it makes that live, so the axis follows the bars until you zoom or pan |
+| Audio match's rows | one row per recording: blue is where its audio start time input puts it, amber where audio puts it after the match (the legend in the top bar says so). Under the start time, a thin stripe takes an optional audio end time; unwired it stays grey. Status is split at zero: metadata earlier than audio fills the left half, later the right. Each row gives an audio start time and an audio end time (start + length at the measured drift; a row audio did not link passes its wired end through), blue, marked with an anchor when its group is anchored and ? when it is placed by metadata or by hand. A row with no metadata that audio linked to nothing is greyed out and gives nothing. Drag an amber bar to move an unanchored group: the drag is saved with the project, logged and undone with Ctrl+Z. The anchor button on a row's time anchors its synced group there; the anchor on the group's number tab anchors it on the average of its stamps. Type a phone id beside a row's name: rows with the same id are one phone (one drift, one vote). The clock button on a row's audio makes it the speed reference (its clock runs true). The Drift column gives each row's drift in seconds per hour. Order sorts the rows: group › metadata › start, group › phone › start, start › group, group › how far off, or as wired. Wheel zooms, drag pans, double-click views all. View all fits the axis to every bar; the circle inside it makes that live, so the axis follows the bars until you zoom or pan |
 | Time node | + row adds a row; every box shows 0 until changed; a click on a row's sign turns it over; wire a length into a row to add or take away a recording's length; each row's ± adds as squares into Result's ± (root sum of squares) |
 | Time output | hover: where the time came from, walked back along the wires, node by node (also in the result file as `traces`) |
 | Group | Ctrl+G: the selected nodes into one group node (ports for the wires in and out); Tab or double-click opens it, Tab or the path at the top left goes back out; Alt+G ungroups |
@@ -188,56 +188,51 @@ To change one node, edit only its folder:
 Time types: a **time** is `{"clock", "t", "utc"?, "error_s", "source"}`: moment `t` seconds on a
 clock, with `utc` (Unix seconds) only when that clock is tied to UTC; `{"utc": …}` alone is UTC. An
 **event** list and a **track** carry their `clock`; each event's `error_s` is its own measurement
-error. An **anchor** list (`{t, utc, error_s, clock?, source?}`) says a moment on a clock is at a
-UTC; a **link** (`{t_a, b, t_b, error_s, a?}`) says a moment on one clock is a moment on another.
-Any module may output anchors and links: they become evidence (below).
+error. A node that learns when a recording happened gives it as time outputs, usually **audio start
+time** and **audio end time**.
 
-## Time: clocks, evidence and the Timeline node
+## Time: clocks, wires and the Timeline node
 
 Every source (file, stream, device) is its own **clock**; selected sources can share one (Same
-clock, e.g. photos from one camera). A clock is **absolute** (tied to UTC), **relative** (linked to
-other clocks, a group with no UTC) or **unanchored**. Drift is not handled yet, only the offset.
+clock, e.g. the parts of one recording). A node fed audio is on the clock of that audio's source.
 
-**Evidence** ties clocks down: a live source's own anchor (stream date-time, PC clock, each with its
-error), the row a person anchored an Audio match group on, a time wired into an input marked
-`anchors = "audio"` (Planes has one), and every anchor and link output in the project (wired or not;
-ADS-B check gives one per matched pass). A time written in a file (its creation time, or our
-recorder's sidecar) is only a claim: it goes on SOURCER's time output, raw, with an error of 0, and
-never into the clock solve by itself. All of it is solved together by least squares each time it
-changes: one link to UTC anchors a whole group, more evidence tightens the error, and evidence over
-3 sigma off the rest is a **contradiction**, listed in the result file.
-
-Errors are 1 sigma and combine as root-sum-square. Two kinds: the **clock error** (shared by
-everything on that clock, what the solve gives) and an event's **own error** (e.g. the Doppler fit's
-closest-approach time), which never adds up.
-
-Clocks **drift**: phones run a few to a few hundred ppm (parts per million) off, so each clock has a
-speed as well as an offset. Evidence at different times on the same clocks (links along an overlap)
-pins the speed; otherwise it is 0 ± 100 ppm, and a clock's error is smallest where its evidence is
-and grows away from it (about 0.36 s an hour). Every time shown is drift-corrected; a clock's error
-breakdown names a learnt speed and the share from an unknown one.
+**Times travel on wires, and only on wires.** There is no project-wide pool of evidence and no
+global clock solve (removed 2026-11-11): a time reaches a node only when it is wired there, and its
+hover walks back along the wires to say where it came from. A time written in a file (its creation
+time, or our recorder's sidecar) is only a claim: it goes on SOURCER's time output, raw, with an
+error of 0. A live source's own time (stream date-time, PC clock) goes on its time output with its
+error. A time made by hand is a Value node of type time.
 
 **Audio match** is the time module: each recording comes in with the time its metadata claims and
-goes out with a better one. Which recordings audio links together (synced groups) exists only inside
-that node; no other node or wire shows it. A time is read as the recording's start, project-wide;
-when a file means something else, a **Time** node corrects it, row by row, in the open. Audio can't
-say which moment a stamp marks, so the design picks one time to trust (the anchor) and confirms it
-with other techniques.
+goes out with a better one. It fits each group of recordings audio links together from its own
+links: every recording's offset and drift, files of one phone (same phone id) sharing one drift.
+Which recordings are in a group exists only inside that node. A time is read as the recording's
+start; when a file means something else, a **Time** node corrects it, row by row, in the open.
+Audio can't say which moment a stamp marks, so a person anchors a group on one time to trust (a
+row's, or the average of the group's stamps) and confirms it with other techniques. ENF (power hum)
+and ADS-B check give audio start times of their own (ADS-B check also an end, from the speed its
+matched aircraft passes measure).
+
+Errors are 1 sigma and combine as root-sum-square. Clocks **drift**: phones run a few to a few
+hundred ppm (parts per million) off, shown in seconds per hour. Audio match measures a group's
+drifts against the group's average clock, a speed reference recording, or real time from the anchor
+recording's wired end; each end time is the start plus the length at the measured drift.
 
 The **Timeline** node (add it by hand, like the Map) only receives and displays: each row takes a
-recording's audio or video output and a time, usually Audio match's yellow output, and draws a bar
-at that time with margins from its error. A wire's value is seen by hovering its dot.
+recording's audio or video output, its start time and, if known, its end time (usually Audio match's
+outputs), and draws a bar from start to end with margins from their errors. A wire's value is seen
+by hovering its dot.
 
 There is one real-time **playhead**, in UTC (Coordinated Universal Time), shared by all Timeline
-nodes and followed by anything with a real time. A source with no real time keeps its own, linked to
-nothing. Each view shows it on its own clock (SOURCER's waveform, Planes' view). Space plays the
-selected node's playhead in real time, with the sound of its audio. A project with no live source is
-a **simulation**: every playhead is free. With a live source it is **live**: its playhead stops at
-now (the newest audio), and Live jumps back to it.
+nodes. A recording follows it only while its start time is wired into a Timeline: moment t is at
+start + t, or with the end wired too, t = (playhead − start) × length ÷ (end − start). Every other
+recording keeps its own playhead, linked to nothing. Each view shows it on its own clock (SOURCER's
+waveform, Planes' view). Space plays the selected node's playhead in real time, with the sound of
+its audio. A project with no live source is a **simulation**: every playhead is free. With a live
+source it is **live**: its playhead stops at now (the newest audio), and Live jumps back to it.
 
-The result file keeps the clocks (kind, group, offset, error and its breakdown), all evidence with
-its switches and contradictions, and each event with its clock and UTC ± error when known. Events
-on clock groups with no link between them are listed as `not_comparable`.
+The result file keeps every node's outputs, each time with its trace back along the wires, and
+Audio match's links, fit and findings.
 
 Plugins are separate programs: [docs/plugins.md](docs/plugins.md). The old viewer, now `planes-view`, is a
 separate program that nothing opens by itself: [VIEWER.md](<src/modules/Planes (Doppler)/VIEWER.md>).
@@ -286,7 +281,8 @@ extracting data, no offline use.
 
 - `src/`: `core` (values with error and source), `graph` (typed wires),
   `sync` (clock offsets from shared events), `locate` (TDOA, Time Difference of Arrival),
-  `clock` (clocks solved from anchors and links), `timebase` (UTC anchors), `plugin` (protocol and
+  `clock` (clock fits: Audio match's groups from its links, ADS-B check's passes), `timebase`
+  (UTC anchors of live sources), `plugin` (protocol and
   JSON), `ingest` (ffmpeg, WAV), `sound_out` (sound output).
 - `src/bin/corroborate/`: the workbench GUI. `src/main.rs`: the headless CLI (`corroborate-cli`).
 - `tools/adsb-log.py`: logs aircraft around a point while you record.

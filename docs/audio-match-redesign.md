@@ -146,8 +146,9 @@ turns live off. Reset is removed. At the minimum row height a row is only its fi
 
 ## Clock solve
 
-It stays, behind Audio match. Links are still solved together for accuracy, and the result leaves
-only through the yellow outputs.
+Gone (2026-11-11, [time-on-wires](time-on-wires/plan.md) stage 4). Audio match fits each of its
+groups from its own links (one drift per phone, against the group's average clock), and the result
+leaves only through its time outputs.
 
 ## What a time can prove
 
@@ -197,9 +198,10 @@ Basic Timeline node:
   right from the error carried by the time.
 - A row with no time is greyed out, keeps its name and draws no bar.
 - Row height is resizable, a button sorts by start time, wheel zooms and drag pans.
-- One real-time playhead, in UTC (Coordinated Universal Time), shared by all Timeline nodes and
-  followed by anything with a real time. A SOURCER with no real time keeps its own local playhead,
-  linked to nothing.
+- One real-time playhead, in UTC (Coordinated Universal Time), shared by all Timeline nodes. A
+  recording follows it only while its start time (and, since 2026-11-11, its end time, for its
+  speed) is wired into a Timeline; every other recording keeps its own playhead, linked to
+  nothing.
 - No sound on the Timeline node for now.
 
 Not in the basic node: timed events (the Timeline will receive events already in real time, and
@@ -231,6 +233,8 @@ on. They remain on their own nodes and in the result file.
     read length from the recording on the audio wire, known before Run from step 2.
 
 ## Migration
+
+Superseded (2026-11-11): old projects are no longer converted. This was done at the time:
 
 - `stamp-end|` project lines: create a Time node with the length subtracted when loading.
 - A wire into the old `time` input: its recording holds the group's anchor (it meant the same).
@@ -272,5 +276,6 @@ Jiku project, then `run.cmd`.
   file's and not the corrected one; and `clock_at` puts a node fed audio on its source's clock, so
   times on the corrected audio need mapping back to the original file's.
 - Full Timeline node design and timed events.
-- Evidence switches: projects keep their `off|` lines, but nothing on screen sets them any more.
 - The separate view of how Audio match calculated its result.
+- Proper error margins for unanchored and fitted times, and errors two times share: the Open list
+  of [time-on-wires](time-on-wires/plan.md).
