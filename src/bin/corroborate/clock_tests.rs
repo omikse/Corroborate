@@ -626,7 +626,7 @@ fn time_node_corrects_a_time() {
     let out = |d: &mut crate::drive::Drive| d.app().value_from(t, "result");
     assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if u == t0 && error_s == 0.0));
     d.click("+ row");
-    assert_eq!(d.app().graph.nodes()[t].spec.inputs.len(), 2, "a row and its port");
+    assert_eq!(d.app().graph.nodes()[t].spec.inputs.len(), 3, "a row and its port, and the waiting port");
     d.app().wire(s, "length", t, "row 1");
     d.frames(3);
     assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), .. }) if (u - (t0 - 150.0)).abs() < 1e-3));
@@ -705,12 +705,19 @@ fn time_node_corrects_a_time() {
     assert_eq!(view.rows[1].time_err, None);
     assert!(matches!(crate::audio_match_node::cell(&view, 1).0, crate::audio_match_node::Cell::Plain(ref s) if s.contains("no time metadata")), "{:?}", crate::audio_match_node::cell(&view, 1).0);
     assert!(view.rows[1].meta_source.contains("metadata"), "{}", view.rows[1].meta_source);
+    // A length wired into the waiting port by "+ row" adds a row, and the wire moves onto it.
+    d.app().wire(bare, "length", t2, corroborate::modules::time::NEXT);
+    d.frames(3);
+    let Kind::Time { rows } = &d.app().nodes[t2].kind else { panic!() };
+    assert_eq!(corroborate::modules::time::numbers(rows), [1]);
+    assert_eq!(d.app().graph.feeder(t2, "row 1"), Some((bare, "length")));
+    assert_eq!(d.app().graph.feeder(t2, corroborate::modules::time::NEXT), None, "the port waits again");
     // Saved and loaded with its rows and wires.
     let text = d.app().project_text();
     let mut back = App::empty();
     assert!(back.load_project_text(&text));
     assert_eq!(back.nodes[t].kind.rows(), d.app().nodes[t].kind.rows());
-    assert_eq!(back.graph.nodes()[t].spec.inputs.len(), 2);
+    assert_eq!(back.graph.nodes()[t].spec.inputs.len(), 3);
 }
 
 /// A project saved when a Time node had one error margin: it becomes a row of zeros with that ±,

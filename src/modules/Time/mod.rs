@@ -68,10 +68,14 @@ pub fn row_port(n: usize) -> &'static str {
     intern(&format!("row {n}"))
 }
 
-/// Its ports: its module.toml, and a length input for each modification row.
+/// The empty port level with "+ row": a length wired into it adds a row and moves there.
+pub const NEXT: &str = "next row";
+
+/// Its ports: its module.toml, a length input for each modification row, and the waiting one.
 pub fn spec(rows: &[(String, String)]) -> NodeSpec {
     let mut s = manifest().spec();
     s.inputs.extend(numbers(rows).into_iter().map(|n| Port::opt(row_port(n), PortKind::Custom("length"))));
+    s.inputs.push(Port::opt(NEXT, PortKind::Custom("length")));
     s
 }
 
@@ -245,7 +249,7 @@ mod tests {
         add_row(&mut r);
         add_row(&mut r);
         assert_eq!(numbers(&r), [1, 2]);
-        assert_eq!(spec(&r).inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["time", "row 1", "row 2"]);
+        assert_eq!(spec(&r).inputs.iter().map(|p| p.name).collect::<Vec<_>>(), ["time", "row 1", "row 2", NEXT]);
         remove_row(&mut r, 1);
         assert_eq!(numbers(&r), [2], "the other row keeps its number, so its wire stays");
         add_row(&mut r);
