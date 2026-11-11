@@ -16,7 +16,8 @@ the canvas shows which evidence moved which recording.
 
 After the change:
 - a node's time reaches a recording only along a wire;
-- every time carries the steps that made it;
+- the graph is the history: hovering an output walks back along the wires to say where its time
+  came from;
 - Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of
   every row.
 
@@ -26,9 +27,14 @@ After the change:
   - ENF, ADS-B check and Planes give Time outputs, which are wired into a recording's time input;
   - manual links and anchors on the timeline become small Value nodes;
   - playheads follow wired times only, and an unwired recording moves alone.
-- **The Time type** is a moment, one ± figure (1 sigma) and a list of steps.
-  - Each node it passes appends a step: the node, what it did, and the number it changed. This is
-    like the Time node's stacked rows.
+- **The Time type stays as it is:** a moment, one ± figure (1 sigma) and one source line naming
+  the node that made it.
+  - There's no history in the data. The graph already is the history; copying the path into every
+    value would repeat the wires, and the copies would drift apart.
+  - A trace is built from the graph when someone asks: a hover on an output, or the results file
+    when it is saved.
+  - Where a node combines errors (an anchor's ± with an audio link's), it adds them as squares and
+    shows the working in its own hover.
   - There are no hard limits and no "unknown" state.
   - Relative moments, such as a bang 12.3 s into clip 4, stay inside nodes. If a node ever needs to
     output them, that will be a type and a job of its own.
@@ -105,49 +111,50 @@ Tests:
 - a unit test that every order sorts as named;
 - a test that a drag survives save, reopen and Ctrl+Z, and moves the output.
 
-### 2 · Steps on the Time type
+### 2 · The Time node and the trace
 
-1. `Data::Time { source: String }` becomes `steps: Vec<Step>`, where
-   `Step { node, what, change, error_s, starts }`. `starts` is an "=" step, which begins the error
-   sum afresh. `error_s` on the Time is kept as the sum, so nodes that only read it are unchanged.
-   - The JSON form is a `"steps"` list.
-   - A plugin's `"source"` text is read as one step.
-2. Every place that makes a Time (about 20: data.rs, bus.rs, evidence.rs, SOURCER, Time, Value,
-   Timeline, ENF, Audio match) appends a step instead of overwriting the text.
-3. Hover on any time output lists its steps (mockup section 1). The results file carries them.
-4. The Time node (mockup section 5): one stack, top to bottom, which is exactly what goes out.
-   - **Came in on the wire:** the incoming steps sit at the top as locked, faded rows in the same
-     boxes, each with its node's name and note.
-     - A start (SOURCER's metadata) shows as "=" with the full date; a change shows as "+" or "−".
-     - Folded to one line: "came in on the wire · 2 steps · 12:17:54.8 ±0 s".
-     - A thin "this node" line separates them from the node's own rows.
-     - The input row goes: the port sits on that folded line.
-   - **A note per row:** a short text after the sign, saying why the row is there ("the stamp marks
-     the end"), saved in the node's rows (`1.note`). It becomes the row's step.
-     - With no note, the step is worded from the numbers alone ("+ 0.4 s").
-     - A wired row names what fed it ("− 166.2 s, length of x.mp4").
-   - **A ± per row** (`1.error_s`), with the error box under Result gone.
-     - Result's ± is worked out, not typed: √(sum of every row's ±²), the incoming rows included.
-       Independent errors add as squares, so the largest dominates (±1, ±0.02 and ±0.05 give
-       ±1.001).
-     - An "=" row (a start: SOURCER's metadata, an Audio match anchor) begins the sum afresh;
-       the rows above it stop counting.
-     - A typed row with an empty ± counts as exact (0). A wired length brings its own ± (about a
-       frame).
-     - A hover on Result's ± shows the sum written out: "√(1² + 0.02² + 0.05²)".
-   - So each step carries its own ±, and the Time type's `error_s` is that sum.
-   - No separate list of steps going out: the stack is that list. The next node down shows this
-     node's rows among its own faded ones.
-   - The node's label stays as it is; the steps carry the reasons.
-   - With nothing wired in, the top is one editable "=" row where the time is typed, as the input
-     row is today.
+The Time type does not change.
+
+1. **The trace.** A hover on any time output walks back along the wires and lists each node the
+   time passed, with what that node did to it (mockup section 1).
+   - It is built from the nodes as they are now, so it cannot disagree with the canvas.
+   - The results file writes the same trace for each time when it is saved, for readers without
+     the project.
+2. **The Time node** (mockup section 5) becomes a plain calculator:
+   - **Start:** the time port, with date boxes that lock and show the incoming time when wired, or
+     take a typed time when not. Its ± shows beside it.
+   - **Corrections:** one row each, made of
+     - a sign (+ or −),
+     - one value field with a unit dropdown (ms, s, min, h, days, years),
+     - a ± column,
+     - a note.
+
+     This replaces the seven boxes per row. Years and months still move on the calendar.
+     - A wired correction (SOURCER's `length`) locks its field and brings its own ±, greyed.
+     - A typed correction is exact.
+     - Each row keeps its own input port, as now.
+   - **Notes** document the node, like comments. They do not travel on the wire; the trace reads
+     them from the node.
+   - **Clock error ±:** one box for a person's judgement of how far the clock that wrote the start
+     may be off.
+     - Filled in, it replaces the start's ±.
+     - Empty, it keeps what came on the wire. Today the error box always replaces the error.
+   - **Result:** date boxes and its ±.
+     - The ± is the clock error and the wired corrections' ± added as squares: ±1 s and ±0.02 s
+       give ±1.000 s.
+     - A hover on it writes the sum out.
+3. Old projects:
+   - a correction row saved as seven boxes reads as one value in seconds, or in years/months when
+     only those boxes are filled;
+   - the old `error_s` reads as the clock error.
 
 Tests:
-- a SOURCER → Time → Audio match chain shows three steps in order, with the numbers each changed;
-- a Time node's notes become its steps;
-- Result's ± is the square-root sum since the last "=" row (±1, ±0.02, ±0.05 → ±1.001);
-- `drive` PNGs of the Time node with its steps folded and open;
-- the JSON round-trips.
+- a correction in each unit moves the time as named (years and months on the calendar);
+- a wired length locks its row and its ± reaches Result;
+- an empty clock error keeps the incoming ±, a filled one replaces it;
+- an old project's Time nodes read the same Result as before;
+- the trace of a SOURCER → Time → Audio match chain names the three nodes in order;
+- `drive` PNGs of the Time node and of the trace hover.
 
 ### 3 · Audio match fits its own groups
 
@@ -155,7 +162,7 @@ Tests:
    - Use `clock::solve` on just those links, inside the node.
    - Out of the fit come each row's offset and speed against the anchor, with errors, and the
      leftover per link.
-2. The fit is shown in the row's hover and in the time output's step: links, leftover, ppm. The foot
+2. The fit is shown in the row's hover and in the time output's source line: links, leftover, ppm. The foot
    line gives the median leftover. The Stretch column is added here, once the speeds exist, with
    room in the node's width for it.
 3. Placement (`match_view_now`) uses the group's own fit instead of `ev.clocks`.

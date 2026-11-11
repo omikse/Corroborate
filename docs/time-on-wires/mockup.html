@@ -72,6 +72,14 @@ code{font:12px var(--mono);color:var(--amber)}
 .trow b:nth-of-type(8){border-color:#6a5a8a}
 .trow.res b:nth-of-type(8){border-color:var(--blue);color:var(--blue)}
 .sum{color:var(--dim);font:11px var(--mono);padding-left:82px}
+.crow{display:grid;grid-template-columns:78px 26px 104px 50px 62px minmax(0,1fr);gap:4px;align-items:center}
+.crow b{font-weight:400;background:#1d2025;border:1px solid #3a3f47;border-radius:3px;padding:2px 5px;text-align:right;min-height:20px}
+.crow b.lk{color:var(--dim);background:#23262b}
+.crow b.none{color:var(--dim);background:transparent;border-style:dashed;text-align:center;font-family:var(--sans)}
+.crow.add{opacity:.4}
+.unit{background:#3a3f47;border-radius:3px;padding:2px 6px;font-family:var(--sans);text-align:center}
+.unit.lk{opacity:.6}
+.err{grid-template-columns:78px 62px minmax(0,1fr) auto!important;padding:4px 0}
 .trow b{font-weight:400;background:#1d2025;border:1px solid #3a3f47;border-radius:3px;padding:2px 5px;text-align:right;min-height:20px}
 .trow b.lk{color:var(--dim);background:#23262b}
 .trow.hdr span{color:var(--dim);font:10.5px var(--sans);text-align:center}
@@ -103,7 +111,7 @@ code{font:12px var(--mono);color:var(--amber)}
   <header class="lead" style="display:flex;flex-direction:column;gap:8px">
     <span class="tag">Corroborate · mockup · 2026-11-11</span>
     <h1>Time on wires</h1>
-    <p>The hidden clock solve goes. Every time a node uses arrives on a wire you can see, and every time carries the steps that made it. Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of every row.</p>
+    <p>The hidden clock solve goes. Every time a node uses arrives on a wire you can see, and the graph itself is the history: hovering an output walks back along the wires and tells you where its time came from. Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of every row.</p>
   </header>
 
   <section>
@@ -128,7 +136,7 @@ code{font:12px var(--mono);color:var(--amber)}
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start">
         <div class="tip" id="tip" style="position:static;max-width:100%">
-          <div style="color:var(--dim);margin-bottom:4px">hover on row 3's time output (outlined) · phone 0 …3263724</div>
+          <div style="color:var(--dim);margin-bottom:4px">hover on row 3's time output (outlined) · walked back along the wires</div>
           <div class="s">
             <span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±1 s</span>
             <span class="n">2</span><span>Time: − length 166.2 s</span><span class="v">12:17:54.8 ±0.02</span>
@@ -138,20 +146,20 @@ code{font:12px var(--mono);color:var(--amber)}
           <hr>
           <div style="display:flex;justify-content:space-between"><span>out</span><span style="color:var(--amber)">2012-09-09 12:17:55.0 UTC ±1.000 s</span></div>
         </div>
-        <p class="note" style="flex:1;min-width:220px">Hovering a time output lists its steps, one per node it passed, each with the number it changed. The same list travels on the wire. The audio output's hover says how much it was stretched or squeezed, and against which clock: the group's anchor counts as running true.</p>
+        <p class="note" style="flex:1;min-width:220px">Hovering a time output walks back along the wires and lists each node the time passed, with what that node did to it. Nothing extra travels on the wire: the trace is read from the nodes as they are now, so it cannot disagree with the canvas. The results file writes the same trace when it is saved. The audio output's hover says how much it was stretched or squeezed, and against which clock: the group's anchor counts as running true.</p>
     </div>
   </section>
 
   <section>
     <div><h2>2 · Unanchored groups</h2>
-    <p>A group with no anchor still sends times out. At first its yellow bars sit on the average of the group's metadata; dragging the group moves them, and the drag is saved, logged and undoable. Each output keeps its own metadata ±, and its steps say how it was placed.</p></div>
+    <p>A group with no anchor still sends times out. At first its yellow bars sit on the average of the group's metadata; dragging the group moves them, and the drag is saved, logged and undoable. Each output keeps its own metadata ±, and its source line says how it was placed.</p></div>
     <div class="cols">
       <div class="card"><h3>Placed by metadata</h3>
-        <p><code>4 · Audio match: group 2, unanchored, placed on the average of 3 metadata times  −0.4 s</code></p></div>
+        <p><code>Audio match: group 2, unanchored, placed on the average of 3 metadata times</code></p></div>
       <div class="card"><h3>Moved by hand</h3>
-        <p><code>4 · Audio match: group 2, unanchored, moved by hand +12.0 s (logged 14:02)  +11.6 s</code></p></div>
+        <p><code>Audio match: group 2, unanchored, moved by hand +12.0 s (logged 14:02)</code></p></div>
       <div class="card"><h3>Anchored</h3>
-        <p><code>4 · Audio match: group 1, anchored on …3092640  +0.21 s</code></p></div>
+        <p><code>Audio match: group 1, anchored on …3092640</code></p></div>
     </div>
   </section>
 
@@ -197,32 +205,36 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>4 · The Time type</h2>
-    <p>A moment, one ± figure, and the steps that made it. No speed: drift travels in the corrected audio instead.</p></div>
+    <p>Unchanged. A moment, one ± figure, and one line naming the node that made it. No history and no speed: the graph is the history, and drift travels in the corrected audio.</p></div>
     <div class="cols">
-      <div class="card"><h3>Today</h3><p><code>clock, t, utc?, error_s, source</code></p><p>One line of source text, overwritten by each node.</p></div>
-      <div class="card"><h3>After</h3><p><code>clock, t, utc?, error_s, steps[ ]</code></p><p>Each step: the node, what it did in words, and the number it changed. Nodes append; nothing is overwritten.</p></div>
+      <div class="card"><h3>Stays as it is</h3><p><code>clock, t, utc?, error_s, source</code></p><p>Each node writes its own source line. Where a node combines errors (an anchor's ± with an audio link's), it adds them as squares and shows the working in its own hover.</p></div>
+      <div class="card"><h3>No history in the data</h3><p>Copying the path into every value would repeat what the wires already show, and copies drift apart. The trace is built from the graph when someone asks: a hover, or the results file.</p></div>
       <div class="card"><h3>Still open</h3><p>Whether a Time on a wire must always be a real (UTC) moment. Until a node needs otherwise, the type keeps its clock and utc fields as they are.</p></div>
     </div>
   </section>
 
   <section>
     <div><h2>5 · The Time node</h2>
-    <p>One stack, top to bottom. The steps that came in on the wire sit at the top as locked, faded rows, in the same boxes, folded to one line until opened. Below them, this node's own rows; each has its own ± and a short note saying why it is there. Result's ± is not typed: it combines every row's ±, the ones that came in included. The stack is what goes out on the wire: nothing is listed twice.</p></div>
+    <p>A calculator, nothing more. A start (wired in, or typed into the date boxes), then corrections: each one signed duration with a note saying why. One clock error box for your judgement of how far the clock that wrote the start may be off. Date boxes only where a date is meant: the start and the Result.</p></div>
     <div class="scroll"><div class="tn">
-      <div class="title"><span>Time: GPS correction</span><span>time</span></div>
+      <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
       <div class="tb">
-        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span>± s</span><span></span><span>note (becomes the step)</span></div>
-        <div class="fold" style="color:var(--dim);font-family:var(--sans);display:flex;justify-content:space-between"><span><i class="port t" style="position:relative;display:inline-block;left:-17px;margin-right:-10px;vertical-align:-1px"></i>▾ came in on the wire · 2 steps</span><span>click to fold</span></div>
-        <div class="trow in"><span class="lab">SOURCER</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><b class="lk">1</b><span class="sg">=</span><span class="tnote in">metadata of …3263724.mp4 · phone clocks are often a second off</span></div>
-        <div class="trow in"><span class="lab">Time: end of…</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><b class="lk">0.02</b><span class="sg">−</span><span class="tnote in">length of …3263724.mp4 (about a frame) · the stamp marks the end</span></div>
-        <div class="sep"><span>this node</span></div>
-        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>400</b><b>0.05</b><span class="sg">+</span><span class="tnote">phone clock behind GPS (measured)</span></div>
-        <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><span></span></div>
-        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>12</b><b>17</b><b>55</b><b>200</b><b>1.001</b><span></span><span class="dimt">time <i class="port t out"></i></span></div>
-        <div class="sum">± 1.001 s = √( 1² + 0.02² + 0.05² ) · independent errors add as squares, so the largest one dominates</div>
+        <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span>±</span><span></span><span></span></div>
+        <div class="trow"><span class="lab"><i class="port t"></i>start</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><b class="lk">0 s</b><span></span><span class="dimt">wired from SOURCER · …3263724.mp4</span></div>
+        <div class="sep"><span>corrections</span></div>
+        <div class="crow"><span class="lab"><i class="port d"></i>1</span><span class="sg">−</span><b class="lk">166.200</b><span class="unit lk">s</span><b class="lk">0.02 s</b><span class="tnote">the stamp marks the end</span></div>
+        <div class="crow"><span class="lab"><i class="port d" style="border-color:#4a505a"></i>2</span><span class="sg">−</span><b>1</b><span class="unit">h ⏷</span><b class="none">exact</b><span class="tnote">camera wrote local time (BST), not UTC</span></div>
+        <div class="crow add"><span class="lab">+ add</span><span></span><b></b><span class="unit"></span><b></b><span></span></div>
+        <div class="err"><span>clock error ±</span><b>1 s</b><span class="tnote">phone clocks are often a second off</span><span class="dimt">empty: keeps the start's own ±</span></div>
+        <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>11</b><b>17</b><b>54</b><b>800</b><b>1.000</b><span></span><span class="dimt">time <i class="port t out"></i></span></div>
+        <div class="sum">hover on ±: √( 1² + 0.02² ) = 1.000 s · the clock error, and the wired length's own ±; typed corrections are exact</div>
       </div>
     </div></div>
-    <p class="note">Here the metadata's ±1 s swamps everything after it: correcting by GPS to ±0.05 s does not help while the start is only known to a second. A "=" row starts the sum afresh: everything above it stops counting, its own ± included only (an Audio match anchor works this way). Folded, the top reads "▸ came in on the wire · 2 steps · 12:17:54.8 ±1.000 s". A row with no note still makes a step, worded from its numbers; a typed row with an empty ± counts as exact (0).</p>
+    <div class="cols">
+      <div class="card"><h3>Corrections</h3><p>One field and a unit (ms, s, min, h, days, years) instead of seven boxes. A wired correction (a length) locks its field and brings its own ±, shown greyed; a typed one is exact. Years and months still move on the calendar.</p></div>
+      <div class="card"><h3>Clock error</h3><p>Where the doubt really lives: in the clock that wrote the start. Filled in, it replaces the start's ±; empty, the start keeps what came on the wire.</p></div>
+      <div class="card"><h3>Notes</h3><p>Each correction's note documents the node, like a comment. It does not travel on the wire; the trace on hover reads it from here.</p></div>
+    </div>
   </section>
 </main>
 <script>
