@@ -18,7 +18,7 @@ After the change:
 - a node's time reaches a recording only along a wire;
 - the graph is the history: hovering an output walks back along the wires to say where its time
   came from;
-- Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of
+- Audio match fits its own groups, shows the fit, and sends a recalculated start and end time out of
   every row.
 
 ## Decisions (interview 2026-11-11)
@@ -38,13 +38,24 @@ After the change:
   - There are no hard limits and no "unknown" state.
   - Relative moments, such as a bang 12.3 s into clip 4, stay inside nodes. If a node ever needs to
     output them, that will be a type and a job of its own.
-- **Drift is not in the Time type.**
-  - Each Audio match row gets a second output: its audio resampled by the speed Audio match measured.
+- **Drift is not in the Time type: it shows as an end time.**
+  - Nothing in a file says how fast its clock ran. SOURCER can only guess, Audio match measures it
+    against the group, and ENF (later) against the grid's real seconds.
+  - Each Audio match row gives two plain Time outputs: its recalculated start, and its recalculated
+    end = start + length × the measured speed.
+    - A clock 250 ppm slow over a 40-minute file ends 0.6 s later than start + length.
+    - Any moment inside the file follows: real time at t s into it = start + t × (end − start) ÷
+      length.
   - The speed is relative to the group: the anchor's clock counts as running true. ENF could later
-    correct a group to real time.
+    correct a group to real time the same way, with a start and end of its own.
+  - There is no stretched audio output. If synced playback is ever needed, a small node can take
+    audio plus start and end.
+  - The model assumes one steady speed per recording. Files with cuts break it; they stay findings
+    (the gap mark) until the cut detector splits them.
 - **Rows with nothing to place them by:** a row with no metadata that audio matched to nothing is
   greyed out, and both its outputs give nothing.
-  - A row with metadata but no match gives its metadata time and its audio uncorrected.
+  - A row with metadata but no match gives its metadata time as the start, and start + length as
+    the end.
   - A row with no metadata in an anchored group gives the time the group puts it at.
 - **Unanchored groups** send times out too. They are placed on the average of the group's metadata,
   or wherever a person dragged them.
@@ -60,8 +71,8 @@ After the change:
   - The blue start line in the lanes goes.
   - The output field shows an anchor or ? in its upper left corner.
   - Port names: the inputs are "audio" and "time (start of recording)"; the outputs are
-    "audio (stretch corrected)" and "time (recalculated start)".
-  - The time output is blue, the colour of every time port (it was amber).
+    "time (recalculated start)" and "time (recalculated end)".
+  - The time outputs are blue, the colour of every time port (it was amber).
   - A second status column, Stretch, shows the row's speed against its group's anchor in ppm.
     - It is split at zero: slower on the left, faster on the right.
     - It is green near 0 and red toward 1000 ppm (`SPEED_CHANGE_PPM`, where a sped-up file begins).
@@ -91,11 +102,13 @@ Only `src/modules/Audio match/node.rs` and its tests.
    - The row `order` takes `group-meta-start | start-group | group-off | wired`.
    - An old `order by group = true` reads as `group-meta-start`.
    - The sort keys are added to the `order` sort in `body`.
-4. The output mark: an anchor or ? in the upper left of the output's time field.
-   - The time output turns blue.
+4. The output mark: an anchor or ? in the upper left of each output time field.
+   - The time outputs turn blue.
    - The port names change. The saved port names (`audio n`, `time n`, `synced n`) stay, so wires
      in old projects hold.
    - Only the labels drawn on the node and the hover texts change.
+   - A new output per row, `end n`, "time (recalculated end)": until stage 3 measures speeds it is
+     start + length.
 5. Unanchored outputs: `synced_time` stops refusing groups with no anchor.
    - A row with no metadata and no links is greyed out (the `dead` fade covers the whole row, the
      outputs included), and `synced_time` gives an error naming why.
@@ -163,27 +176,25 @@ Tests:
    line gives the median leftover. The Stretch column is added here, once the speeds exist, with
    room in the node's width for it.
 3. Placement (`match_view_now`) uses the group's own fit instead of `ev.clocks`.
-4. The corrected audio output.
-   - Audio is not a value on a wire today: a SOURCER streams it (`PortKind::Audio` "is not sent as a
-     value"). Audio match must become an audio producer the way a SOURCER is.
-   - Check how `runtime` hands a source's audio to whatever is wired after it, then resample by the
-     row's speed.
-   - Survey resampling crates first (`rubato`), as rule no 1 says.
+4. The end output uses the measured speed: end = start + length × (1 + speed against the anchor).
+   - Its ± is the start's ± and the speed's error × length, added as squares.
+   - Its hover says how far it lands from start + length.
 5. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
    on hover, if the bottom outputs go.
 
 Tests:
 - a `drive` PNG of the Stretch column;
 - on Jiku GT_090912, the per-group fit agrees with today's solve to within 1 ms per row;
-- the corrected audio of a phone at −250 ppm is 0.6 s longer per 40 min;
+- a phone measured at −250 ppm over a 2,400 s file ends 0.6 s after start + length;
 - `drive` PNGs.
 
 ### 4 · Remove the pool
 
 1. ENF:
    - `grid event time` (anchor) becomes a Time output;
-   - `sync recordings` and `clock drift` (links) go, or become Time outputs per recording. To be
-     decided when we get there.
+   - `sync recordings` and `clock drift` (links) become a start and an end Time per recording, tied
+     to the grid's real seconds. Wired into an Audio match anchor's time input, they correct a whole
+     group to real time.
 2. ADS-B check: `anchors` becomes a Time output.
 3. Planes: `anchors = "audio"` goes. A wired time input is just an input, as the ports-simplify
    todo said.
@@ -192,8 +203,9 @@ Tests:
    message saying how many.
 5. `gather_evidence`, `update_clocks`, `ev.clocks`, `solve_devices` and `stamp_end` go.
    `clock.rs` stays as a library for stage 3's fit.
-6. Playheads (`playhead.rs`): a recording's real-time position comes from the Time wired into it.
-   Recordings with no wired time move on their own clock only.
+6. Playheads (`playhead.rs`): a recording's real-time position comes from the start and end wired
+   into it, t s in being start + t × (end − start) ÷ length. With only a start, the speed counts as
+   1. Recordings with no wired time move on their own clock only.
 
 Tests:
 - the existing clock and playhead tests rewritten against wired times;
@@ -210,7 +222,16 @@ README, `docs/ARCHITECTURE.md`, the Audio match and ENF READMEs, and `docs/audio
 - Must every Time on a wire be a real (UTC, Coordinated Universal Time) moment? This is "not sure
   yet". Until a node needs otherwise, the type keeps `clock`, `t` and `utc` as they are.
 - Should the six bottom outputs go, with their findings as Status marks? Asked, not yet answered.
-- ENF's link outputs: drop them, or turn them into per-recording Time outputs (stage 4)?
 - Proper error margins for unanchored and fitted times: a separate job.
+- Shared errors: two times anchored on the same phone share its ±, so their difference is far more
+  precise than either. One ± per value can't know that, and a node comparing them would overstate
+  the error.
+  - The fix would be a tagged ± list on the Time type, such as
+    `[clock of …3092640: 1 s, length of …3263724: 0.02 s]`. Entries with the same tag combine
+    directly (and cancel when subtracted) before the root sum of squares. Python's `uncertainties`
+    package works this way.
+  - Not needed until a node compares two times; check for a Rust crate first.
+- SOURCER's end output (start + length), with a guessed ± for clock speed (about 100 ppm × length):
+  add it in stage 1, or wait until something needs it?
 - One speed per phone across groups (`solve_devices`) is lost with the pool. Within a group, the fit
   can still tie one phone's files to one speed.

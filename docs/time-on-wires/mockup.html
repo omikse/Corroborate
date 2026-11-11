@@ -113,12 +113,12 @@ code{font:12px var(--mono);color:var(--amber)}
   <header class="lead" style="display:flex;flex-direction:column;gap:8px">
     <span class="tag">Corroborate · mockup · 2026-11-11</span>
     <h1>Time on wires</h1>
-    <p>The hidden clock solve goes. Every time a node uses arrives on a wire you can see, and the graph itself is the history: hovering an output walks back along the wires and tells you where its time came from. Audio match fits its own groups, shows the fit, and sends a time and drift-corrected audio out of every row.</p>
+    <p>The hidden clock solve goes. Every time a node uses arrives on a wire you can see, and the graph itself is the history: hovering an output walks back along the wires and tells you where its time came from. Audio match fits its own groups, shows the fit, and sends a recalculated start and end time out of every row.</p>
   </header>
 
   <section>
     <div><h2>1 · The Audio match node</h2>
-    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: audio (stretch corrected), and time (recalculated start), blue like every time port. The mark in the time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status. The last row has no metadata and audio matched it to nothing, so there is nothing to place it by: the whole row is greyed out and both outputs give nothing. A row with metadata but no match still gives its metadata time, and its audio uncorrected.</p></div>
+    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: time (recalculated start) and time (recalculated end), blue like every time port. The end is the start plus the file's length at the measured speed, so the Stretch column's ppm shows up as the end landing earlier or later than start + length. The mark in each time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status. The last row has no metadata and audio matched it to nothing, so there is nothing to place it by: the whole row is greyed out and both outputs give nothing. A row with metadata but no match still gives its metadata time as the start, and start + length as the end.</p></div>
     <div class="scroll">
       <div class="am" id="node">
         <div class="title"><span>Audio match</span><span>detector</span></div>
@@ -148,7 +148,7 @@ code{font:12px var(--mono);color:var(--amber)}
           <hr>
           <div style="display:flex;justify-content:space-between"><span>out</span><span style="color:var(--amber)">2012-09-09 12:17:55.0 UTC ±1.000 s</span></div>
         </div>
-        <p class="note" style="flex:1;min-width:220px">Hovering a time output walks back along the wires and lists each node the time passed, with what that node did to it. Nothing extra travels on the wire: the trace is read from the nodes as they are now, so it cannot disagree with the canvas. The results file writes the same trace when it is saved. The audio output's hover says how much it was stretched or squeezed, and against which clock: the group's anchor counts as running true.</p>
+        <p class="note" style="flex:1;min-width:220px">Hovering a time output walks back along the wires and lists each node the time passed, with what that node did to it. Nothing extra travels on the wire: the trace is read from the nodes as they are now, so it cannot disagree with the canvas. The results file writes the same trace when it is saved. The end output's hover says how far it lands from start + length, and against which clock: the group's anchor counts as running true.</p>
     </div>
   </section>
 
@@ -207,7 +207,7 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>4 · The Time type</h2>
-    <p>Unchanged. A moment, one ± figure, and one line naming the node that made it. No history and no speed: the graph is the history, and drift travels in the corrected audio.</p></div>
+    <p>Unchanged. A moment, one ± figure, and one line naming the node that made it. No history and no speed: the graph is the history, and drift shows as a recording's end time.</p></div>
     <div class="cols">
       <div class="card"><h3>Stays as it is</h3><p><code>clock, t, utc?, error_s, source</code></p><p>Each node writes its own source line. Where a node combines errors (an anchor's ± with an audio link's), it adds them as squares and shows the working in its own hover.</p></div>
       <div class="card"><h3>No history in the data</h3><p>Copying the path into every value would repeat what the wires already show, and copies drift apart. The trace is built from the graph when someone asks: a hover, or the results file.</p></div>
@@ -258,7 +258,7 @@ h+=rows.map((r,k)=>{
      +`<div class="lane" style="${f}"><span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--dim)">no metadata, and audio found no match: nothing to place it by</span></div>`
      +`<div class="st" style="${f}"><div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no links found</span><span>no time metadata</span></div></div>`
      +`<div class="st" style="${f}"></div>`
-     +`<div class="out" style="${f}"><div class="nm">…${r.n.slice(-7)}</div><div class="f" style="background:var(--off);color:var(--dim)">audio (stretch corrected)</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated start)</div></div>`;}
+     +`<div class="out" style="${f}"><div class="nm">…${r.n.slice(-7)}</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated start)</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated end)</div></div>`;}
   const bar=(x,c)=>x?`<div class="b" style="left:${x[0]}%;width:${x[1]-x[0]}%;background:${c}"></div>`:'';
   let lane=bar(r.b,'var(--blue)')+bar(r.a,'var(--amber)');
   if(r.grp) lane+=`<span style="position:absolute;left:3px;top:3px;background:${r.grp==1?'var(--g1)':'var(--g2)'};color:var(--ink);padding:0 4px">${r.grp}</span>`;
@@ -278,8 +278,8 @@ h+=rows.map((r,k)=>{
    +`<div class="${cls}" ${r.anchor?'style="background:var(--node)"':''}>${st}</div>`
    +sx
    +`<div class="out" style="position:relative${r.hl?';outline:2px solid var(--text);outline-offset:-2px':''}"><div class="nm">…${r.n.slice(-7)}</div>`
-   +`<div class="f" style="background:var(--amber)">audio (stretch corrected)<span class="dia"></span></div>`
-   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated start)<span class="dot"></span></div></div>`;
+   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated start)<span class="dot"></span></div>`
+   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated end)<span class="dot"></span></div></div>`;
 }).join('');
 document.getElementById('g').innerHTML=h;
 function bracket(){
