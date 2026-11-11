@@ -74,6 +74,10 @@ code{font:12px var(--mono);color:var(--amber)}
 .trow.hdr span{color:var(--dim);font:10.5px var(--sans);text-align:center}
 .trow.hdr span:last-child{text-align:left}
 .trow.add{opacity:.4}
+.trow.in{opacity:.6}
+.tnote.in{border-style:solid;background:#23262b;color:var(--dim)}
+.sep{display:flex;align-items:center;gap:8px;color:var(--dim);font:10.5px var(--sans);margin:2px 0}
+.sep::before,.sep::after{content:"";flex:1;border-top:1px solid #3a3f47}
 .trow.res b{border-color:var(--blue)}
 .lab{position:relative;color:var(--dim);font-family:var(--sans);padding-left:10px}
 .port{position:absolute;left:-17px;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;background:var(--node);border:2px solid var(--blue)}
@@ -201,31 +205,22 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>5 · The Time node</h2>
-    <p>The same boxes as today, plus steps. The steps that came in are listed at the top, folded to one line until opened. Every row gets a short note saying why it is there; the note becomes that row's step. The error box, when filled, adds a step too. At the foot, the steps going out: the ones that came in, then this node's.</p></div>
+    <p>One stack, top to bottom. The steps that came in on the wire sit at the top as locked, faded rows, in the same boxes, folded to one line until opened. Below them, this node's own rows; each gets a short note saying why it is there. Then Result and the error. The stack is what goes out on the wire: nothing is listed twice.</p></div>
     <div class="scroll"><div class="tn">
-      <div class="title"><span>Time: end of …3263724</span><span>time</span></div>
+      <div class="title"><span>Time: GPS correction</span><span>time</span></div>
       <div class="tb">
-        <div class="stepsin">
-          <div class="fold">▾ steps in (1)</div>
-          <div class="s"><span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±0 s</span></div>
-        </div>
         <div class="trow hdr"><span></span><span>year</span><span>month</span><span>day</span><span>h</span><span>min</span><span>s</span><span>ms</span><span></span><span>note (becomes the step)</span></div>
-        <div class="trow"><span class="lab"><i class="port t"></i>input</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span></span><span class="dimt">wired from SOURCER</span></div>
-        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><span class="tnote">the stamp marks the end</span></div>
-        <div class="trow"><span class="lab"><i class="port d"></i>row 2</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>400</b><span class="sg">+</span><span class="tnote">phone clock behind GPS (measured)</span></div>
+        <div class="fold" style="color:var(--dim);font-family:var(--sans);display:flex;justify-content:space-between"><span><i class="port t" style="position:relative;display:inline-block;left:-17px;margin-right:-10px;vertical-align:-1px"></i>▾ came in on the wire · 2 steps</span><span>click to fold</span></div>
+        <div class="trow in"><span class="lab">SOURCER</span><b class="lk">2012</b><b class="lk">09</b><b class="lk">09</b><b class="lk">12</b><b class="lk">20</b><b class="lk">41</b><b class="lk">000</b><span class="sg">=</span><span class="tnote in">metadata of …3263724.mp4 ±0 s</span></div>
+        <div class="trow in"><span class="lab">Time: end of…</span><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">0</b><b class="lk">02</b><b class="lk">46</b><b class="lk">200</b><span class="sg">−</span><span class="tnote in">length of …3263724.mp4 · the stamp marks the end</span></div>
+        <div class="sep"><span>this node</span></div>
+        <div class="trow"><span class="lab"><i class="port d"></i>row 1</span><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>0</b><b>400</b><span class="sg">+</span><span class="tnote">phone clock behind GPS (measured)</span></div>
         <div class="trow add"><span class="lab">+ row</span><b></b><b></b><b></b><b></b><b></b><b></b><b></b><span></span><span></span></div>
         <div class="trow res"><span class="lab">Result</span><b>2012</b><b>09</b><b>09</b><b>12</b><b>17</b><b>55</b><b>200</b><span></span><span class="dimt">time <i class="port t out"></i></span></div>
         <div class="err"><span>error margin ± (s)</span><b>1</b><span class="tnote">checked against the venue clock</span><span class="dimt">empty: keeps the error that came in</span></div>
-        <div class="stepsin out">
-          <div class="fold">steps out (4)</div>
-          <div class="s"><span class="n">1</span><span>SOURCER: metadata of …3263724.mp4</span><span class="v">12:20:41.0 ±0 s</span></div>
-          <div class="s"><span class="n">2</span><span>Time: − 166.2 s, length of …3263724.mp4 · the stamp marks the end</span><span class="v">12:17:54.8</span></div>
-          <div class="s"><span class="n">3</span><span>Time: + 0.4 s · phone clock behind GPS (measured)</span><span class="v">12:17:55.2</span></div>
-          <div class="s"><span class="n">4</span><span>Time: error ±1 s · checked against the venue clock</span><span class="v">±1 s</span></div>
-        </div>
       </div>
     </div></div>
-    <p class="note">A row with no note still makes a step, worded from its numbers alone ("+ 0.4 s"). A wired row names what fed it ("length of …3263724.mp4"). The node's label can stay as it is: the steps carry the reasons.</p>
+    <p class="note">Folded, the top reads "▸ came in on the wire · 2 steps · 12:17:54.8 ±0 s", the moment those steps add up to. A row with no note still makes a step, worded from its numbers ("+ 0.4 s"); a wired row names what fed it. The next node down shows this node's rows among its own faded ones.</p>
   </section>
 </main>
 <script>

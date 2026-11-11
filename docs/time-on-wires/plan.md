@@ -114,18 +114,24 @@ Tests:
 2. Every place that makes a Time (about 20: data.rs, bus.rs, evidence.rs, SOURCER, Time, Value,
    Timeline, ENF, Audio match) appends a step instead of overwriting the text.
 3. Hover on any time output lists its steps (mockup section 1). The results file carries them.
-4. The Time node (mockup section 5), with the same boxes as today plus:
-   - **Steps in:** a list at the top of the steps on the incoming wire, folded to one line
-     ("▾ steps in (1)") until opened.
+4. The Time node (mockup section 5): one stack, top to bottom, which is exactly what goes out.
+   - **Came in on the wire:** the incoming steps sit at the top as locked, faded rows in the same
+     boxes, each with its node's name and note.
+     - A start (SOURCER's metadata) shows as "=" with the full date; a change shows as "+" or "−".
+     - Folded to one line: "came in on the wire · 2 steps · 12:17:54.8 ±0 s".
+     - A thin "this node" line separates them from the node's own rows.
+     - The input row goes: the port sits on that folded line.
    - **A note per row:** a short text after the sign, saying why the row is there ("the stamp marks
      the end"), saved in the node's rows (`1.note`). It becomes the row's step.
      - With no note, the step is worded from the numbers alone ("+ 0.4 s").
      - A wired row names what fed it ("− 166.2 s, length of x.mp4").
    - **The error box:** filled in, it adds a step ("error ±1 s") with its own note. Empty, it keeps
      the incoming error and adds no step. Today it always replaces the error.
-   - **Steps out:** a list at the foot, edged in blue: the steps that came in, then this node's.
-     The output carries exactly these.
+   - No separate list of steps going out: the stack is that list. The next node down shows this
+     node's rows among its own faded ones.
    - The node's label stays as it is; the steps carry the reasons.
+   - With nothing wired in, the top is one editable "=" row where the time is typed, as the input
+     row is today.
 
 Tests:
 - a SOURCER → Time → Audio match chain shows three steps in order, with the numbers each changed;
