@@ -1,7 +1,12 @@
 //! Time node: a time corrected in the open. It takes a time (wired or typed), applies its
 //! modification rows from the top down, and gives the result. The arithmetic is here; the node on
-//! the canvas is in `node.rs`. A node's rows are saved as `in.year`, … for the typed time,
-//! `1.year`, … and `1.sign` for each modification row, and `error_s`.
+//! the canvas is in `node.rs`. A node's rows are saved as `in.year`, … and `in.error_s` for the
+//! typed time, and `1.year`, …, `1.sign` and `1.error_s` for each modification row.
+//!
+//! Two stacks run down the rows: the date stack adds or takes away each row's boxes into the
+//! result's date, and the error stack adds every row's ± as squares into the result's ±,
+//! √(Σ ±²) (root sum of squares). A row's sign does not touch its ±: an uncertainty is never
+//! subtracted.
 
 use crate::core::{NodeSpec, Port, PortKind};
 use crate::module_manifest::intern;
@@ -25,10 +30,32 @@ pub fn numbers(rows: &[(String, String)]) -> Vec<usize> {
     v
 }
 
-/// Adds a modification row (it subtracts until changed).
-pub fn add_row(rows: &mut Vec<(String, String)>) {
+/// Adds a modification row (it subtracts until changed), every box and its ± at 0. Its number.
+pub fn add_row(rows: &mut Vec<(String, String)>) -> usize {
     let n = numbers(rows).last().map_or(1, |m| m + 1);
     rows.push((format!("{n}.sign"), "-".to_string()));
+    for b in BOXES.iter().chain(&["error_s"]) {
+        rows.push((format!("{n}.{b}"), "0".to_string()));
+    }
+    n
+}
+
+/// A project saved before every row had a ±: its one `error_s` becomes a row of zeros with that
+/// ±, added at the bottom, so the result's date and ± stay as they were.
+pub fn migrate(rows: &mut Vec<(String, String)>) {
+    let Some(at) = rows.iter().position(|(k, _)| k == "error_s") else { return };
+    let (_, old) = rows.remove(at);
+    if old.trim().parse::<f64>().is_ok_and(|e| e != 0.0) {
+        let n = add_row(rows);
+        set(rows, &format!("{n}.sign"), "+");
+        set(rows, &format!("{n}.error_s"), old.trim());
+    }
+}
+
+fn set(rows: &mut [(String, String)], key: &str, v: &str) {
+    if let Some((_, x)) = rows.iter_mut().find(|(k, _)| k == key) {
+        *x = v.to_string();
+    }
 }
 
 pub fn remove_row(rows: &mut Vec<(String, String)>, n: usize) {
@@ -48,9 +75,9 @@ pub fn spec(rows: &[(String, String)]) -> NodeSpec {
     s
 }
 
-/// A new node's rows.
+/// A new node's rows: the input's ± at 0.
 pub fn defaults() -> Vec<(String, String)> {
-    vec![("error_s".to_string(), "0".to_string())]
+    vec![("in.error_s".to_string(), "0".to_string())]
 }
 
 fn whole(s: &str) -> Option<i64> {
@@ -107,9 +134,41 @@ pub fn apply(t: f64, rows: &[(String, String)], n: usize, wired: Option<f64>, pl
     Ok(t + sign as f64 * ((days * 86400 + h * 3600 + mi * 60 + s) as f64 + ms as f64 / 1000.0))
 }
 
-/// The error margin, seconds.
-pub fn error_s(rows: &[(String, String)]) -> Result<f64, String> {
-    get(rows, "error_s").parse::<f64>().ok().filter(|e| e.is_finite() && *e >= 0.0).ok_or("Error margin: a number of seconds, 0 or more.".to_string())
+/// A row's ± in seconds: `in` for the input row, else the modification row's number. Empty reads
+/// 0. `place`: the row's place from the top, for the message (0: the input row).
+pub fn row_error(rows: &[(String, String)], row: &str, place: usize) -> Result<f64, String> {
+    let s = get(rows, &format!("{row}.error_s"));
+    if s.is_empty() {
+        return Ok(0.0);
+    }
+    let name = if place == 0 { "The input row".to_string() } else { format!("Modification row {place}") };
+    s.parse::<f64>().ok().filter(|e| e.is_finite() && *e >= 0.0).ok_or(format!("{name}: its ± is a number of seconds, 0 or more."))
+}
+
+/// The error stack: √(Σ ±²), the root sum of squares.
+pub fn root_sum_squares(errs: &[f64]) -> f64 {
+    errs.iter().map(|e| e * e).sum::<f64>().sqrt()
+}
+
+/// What a modification row does, in words: "− 2 min 46.200 s", "+ 1 y 3 mo", "+ 0".
+pub fn row_words(rows: &[(String, String)], n: usize, wired: Option<f64>) -> String {
+    let sign = if get(rows, &format!("{n}.sign")) == "+" { "+" } else { "−" };
+    let v: [i64; 7] = match wired {
+        Some(l) => {
+            let ms = (l * 1000.0).round() as i64;
+            [0, 0, ms / 86_400_000, ms / 3_600_000 % 24, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000]
+        }
+        None => BOXES.map(|b| whole(get(rows, &format!("{n}.{b}"))).unwrap_or(0)),
+    };
+    let [y, mo, d, h, mi, s, ms] = v;
+    let mut parts: Vec<String> = [(y, "y"), (mo, "mo"), (d, "d"), (h, "h"), (mi, "min")].iter().filter(|(x, _)| *x != 0).map(|(x, u)| format!("{x} {u}")).collect();
+    if s != 0 || ms != 0 {
+        parts.push(if ms == 0 { format!("{s} s") } else { format!("{s}.{ms:03} s") });
+    }
+    if parts.is_empty() {
+        parts.push("0".into());
+    }
+    format!("{sign} {}", parts.join(" "))
 }
 
 /// The boxes showing the moment `t`.
@@ -121,12 +180,11 @@ pub fn time_boxes(t: f64) -> [String; 7] {
     [format!("{y:04}"), format!("{m:02}"), format!("{d:02}"), format!("{:02}", s / 3600), format!("{:02}", s / 60 % 60), format!("{:02}", s % 60), format!("{ms:03}")]
 }
 
-/// The boxes showing a length: only the parts it has.
+/// The boxes showing a length: every box, 0 where it has nothing.
 pub fn length_boxes(len: f64) -> [String; 7] {
     let ms_all = (len * 1000.0).round() as i64;
     let (s, ms) = (ms_all.div_euclid(1000), ms_all.rem_euclid(1000));
-    let part = |v: i64| if v == 0 { String::new() } else { v.to_string() };
-    [String::new(), String::new(), part(s / 86400), part(s / 3600 % 24), part(s / 60 % 60), part(s % 60), part(ms)]
+    ["0".into(), "0".into(), (s / 86400).to_string(), (s / 3600 % 24).to_string(), (s / 60 % 60).to_string(), (s % 60).to_string(), format!("{ms:03}")]
 }
 
 #[cfg(test)]
@@ -197,8 +255,41 @@ mod tests {
     #[test]
     fn boxes_show_a_time_and_a_length() {
         assert_eq!(time_boxes(t("2026-11-04T20:06:39.312Z")), ["2026", "11", "04", "20", "06", "39", "312"].map(String::from));
-        assert_eq!(length_boxes(3723.5), ["", "", "", "1", "2", "3", "500"].map(String::from));
-        assert_eq!(error_s(&defaults()), Ok(0.0));
-        assert!(error_s(&rows(&[("error_s", "")])).is_err());
+        assert_eq!(length_boxes(3723.5), ["0", "0", "0", "1", "2", "3", "500"].map(String::from));
+    }
+
+    #[test]
+    fn the_error_stack_adds_as_squares() {
+        assert!((root_sum_squares(&[0.0, 0.02, 0.0, 1.0]) - 1.0002).abs() < 1e-4);
+        assert_eq!(format!("{:.3}", root_sum_squares(&[0.0, 0.02, 0.0, 1.0])), "1.000");
+        assert_eq!(root_sum_squares(&[3.0, 4.0]), 5.0);
+        let r = rows(&[("in.error_s", ""), ("1.sign", "-"), ("1.error_s", "0.5"), ("2.sign", "+"), ("2.error_s", "x")]);
+        assert_eq!(row_error(&r, "in", 0), Ok(0.0), "empty reads 0");
+        assert_eq!(row_error(&r, "1", 1), Ok(0.5));
+        assert!(row_error(&r, "2", 2).unwrap_err().contains("Modification row 2"));
+    }
+
+    #[test]
+    fn a_new_row_shows_zeros() {
+        let mut r = defaults();
+        let n = add_row(&mut r);
+        assert!(BOXES.iter().all(|b| get(&r, &format!("{n}.{b}")) == "0"));
+        assert_eq!(row_error(&r, "1", 1), Ok(0.0));
+        assert_eq!(apply(10.0, &r, n, None, 1), Ok(10.0));
+        assert_eq!(row_words(&r, n, None), "− 0");
+        assert_eq!(row_words(&r, n, Some(166.2)), "− 2 min 46.200 s");
+    }
+
+    #[test]
+    fn an_old_error_margin_becomes_a_row() {
+        let mut r = rows(&[("error_s", "1.5"), ("1.sign", "-"), ("1.hours", "1")]);
+        migrate(&mut r);
+        assert_eq!(numbers(&r), [1, 2]);
+        assert_eq!(get(&r, "2.sign"), "+");
+        assert_eq!(row_error(&r, "2", 2), Ok(1.5));
+        assert_eq!(apply(10_000.0, &r, 2, None, 2), Ok(10_000.0), "the new row moves nothing");
+        let mut z = rows(&[("error_s", "0")]);
+        migrate(&mut z);
+        assert!(numbers(&z).is_empty() && z.is_empty(), "a ± of 0 needs no row");
     }
 }

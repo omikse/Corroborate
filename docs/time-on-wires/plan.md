@@ -148,6 +148,11 @@ Tests:
 
 The Time type does not change.
 
+Done 2026-11-11. The trace is `src/bin/corroborate/trace.rs`: it walks back through Time nodes
+(their time input) and Audio match rows (the anchor row's time input when anchored, the row's own
+otherwise, the end input when it passes through); other nodes end the walk. A wired length may carry
+an `error_s` beside its `seconds`; SOURCER's gives none, so it reads ±0. The node grew to 600 wide.
+
 1. **The trace.** A hover on any time output walks back along the wires and lists each node the
    time passed, with what that node did to it (mockup section 1).
    - It is built from the nodes as they are now, so it cannot disagree with the canvas.

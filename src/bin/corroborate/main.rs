@@ -41,6 +41,7 @@ mod groups;
 mod evidence;
 mod playhead;
 mod sound;
+mod trace;
 mod project;
 mod recordings;
 mod layout;
@@ -578,9 +579,11 @@ impl App {
             self.graph.set_inputs(s, ins);
             self.graph.set_outputs(s, outs);
         }
-        // A Time node's ports follow its rows (read by now).
+        // A Time node's ports follow its rows (read by now). Its old single error margin becomes a
+        // row of its own.
         for &i in &new {
-            if matches!(self.nodes[i].kind, Kind::Time { .. }) {
+            if let Kind::Time { rows } = &mut self.nodes[i].kind {
+                corroborate::modules::time::migrate(rows);
                 let inputs = self.nodes[i].kind.spec().inputs;
                 self.graph.set_inputs_keep(i, inputs);
             }
@@ -809,6 +812,8 @@ impl App {
             if n.hidden || !ids.contains(&i) {
                 continue;
             }
+            // Before the node's state is locked: reading a value locks it too.
+            let traces = self.traces_json(i);
             let s = n.state.lock().unwrap();
             let anchor = s.anchor.clone();
             let anchor_j = match &anchor {
@@ -860,6 +865,7 @@ impl App {
                 }
             };
             body.push_str(&own);
+            body.push_str(&traces);
             nodes_j.push(format!("{{{body}}}"));
         }
         let wires: Vec<String> = self

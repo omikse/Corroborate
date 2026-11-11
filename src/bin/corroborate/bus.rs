@@ -257,7 +257,14 @@ impl App {
             Kind::AudioMatch { .. } => crate::audio_match_node::port_title(p.name).unwrap_or_else(|| p.name.to_string()),
             _ => p.name.to_string(),
         };
-        format!("{name} · {} ({}, {need})\n{}{about}\nnow: {now}", t.label, t.flow.name(), t.description)
+        // A time: where it came from, walked back along the wires.
+        let trace = match (out, fed) {
+            _ if kind != PortKind::Time => String::new(),
+            (true, _) => format!("\n\n{}", self.trace_text(i, p.name)),
+            (false, Some((f, o))) => format!("\n\n{}", self.trace_text(f, o)),
+            (false, None) => String::new(),
+        };
+        format!("{name} · {} ({}, {need})\n{}{about}\nnow: {now}{trace}", t.label, t.flow.name(), t.description)
     }
 
     /// A location a program sent (the area of a node whose module has no Rust code).

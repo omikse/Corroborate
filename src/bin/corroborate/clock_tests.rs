@@ -514,7 +514,7 @@ fn time_node_corrects_a_time() {
     let app = d.app();
     let s = app.add(Kind::Sourcer { input: "clip.mp4".into() }, Pos2::new(30.0, 40.0));
     let t = app.add(Kind::Time { rows: corroborate::modules::time::defaults() }, Pos2::new(520.0, 40.0));
-    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(1080.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(1200.0, 40.0));
     app.wire(s, "time", t, "time");
     app.wire(t, "result", m, "time 1");
     app.wire(s, "audio", m, "audio 1");
@@ -522,17 +522,55 @@ fn time_node_corrects_a_time() {
     d.frames(3);
     let out = |d: &mut crate::drive::Drive| d.app().value_from(t, "result");
     assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if u == t0 && error_s == 0.0));
-    d.click("+");
+    d.click("+ row");
     assert_eq!(d.app().graph.nodes()[t].spec.inputs.len(), 2, "a row and its port");
     d.app().wire(s, "length", t, "row 1");
     d.frames(3);
     assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), .. }) if (u - (t0 - 150.0)).abs() < 1e-3));
     assert_eq!(d.app().match_view(m).rows[0].meta, Some(t0 - 150.0), "the row follows the edit");
+    // The error stack: a row of zeros with only a ± is a judgement, whatever its sign.
+    let judge = |d: &mut crate::drive::Drive, sign: &str, e: &str| {
+        if let Kind::Time { rows } = &mut d.app().nodes[t].kind {
+            if !corroborate::modules::time::numbers(rows).contains(&2) {
+                corroborate::modules::time::add_row(rows);
+            }
+            rows.retain(|(k, _)| k != "2.sign" && k != "2.error_s");
+            rows.push(("2.sign".into(), sign.into()));
+            rows.push(("2.error_s".into(), e.into()));
+        }
+        let inputs = d.app().nodes[t].kind.spec().inputs;
+        d.app().graph.set_inputs_keep(t, inputs);
+        d.frames(2);
+    };
+    judge(&mut d, "+", "1");
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if (u - (t0 - 150.0)).abs() < 1e-3 && (error_s - 1.0).abs() < 1e-9), "{:?}", out(&mut d));
+    judge(&mut d, "-", "1");
+    assert!(matches!(out(&mut d), Ok(Data::Time { error_s, .. }) if (error_s - 1.0).abs() < 1e-9), "a row's sign does not change its ±");
+    // The trace of SOURCER → Time → Audio match names the three nodes in order.
+    let names: Vec<String> = d.app().trace(m, "synced 1").into_iter().map(|s| s.node).collect();
+    let want: Vec<String> = [s, t, m].iter().map(|&n| d.app().nodes[n].label.clone()).collect();
+    assert_eq!(names, want);
+    let steps = d.app().trace(t, "result");
+    assert!(steps[1].did.contains("− 2 min 30 s (wired length)") && steps[1].did.contains("root sum of squares"), "{:?}", steps[1]);
+    assert!(steps[0].did.contains("creation_time"), "{:?}", steps[0]);
+    let results = d.app().result_json(&[s, t, m]);
+    assert!(results.contains("\"traces\":{\"result\":[{\"node\""), "the result file writes the trace");
     d.shot("time_node");
+    // The trace on a hover of the Time node's output.
+    let o = d.app().canvas_origin;
+    let idx = d.app().graph.nodes()[t].spec.outputs.iter().position(|p| p.name == "result").unwrap();
+    let at = d.app().port_place(o, t, idx, true).0;
+    d.h.hover_at(at);
+    d.wait(1.0);
+    d.shot("time_trace_hover");
+    if let Kind::Time { rows } = &mut d.app().nodes[t].kind {
+        corroborate::modules::time::remove_row(rows, 2);
+    }
     // Two years back from 29 February is a date that does not exist.
     if let Kind::Time { rows } = &mut d.app().nodes[t].kind {
-        corroborate::modules::time::add_row(rows);
-        rows.push(("2.year".into(), "2".into()));
+        let n = corroborate::modules::time::add_row(rows);
+        rows.retain(|(k, _)| *k != format!("{n}.year"));
+        rows.push((format!("{n}.year"), "2".into()));
     }
     let inputs = d.app().nodes[t].kind.spec().inputs;
     d.app().graph.set_inputs_keep(t, inputs);
@@ -570,6 +608,25 @@ fn time_node_corrects_a_time() {
     assert!(back.load_project_text(&text));
     assert_eq!(back.nodes[t].kind.rows(), d.app().nodes[t].kind.rows());
     assert_eq!(back.graph.nodes()[t].spec.inputs.len(), 2);
+}
+
+/// A project saved when a Time node had one error margin: it becomes a row of zeros with that ±,
+/// so the result reads the same date and ± as before.
+#[test]
+fn an_old_time_node_reads_the_same() {
+    let mut app = App::empty();
+    let typed = [("in.year", "2012"), ("in.month", "9"), ("in.day", "9"), ("in.hours", "12"), ("in.min", "20"), ("in.sec", "41"), ("1.sign", "-"), ("1.min", "2"), ("1.sec", "46"), ("1.ms", "200"), ("error_s", "1.5")];
+    let t = app.add(Kind::Time { rows: typed.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }, Pos2::new(0.0, 0.0));
+    let text = app.project_text();
+    assert!(text.contains("error_s"), "{text}");
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    let Ok(Data::Time { utc: Some(u), error_s, .. }) = back.value_from(t, "result") else { panic!("{:?}", back.value_from(t, "result")) };
+    assert_eq!(corroborate::timebase::fmt_utc(u), corroborate::timebase::fmt_utc(corroborate::timebase::parse_iso8601("2012-09-09T12:17:54.800Z").unwrap()));
+    assert!((error_s - 1.5).abs() < 1e-9, "{error_s}");
+    let Kind::Time { rows } = &back.nodes[t].kind else { panic!() };
+    assert_eq!(corroborate::modules::time::numbers(rows), [1, 2], "the margin is a row of its own");
+    assert!(!rows.iter().any(|(k, _)| k == "error_s"));
 }
 
 /// A clock with no real time keeps its own playhead, linked to nothing, even to a clock audio ties
