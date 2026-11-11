@@ -13,17 +13,17 @@
 //! On the node, one row per recording: blue is where its time input (audio start time) puts it,
 //! amber where audio puts it. Recordings linked by audio are a synced group, which exists only here.
 //! Each group is fitted from this node's links alone (`fit_groups`): every recording's offset and
-//! speed against the group's reference recording (the anchor's, else the longest), whose clock
-//! counts as running true. Audio says only how a group's recordings lie against each other, so
-//! until the group has an anchor its amber bars are shown with the middle of the bars on the middle
-//! of its blue ones, and the person may drag them (saved with the project, logged); those times
-//! come out marked "?". A person picks one row's time as the group's anchor: the audio's start
-//! snaps to it, every other row follows along the fit, marked with an anchor. Each row gives its
-//! audio start time and audio end time: start + length at the measured speed (an end wired into
-//! the anchor row makes the speeds real). A row with no time metadata that audio linked to nothing
-//! has nothing to place it by: it is greyed out and gives nothing. Nothing is ever hidden or left
-//! out for being far off: a time 200 years away stays in view until a person corrects it in a
-//! Time node.
+//! drift in the group's average clock, one vote per phone (rows with the same phone id share a
+//! drift). A speed reference row's clock, or real time from the anchor row's wired end, can run
+//! true instead. Audio says only how a group's recordings lie against each other, so until the
+//! group has an anchor it sits where its stamps put it (one vote per phone, weighted by ±), and
+//! the person may drag it (saved with the project, logged); those times come out marked "?". A
+//! person anchors it on one row's time (the audio's start snaps to it, every other row follows
+//! along the fit) or on the average of its stamps (its number tab's button). Each row gives its
+//! audio start time and audio end time: start + length at the measured drift. A row with no time
+//! metadata that audio linked to nothing has nothing to place it by: it is greyed out and gives
+//! nothing. Nothing is ever hidden or left out for being far off: a time 200 years away stays in
+//! view, and counts in the average, until a person corrects it in a Time node.
 
 use super::*;
 use corroborate::audio_match::{self, Clip, Placed};
@@ -89,12 +89,17 @@ pub struct Row {
     /// The errors (1 sigma) of `start` and `end`, seconds.
     pub start_err: f64,
     pub end_err: f64,
-    /// How fast its clock runs against its group's reference recording, ppm (negative: slow), and
-    /// the error; against real time when the anchor's end is wired. None for the reference itself
-    /// (unless its end is wired) and for a row audio did not link.
+    /// How fast its clock runs (its drift), ppm (negative: slow), and the error: against its
+    /// group's average clock, or the speed reference's, or real time (`Group::drift`). None for a
+    /// row audio did not link.
     pub speed: Option<(f64, f64)>,
-    /// The group's speeds are measured against this recording.
-    pub reference: bool,
+    /// Its phone id, as a person typed or accepted it: rows with the same text are one phone (one
+    /// drift, one vote). Empty: its own phone.
+    pub phone: String,
+    /// What its metadata says the device is (make, model, serial): only a suggestion.
+    pub phone_hint: String,
+    /// Its speed reference button is on: its clock runs true.
+    pub speed_ref: bool,
     /// This node's links on its clock, and how far they sit from the fit (root mean square), s.
     pub links: usize,
     pub leftover: f64,
@@ -121,10 +126,64 @@ pub struct Group {
     pub anchor: Option<usize>,
     /// Unanchored, and dragged by hand away from where its metadata puts it.
     pub moved: bool,
-    /// The row whose recording its speeds are measured against: the anchor's, else the longest.
+    /// The row whose clock the fit's errors are measured against: the anchor's, else the speed
+    /// reference's, else the longest recording's.
     pub reference: Option<usize>,
-    /// The anchor row's end is wired: its speeds are real, not against the anchor.
-    pub real_speed: bool,
+    /// What its drifts are measured against.
+    pub drift: DriftFrom,
+    /// Anchored on the average of its stamps (its group tab's button): where its reference
+    /// recording starts, the error, and how many phones voted.
+    pub average: Option<Average>,
+    /// Where its stamps put it, one vote per phone (where it sits unanchored, before a drag).
+    pub stamps: Option<Average>,
+}
+
+/// What a group's drifts are measured against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DriftFrom {
+    /// Its average clock: one vote per phone, weighted by how well each drift is measured.
+    #[default]
+    Average,
+    /// Row k's clock runs true (its speed reference button).
+    File(usize),
+    /// Real time: the anchor row k's wired end.
+    AnchorEnd(usize),
+}
+
+/// Where a group's stamps put it: each phone's vote for where its reference recording starts,
+/// weighted by its ±; the error; how many phones voted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Average {
+    pub at: f64,
+    pub error: f64,
+    pub phones: usize,
+}
+
+/// The average of the stamps' votes `(phone, where it puts the group, ±)`: one vote per phone
+/// (its stamps' mean, weighted by their ±), the phones' votes weighted by their ±. Nothing is
+/// dropped for being far off: a stamp 12 years off counts like any other, and shows on the
+/// timeline. The error is the larger of the votes' weighted spread ÷ √phones and what their ±
+/// give (the spread of one phone's vote is 0).
+pub fn stamp_average(votes: &[(String, f64, f64)]) -> Option<Average> {
+    let w = |e: f64| 1.0 / e.max(1e-3).powi(2);
+    let mut phones: BTreeMap<&str, (f64, f64, usize)> = BTreeMap::new();
+    for (p, v, e) in votes {
+        let s = phones.entry(p.as_str()).or_default();
+        s.0 += v * w(*e);
+        s.1 += w(*e);
+        s.2 += 1;
+    }
+    // Each phone: its stamps' weighted mean, and their typical ± (one phone's stamps share its
+    // clock's error, so more of them do not make it surer).
+    let each: Vec<(f64, f64)> = phones.values().map(|&(sv, sw, n)| (sv / sw, (n as f64 / sw).sqrt())).collect();
+    let sw: f64 = each.iter().map(|&(_, e)| w(e)).sum();
+    if each.is_empty() || sw <= 0.0 {
+        return None;
+    }
+    let at = each.iter().map(|&(v, e)| v * w(e)).sum::<f64>() / sw;
+    let spread = (each.iter().map(|&(v, e)| w(e) * (v - at).powi(2)).sum::<f64>() / sw).sqrt();
+    let n = each.len();
+    Some(Average { at, error: (spread / (n as f64).sqrt()).max(sw.recip().sqrt()), phones: n })
 }
 
 /// What the match found on a recording besides its links.
@@ -155,30 +214,31 @@ pub struct Found {
     pub drift: String,
 }
 
-/// One fit of a node's links: each clock against its group's reference recording.
+/// One fit of a node's links: each clock in its group's average clock.
 #[derive(Debug)]
 pub struct Fits {
-    /// Moment t on a clock is moment `at(t)` on its group's reference clock.
+    /// Moment t on a clock is `at(t)` seconds of its group's average clock from the start of the
+    /// group's reference recording (`clock::fit_against`).
     pub clocks: BTreeMap<String, Fit>,
     /// Each link's leftover: how far apart its two moments land on the fit, seconds.
     pub leftover: Vec<f64>,
 }
 
-/// Fits `links`, each group of linked clocks read in the seconds of the clock in `refs` it holds
-/// (`clock::fit_against`): that clock keeps its own time.
-pub fn fit_groups(links: &[Link], refs: &BTreeSet<String>) -> Fits {
-    let (clocks, leftover) = corroborate::clock::fit_against(links, refs);
+/// Fits `links` (`clock::fit_against`): each group of linked clocks in its average clock,
+/// measured from the start of the clock in `refs` it holds; clocks of one `phone` share a drift.
+pub fn fit_groups(links: &[Link], refs: &BTreeSet<String>, phone: &BTreeMap<String, String>) -> Fits {
+    let (clocks, leftover) = corroborate::clock::fit_against(links, refs, phone);
     Fits { clocks, leftover }
 }
 
-/// How fast a clock fitted `f` runs: its seconds per second of the reference, minus 1, in ppm,
-/// and the error; `k` is real seconds per second of the reference.
+/// How fast a clock fitted `f` runs: its seconds per real second, minus 1, in ppm, and the error;
+/// `k` is real seconds per second of the fit's clock.
 fn speed_ppm(f: &Fit, k: f64) -> (f64, f64) {
     ((1.0 / (k * (1.0 + f.rate)) - 1.0) * 1e6, f.var_rate.sqrt() * 1e6)
 }
 
-/// Where a recording fitted `f` starts and ends: its moments 0 and `len` on the reference clock,
-/// into real time by where the reference starts (`at`) and its speed `k` (real seconds per second).
+/// Where a recording fitted `f` starts and ends: its moments 0 and `len` on the fit's clock, into
+/// real time by where the fit's 0 is (`at`) and its speed `k` (real seconds per second).
 pub fn place(f: &Fit, len: f64, at: f64, k: f64) -> (f64, f64) {
     (at + k * f.at(0.0), at + k * f.at(len))
 }
@@ -186,16 +246,49 @@ pub fn place(f: &Fit, len: f64, at: f64, k: f64) -> (f64, f64) {
 /// A clock with no links: its own time.
 const SAME_CLOCK: Fit = Fit { offset: 0.0, rate: 0.0, center: 0.0, var_offset: 0.0, var_rate: 0.0, cov: 0.0 };
 
-/// The fit, in words, for a row's time: "; fitted on 31 links, leftover 4.2 ms", or nothing for a
-/// row audio did not link.
+/// Seconds an hour a drift of `ppm` gains (+) or loses (−).
+pub fn s_per_h(ppm: f64) -> f64 {
+    ppm * 3600e-6
+}
+
+/// A drift in seconds an hour: `-0.90`, `+12.6`, `0`.
+pub fn drift_text(ppm: f64) -> String {
+    let s = s_per_h(ppm);
+    if s.abs() < 0.005 {
+        "0".to_string()
+    } else if s.abs() < 10.0 {
+        format!("{s:+.2}")
+    } else {
+        format!("{s:+.1}")
+    }
+}
+
+/// A drift's exact scale, in words: the clock's speed (its seconds per real second), and what a
+/// length on it is multiplied by to give real seconds.
+pub fn scale_words(ppm: f64) -> String {
+    let speed = 1.0 + ppm * 1e-6;
+    format!("clock speed ×{speed:.7} (file seconds per real second); real length = file length ×{:.7}", 1.0 / speed)
+}
+
+/// What a group's drifts are against, in words.
+fn drift_against(v: &MatchView, g: &Group) -> String {
+    match g.drift {
+        DriftFrom::Average => "the group's average clock".to_string(),
+        DriftFrom::File(k) => format!("the clock of {} (speed reference)", v.rows[k].name),
+        DriftFrom::AnchorEnd(k) => format!("real time ({}'s wired end)", v.rows[k].name),
+    }
+}
+
+/// The fit, in words, for a row's time: "; fitted on 31 links, leftover 4.2 ms, drift …", or
+/// nothing for a row audio did not link.
 fn fit_words(v: &MatchView, r: &Row) -> String {
     if !v.linked(r) || r.links == 0 {
         return String::new();
     }
-    let against = v.groups[r.group].reference.filter(|_| !r.reference).map_or(String::new(), |k| format!(" against {}", v.rows[k].name));
+    let g = &v.groups[r.group];
     let speed = match r.speed {
-        Some((p, e)) if !r.reference => format!(", speed {p:+.1} ± {e:.1} ppm{against}"),
-        _ => String::new(),
+        Some((p, e)) => format!(", drift {} ± {:.2} s/h against {}", drift_text(p), s_per_h(e), drift_against(v, g)),
+        None => String::new(),
     };
     format!("; fitted on {} links, leftover {:.1} ms{speed}", r.links, r.leftover * 1000.0)
 }
@@ -209,11 +302,6 @@ pub(crate) fn ms_text(d: f64) -> String {
     } else {
         format!("{d:+.2} s")
     }
-}
-
-/// `-23`, `+4`, `0`.
-fn ppm_text(p: f64) -> String {
-    if p.abs() < 0.5 { "0".to_string() } else { format!("{p:+.0}") }
 }
 
 /// What a node's rows are this frame.
@@ -233,8 +321,9 @@ pub struct MatchView {
 }
 
 impl MatchView {
+    /// Its group is anchored: on a row's time, or on the average of its stamps.
     pub fn anchored(&self, r: &Row) -> bool {
-        self.groups.get(r.group).is_some_and(|g| g.anchor.is_some())
+        self.groups.get(r.group).is_some_and(|g| g.anchor.is_some() || g.average.is_some())
     }
 
     /// Audio linked it to another recording, and placed it.
@@ -254,6 +343,55 @@ fn anchor_key(uid: &str) -> String {
 /// A node's saved rows: how far an unanchored group was dragged, kept by the group's key.
 fn shift_key(group: &str) -> String {
     format!("shift {group}")
+}
+
+/// A node's saved rows: a group anchored on the average of its stamps, kept by the group's key.
+fn average_key(group: &str) -> String {
+    format!("average {group}")
+}
+
+/// A node's saved rows: a recording's phone id.
+fn phone_key(uid: &str) -> String {
+    format!("phone {uid}")
+}
+
+/// A node's saved rows: the recording whose clock runs true, kept by its id.
+fn speed_ref_key(uid: &str) -> String {
+    format!("speed reference {uid}")
+}
+
+/// A saved row's value.
+fn kept<'a>(kind: &'a Kind, key: &str) -> Option<&'a str> {
+    kind.rows().iter().find(|(q, _)| q == key).map(|(_, v)| v.as_str())
+}
+
+/// What a source's metadata says its device is: make (or manufacturer), model, serial, from its
+/// tags (`com.apple.quicktime.make`, `com.android.model`, …). Only ever a suggestion.
+pub fn phone_hint(meta: &[(String, String)]) -> String {
+    let tag = |names: &[&str]| {
+        meta.iter().filter(|(k, _)| k.starts_with("format.tags.")).find_map(|(k, v)| {
+            let last = k.rsplit(['.', ':']).next().unwrap_or(k).to_ascii_lowercase();
+            names.iter().any(|n| last == *n).then(|| v.trim().to_string()).filter(|v| !v.is_empty())
+        })
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for names in [&["make", "manufacturer"][..], &["model"], &["serial", "serialnumber", "serial_number"]] {
+        if let Some(v) = tag(names) {
+            // A model often repeats the make ("Apple" "Apple iPhone 12").
+            if let Some(last) = parts.last_mut().filter(|l| v.to_lowercase().starts_with(&l.to_lowercase())) {
+                *last = v;
+            } else {
+                parts.push(v);
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+/// A phone id's colour: the same text, the same colour.
+pub fn phone_color(id: &str) -> Color32 {
+    let h = id.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    hsl((h % 360) as f32, 0.55, 0.64)
 }
 
 /// Sets saved row `k` to `val`, adding it when missing.
@@ -293,6 +431,11 @@ fn mid(t: f64, len: f64) -> f64 {
     t + len / 2.0
 }
 
+/// Which phone a row is: its phone id, else its own clock.
+fn phone_of(r: &Row) -> String {
+    if r.phone.is_empty() { format!("\u{1}{}", r.clock.as_deref().or(r.uid.as_deref()).unwrap_or_default()) } else { r.phone.clone() }
+}
+
 fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
@@ -319,16 +462,17 @@ impl App {
         v
     }
 
-    /// The fit of node `i`'s links against references `refs`, worked out once per run and choice
-    /// of references (`run`: the state's run and outbox revision).
-    fn match_fits(&self, i: NodeId, run: (u64, u64), links: &[Link], refs: BTreeSet<String>) -> Rc<Fits> {
-        let key = (run.0, run.1, refs);
+    /// The fit of node `i`'s links against references `refs`, clocks of one phone sharing a
+    /// drift, worked out once per run, choice of references and phones (`run`: the state's run
+    /// and outbox revision).
+    fn match_fits(&self, i: NodeId, run: (u64, u64), links: &[Link], refs: BTreeSet<String>, phone: BTreeMap<String, String>) -> Rc<Fits> {
+        let key = (run.0, run.1, refs, phone);
         if let Some((k, f)) = self.match_ui.fits.borrow().get(&i) {
             if *k == key {
                 return f.clone();
             }
         }
-        let f = Rc::new(fit_groups(links, &key.2));
+        let f = Rc::new(fit_groups(links, &key.2, &key.3));
         self.match_ui.fits.borrow_mut().insert(i, (key, f.clone()));
         f
     }
@@ -349,7 +493,11 @@ impl App {
             if let Some((f, _)) = self.graph.feeder(i, audio.name) {
                 let path = self.source_file(f);
                 r.name = row_name(&self.nodes[f].label, path.as_deref());
-                r.uid = Some(self.nodes[f].uid.clone());
+                let uid = self.nodes[f].uid.clone();
+                r.phone = kept(&self.nodes[i].kind, &phone_key(&uid)).unwrap_or_default().trim().to_string();
+                r.speed_ref = kept(&self.nodes[i].kind, &speed_ref_key(&uid)).is_some();
+                r.phone_hint = phone_hint(&self.nodes[f].state.lock().unwrap().source.meta);
+                r.uid = Some(uid);
                 r.clock = self.clock_of(f);
                 r.file = path.is_some();
                 r.len = self.source_length(f).unwrap_or_else(|| self.nodes[f].state.lock().unwrap().audio_s);
@@ -422,15 +570,23 @@ impl App {
                 g.number = number;
             }
             g.anchor = g.rows.iter().copied().find(|&k| rows[k].meta.is_some() && rows[k].uid.as_deref().is_some_and(|u| saved.contains(u)));
-            // Speeds are measured against the anchor's recording, else the group's longest.
-            g.reference = g.anchor.or_else(|| g.rows.iter().copied().filter(|&k| rows[k].clock.is_some()).max_by(|&a, &b| rows[a].len.total_cmp(&rows[b].len).then(b.cmp(&a))));
+            let speed_ref = g.rows.iter().copied().find(|&k| rows[k].speed_ref && rows[k].clock.is_some());
+            if let Some(s) = speed_ref {
+                g.drift = DriftFrom::File(s);
+            }
+            // The fit's errors are measured against the anchor's recording, else the speed
+            // reference's, else the group's longest.
+            g.reference = g.anchor.or(speed_ref).or_else(|| g.rows.iter().copied().filter(|&k| rows[k].clock.is_some()).max_by(|&a, &b| rows[a].len.total_cmp(&rows[b].len).then(b.cmp(&a))));
         }
         let refs: BTreeSet<String> = groups.iter().filter_map(|g| rows[g.reference?].clock.clone()).collect();
-        let fits = (done && !links.is_empty()).then(|| self.match_fits(i, run, links, refs));
+        // Clocks of one phone share a drift.
+        let phones: BTreeMap<String, String> = rows.iter().filter(|r| !r.phone.is_empty()).filter_map(|r| Some((r.clock.clone()?, r.phone.clone()))).rev().collect();
+        let fits = (done && !links.is_empty()).then(|| self.match_fits(i, run, links, refs, phones));
         let fit_of = |r: &Row| r.clock.as_ref().and_then(|c| fits.as_ref()?.clocks.get(c)).copied().unwrap_or(SAME_CLOCK);
         let shift_of = |g: &Group| saved_shift(&self.nodes[i].kind, &g.key);
+        let on_average = |g: &Group| kept(&self.nodes[i].kind, &average_key(&g.key)).is_some();
         for g in &mut groups {
-            g.moved = g.anchor.is_none() && shift_of(g) != 0.0;
+            g.moved = g.anchor.is_none() && !on_average(g) && shift_of(g) != 0.0;
         }
         let real = rows.iter().any(|r| r.meta.is_some());
         // The middle of every time there is: where a group with no time at all is shown.
@@ -445,27 +601,42 @@ impl App {
                 if !linked && timed.is_empty() {
                     continue; // alone, with no time: nowhere to show it
                 }
-                let start = |k: usize| fit_of(&rows[k]).at(0.0);
-                // Where the reference clock's 0 is in real time, and real seconds per its second.
-                let (at, k_real) = match g.anchor {
-                    Some(a) => {
-                        let meta = rows[a].meta.unwrap_or(0.0);
-                        // The anchor's wired end gives its real speed.
-                        let k = rows[a].end_in.filter(|_| rows[a].len > 0.0).map(|e| (e - meta) / rows[a].len).filter(|k| *k > 0.0);
-                        g.real_speed = k.is_some();
-                        (meta, k.unwrap_or(1.0))
+                // Real seconds per second of the fit's clock: the group's average clock runs true,
+                // unless a speed reference's clock does, unless the anchor's wired end says.
+                let rate = |k: usize| fit_of(&rows[k]).rate;
+                let anchor_end = g.anchor.and_then(|a| {
+                    let meta = rows[a].meta?;
+                    rows[a].end_in.filter(|_| rows[a].len > 0.0).map(|e| (e - meta) / rows[a].len).filter(|q| *q > 0.0).map(|q| (a, q / (1.0 + rate(a))))
+                });
+                let k_real = match (anchor_end, g.drift) {
+                    (Some((a, k)), _) => {
+                        g.drift = DriftFrom::AnchorEnd(a);
+                        k
                     }
-                    None => {
-                        let metas: Vec<f64> = timed.iter().map(|&k| mid(rows[k].meta.unwrap_or(0.0), rows[k].len)).collect();
-                        let over: &[usize] = if timed.is_empty() { &audio_rows } else { &timed };
-                        let audios: Vec<f64> = over.iter().map(|&k| mid(start(k), rows[k].len)).collect();
-                        let centre = mean(&metas).or(mean(&all_mids)).unwrap_or(0.0);
-                        (centre - mean(&audios).unwrap_or(0.0) + shift_of(g), 1.0)
+                    (None, DriftFrom::File(s)) => 1.0 / (1.0 + rate(s)),
+                    _ => 1.0,
+                };
+                // Where the fit's 0 is in real time.
+                let start = |k: usize| k_real * fit_of(&rows[k]).at(0.0);
+                // Each stamp's vote for it, one vote per phone.
+                let votes: Vec<(String, f64, f64)> = timed.iter().map(|&k| (phone_of(&rows[k]), rows[k].meta.unwrap_or(0.0) - start(k), rows[k].meta_err)).collect();
+                g.stamps = stamp_average(&votes);
+                if g.anchor.is_none() && on_average(g) {
+                    g.average = g.stamps;
+                }
+                let at = match (g.anchor, g.average, g.stamps) {
+                    (Some(a), _, _) => rows[a].meta.unwrap_or(0.0) - start(a),
+                    (None, Some(avg), _) => avg.at,
+                    (None, None, Some(avg)) => avg.at + shift_of(g),
+                    // No time in the group: shown at the middle of every time there is.
+                    (None, None, None) => {
+                        let audios: Vec<f64> = audio_rows.iter().map(|&k| mid(start(k), rows[k].len)).collect();
+                        mean(&all_mids).unwrap_or(0.0) - mean(&audios).unwrap_or(0.0) + shift_of(g)
                     }
                 };
                 // Unanchored, each time keeps its own metadata error; a row with none the group's largest.
                 let largest = timed.iter().map(|&k| rows[k].meta_err).fold(0.0, f64::max);
-                let anchor_err = g.anchor.map(|a| rows[a].meta_err);
+                let anchor_err = g.anchor.map(|a| rows[a].meta_err).or(g.average.map(|a| a.error));
                 for &k in &audio_rows {
                     let f = fit_of(&rows[k]);
                     let (s0, s1) = place(&f, rows[k].len, at, k_real);
@@ -478,8 +649,7 @@ impl App {
                         None => r.meta.map_or(largest, |_| r.meta_err),
                     };
                     r.end_err = r.start_err.hypot(f.var_rate.sqrt() * r.len);
-                    r.reference = linked && g.reference == Some(k);
-                    r.speed = (linked && (!r.reference || g.real_speed)).then(|| speed_ppm(&f, k_real));
+                    r.speed = linked.then(|| speed_ppm(&f, k_real));
                 }
                 if linked && g.anchor.is_none() {
                     let recs: Vec<Placed> = audio_rows.iter().map(|&k| Placed { stamp: rows[k].meta, len: rows[k].len, start: fit_of(&rows[k]).at(0.0) }).collect();
@@ -535,9 +705,17 @@ impl App {
         let uid = self.nodes[i].uid.clone();
         v.groups
             .iter()
-            .filter_map(|g| {
-                let r = &v.rows[g.anchor?];
-                Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.meta?, error_s: r.meta_err, from: uid.clone(), enabled: true })
+            .filter_map(|g| match (g.anchor, g.average) {
+                (Some(a), _) => {
+                    let r = &v.rows[a];
+                    Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.meta?, error_s: r.meta_err, from: uid.clone(), enabled: true })
+                }
+                // On the average: where it puts the reference recording.
+                (None, Some(avg)) => {
+                    let r = &v.rows[g.reference?];
+                    Some(corroborate::clock::Anchor { clock: r.clock.clone()?, t: 0.0, utc: r.start?, error_s: avg.error, from: uid.clone(), enabled: true })
+                }
+                _ => None,
             })
             .collect()
     }
@@ -567,13 +745,15 @@ impl App {
         let clock = r.clock.clone().ok_or("no audio wired into this row")?;
         let g = &v.groups[r.group];
         let at = r.start.ok_or(if v.done { "audio did not place it" } else { "not matched yet: run the graph" })?;
-        let source = match g.anchor {
-            Some(a) => format!("Audio match, anchored on the time of {}", v.rows[a].name),
-            None => {
+        let phones = |n: usize| if n == 1 { "1 phone's stamps".to_string() } else { format!("{n} phones' stamps") };
+        let source = match (g.anchor, g.average) {
+            (Some(a), _) => format!("Audio match, anchored on the time of {}", v.rows[a].name),
+            (None, Some(avg)) => format!("Audio match, anchored on the average of {}", phones(avg.phones)),
+            (None, None) => {
                 if !g.rows.iter().any(|&k| v.rows[k].meta.is_some()) {
                     return Err("no time metadata in its synced group: nothing to place it by".into());
                 }
-                let how = if g.moved { "moved by hand" } else { "average of metadata" };
+                let how = if g.moved { "moved by hand".to_string() } else { format!("the average of {}", phones(g.stamps.map_or(0, |s| s.phones))) };
                 format!("Audio match, unanchored: {how}")
             }
         };
@@ -581,8 +761,8 @@ impl App {
         Ok(if end {
             let e = r.end.unwrap_or(at + r.len);
             let how = match r.speed {
-                _ if r.reference && g.real_speed => "; its wired end".to_string(),
-                Some((ppm, _)) => format!("; its length at the measured speed {ppm:+.1} ppm, {} from start + length", ms_text(e - at - r.len)),
+                _ if g.drift == DriftFrom::AnchorEnd(n - 1) => "; its wired end".to_string(),
+                Some((ppm, _)) => format!("; its length at the measured drift {} s/h, {} from start + length", drift_text(ppm), ms_text(e - at - r.len)),
                 None => format!(", plus its length {:.3} s", r.len),
             };
             Data::Time { clock, t: r.len, utc: Some(e), error_s: r.end_err, source: format!("{source}{how}{fitted}") }
@@ -595,7 +775,79 @@ impl App {
     /// nothing (None).
     fn output_mark(&self, i: NodeId, v: &MatchView, k: usize) -> Option<bool> {
         self.synced_time(i, &format!("synced {}", k + 1)).ok()?;
-        Some(v.groups[v.rows[k].group].anchor.is_some())
+        Some(v.anchored(&v.rows[k]))
+    }
+
+    /// Group `g` is anchored on the average of its stamps, or stops being. It takes the place of
+    /// a row's anchor and of a drag. Logged like any setting.
+    pub(crate) fn toggle_average(&mut self, i: NodeId, g: usize) {
+        let v = self.match_view(i);
+        let Some(grp) = v.groups.get(g) else { return };
+        let on = grp.average.is_none();
+        if on && grp.stamps.is_none() {
+            return;
+        }
+        let members: Vec<String> = grp.rows.iter().filter_map(|&k| v.rows[k].uid.clone()).collect();
+        let name = grp.rows.first().map_or(grp.key.clone(), |&k| v.rows[k].name.clone());
+        let old = match grp.anchor {
+            Some(a) => v.rows[a].name.clone(),
+            None if grp.average.is_some() => "the average of its stamps".to_string(),
+            None => "none".to_string(),
+        };
+        let key = grp.key.clone();
+        let Kind::AudioMatch { rows } = &mut self.nodes[i].kind else { return };
+        rows.retain(|(k, _)| k != &average_key(&key) && k != &shift_key(&key) && !k.strip_prefix("anchor ").is_some_and(|u| members.iter().any(|m| m == u)));
+        if on {
+            rows.push((average_key(&key), "on".to_string()));
+        }
+        let label = self.nodes[i].label.clone();
+        let new = if on { "the average of its stamps" } else { "none" };
+        self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name: format!("anchor of the group with {name}"), old, new: new.to_string() });
+        self.match_ui.cache.borrow_mut().remove(&i);
+        self.save_project();
+    }
+
+    /// Row `row`'s clock runs true, or stops: one per group. Logged like any setting.
+    pub(crate) fn toggle_speed_ref(&mut self, i: NodeId, row: usize) {
+        let v = self.match_view(i);
+        let Some(r) = v.rows.get(row) else { return };
+        let Some(uid) = r.uid.clone() else { return };
+        let g = &v.groups[r.group];
+        let members: Vec<String> = g.rows.iter().filter_map(|&k| v.rows[k].uid.clone()).collect();
+        let old = g.rows.iter().find(|&&k| v.rows[k].speed_ref).map_or("none".to_string(), |&k| v.rows[k].name.clone());
+        let on = !r.speed_ref;
+        let name = r.name.clone();
+        let Kind::AudioMatch { rows } = &mut self.nodes[i].kind else { return };
+        rows.retain(|(k, _)| !k.strip_prefix("speed reference ").is_some_and(|u| members.iter().any(|m| m == u)));
+        if on {
+            rows.push((speed_ref_key(&uid), "on".to_string()));
+        }
+        let label = self.nodes[i].label.clone();
+        self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name: format!("speed reference of the group with {name}"), old, new: if on { name.clone() } else { "none".to_string() } });
+        self.match_ui.cache.borrow_mut().remove(&i);
+        self.save_project();
+    }
+
+    /// Row `row`'s phone id becomes `id` (empty: its own phone). Logged like any setting.
+    pub(crate) fn set_phone(&mut self, i: NodeId, row: usize, id: &str) {
+        let v = self.match_view(i);
+        let Some(r) = v.rows.get(row) else { return };
+        let Some(uid) = r.uid.clone() else { return };
+        let id = id.trim().to_string();
+        if id == r.phone {
+            return;
+        }
+        let (old, name) = (r.phone.clone(), r.name.clone());
+        let Kind::AudioMatch { rows } = &mut self.nodes[i].kind else { return };
+        rows.retain(|(k, _)| k != &phone_key(&uid));
+        if !id.is_empty() {
+            rows.push((phone_key(&uid), id.clone()));
+        }
+        let label = self.nodes[i].label.clone();
+        let shown = |s: &str| if s.is_empty() { "none".to_string() } else { s.to_string() };
+        self.changes.push(bus::SettingChange { utc: timebase::now_unix(), node: self.nodes[i].uid.clone(), label, name: format!("phone of {name}"), old: shown(&old), new: shown(&id) });
+        self.match_ui.cache.borrow_mut().remove(&i);
+        self.save_project();
     }
 
     /// Row `row` becomes its group's anchor, or stops being it. Kept by the recording, so it stays
@@ -608,11 +860,14 @@ impl App {
         let was = g.anchor;
         let members: Vec<String> = g.rows.iter().filter_map(|&k| v.rows[k].uid.clone()).collect();
         let name = r.name.clone();
-        let old = was.map_or("none".to_string(), |a| v.rows[a].name.clone());
+        let old = was.map_or(if g.average.is_some() { "the average of its stamps" } else { "none" }.to_string(), |a| v.rows[a].name.clone());
         let on = was != Some(row);
+        let key = g.key.clone();
         let Kind::AudioMatch { rows } = &mut self.nodes[i].kind else { return };
         rows.retain(|(k, _)| !k.strip_prefix("anchor ").is_some_and(|u| members.iter().any(|m| m == u)));
         if on {
+            // A row's anchor takes the place of the average.
+            rows.retain(|(k, _)| k != &average_key(&key));
             rows.push((anchor_key(&uid), "on".to_string()));
             self.match_ui.members.insert((i, uid.clone()), members.iter().cloned().collect());
         }
@@ -1067,15 +1322,18 @@ pub fn json(app: &App, i: NodeId) -> String {
             let synced = app.synced_time(i, &format!("synced {}", r.n)).map_or("null".to_string(), |d| d.to_json());
             let end = app.synced_time(i, &format!("end {}", r.n)).map_or("null".to_string(), |d| d.to_json());
             let g = &v.groups[r.group];
-            let speed = r.speed.map_or("null".to_string(), |(p, e)| format!("{{\"ppm\":{p:.2},\"error_ppm\":{e:.2}}}"));
+            let drift = r.speed.map_or("null".to_string(), |(p, e)| {
+                format!("{{\"s_per_h\":{:.4},\"error_s_per_h\":{:.4},\"clock_speed\":{:.9},\"against\":\"{}\"}}", s_per_h(p), s_per_h(e), 1.0 + p * 1e-6, json_escape(&drift_against(&v, g)))
+            });
             let marks: Vec<String> = r.marks.iter().map(|m| format!("\"{}\"", json_escape(&m.text))).collect();
+            let anchor = if g.anchor == Some(r.n - 1) { "\"its time\"" } else if g.average.is_some() { "\"the average of the group's stamps\"" } else { "null" };
             format!(
-                "{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"reference\":{},\"speed\":{speed},\"links\":{},\"leftover_s\":{:.6},\"marks\":[{}],\"synced\":{synced},\"end\":{end}}}",
+                "{{\"row\":{},\"recording\":\"{}\",\"phone\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{anchor},\"speed_reference\":{},\"drift\":{drift},\"links\":{},\"leftover_s\":{:.6},\"marks\":[{}],\"synced\":{synced},\"end\":{end}}}",
                 r.n,
                 json_escape(&r.name),
+                json_escape(&r.phone),
                 g.number,
-                g.anchor == Some(r.n - 1),
-                r.reference,
+                r.speed_ref,
                 r.links,
                 r.leftover,
                 marks.join(",")
@@ -1110,10 +1368,15 @@ pub struct MatchUi {
     seen_run: HashMap<NodeId, u64>,
     /// Where each row's anchor button is on screen, as last drawn.
     pub anchor_at: HashMap<(NodeId, usize), Rect>,
+    /// Where each row's phone id is on screen, as last drawn.
+    pub phone_at: HashMap<(NodeId, usize), Rect>,
     /// Each node's rows this frame (cleared at the start of the canvas).
     pub cache: std::cell::RefCell<HashMap<NodeId, Rc<MatchView>>>,
-    /// Each node's last fit, by run, outbox revision and references.
-    fits: std::cell::RefCell<HashMap<NodeId, ((u64, u64, BTreeSet<String>), Rc<Fits>)>>,
+    /// Each node's last fit, by run, outbox revision, references and phones.
+    #[allow(clippy::type_complexity)]
+    fits: std::cell::RefCell<HashMap<NodeId, ((u64, u64, BTreeSet<String>, BTreeMap<String, String>), Rc<Fits>)>>,
+    /// The phone id being typed: node, recording, text.
+    phone_edit: Option<(NodeId, String, String)>,
 }
 
 // Unzoomed, from the top of the node.
@@ -1124,7 +1387,9 @@ const RULER_H: f32 = 26.0;
 const FOOT_H: f32 = 46.0;
 const LEFT_W: f32 = 170.0;
 const STATUS_W: f32 = 116.0;
-const STRETCH_W: f32 = 100.0;
+const DRIFT_W: f32 = 100.0;
+/// The phone id field on a row's name strip.
+const PHONE_W: f32 = 64.0;
 const RIGHT_W: f32 = 116.0;
 const ROW_DEFAULT: f32 = 64.0;
 /// The thinnest row is its file name and nothing else.
@@ -1180,6 +1445,8 @@ fn row_height(kind: &Kind) -> f32 {
 pub enum Order {
     /// By group, then rows with time metadata before those without, then by start.
     GroupMetaStart,
+    /// By group, then by phone id (rows with none last), then by start: a phone's files together.
+    GroupPhoneStart,
     /// By start, then by group.
     StartGroup,
     /// By group, then by how far the metadata is from audio, nearest first.
@@ -1189,12 +1456,13 @@ pub enum Order {
 }
 
 impl Order {
-    pub const ALL: [Order; 4] = [Order::GroupMetaStart, Order::StartGroup, Order::GroupOff, Order::Wired];
+    pub const ALL: [Order; 5] = [Order::GroupMetaStart, Order::GroupPhoneStart, Order::StartGroup, Order::GroupOff, Order::Wired];
 
     /// As saved in the node's rows (`order`).
     fn key(self) -> &'static str {
         match self {
             Order::GroupMetaStart => "group-meta-start",
+            Order::GroupPhoneStart => "group-phone-start",
             Order::StartGroup => "start-group",
             Order::GroupOff => "group-off",
             Order::Wired => "wired",
@@ -1204,6 +1472,7 @@ impl Order {
     pub fn label(self) -> &'static str {
         match self {
             Order::GroupMetaStart => "Group › metadata › start",
+            Order::GroupPhoneStart => "Group › phone › start",
             Order::StartGroup => "Start › group",
             Order::GroupOff => "Group › how far off",
             Order::Wired => "As wired",
@@ -1229,10 +1498,12 @@ pub fn sorted(v: &MatchView, order: Order) -> Vec<usize> {
     let start = |k: usize| v.rows[k].start.or(v.rows[k].meta).unwrap_or(f64::MAX);
     let off = |k: usize| v.rows[k].off.map_or(f64::MAX, f64::abs);
     let no_meta = |k: usize| v.rows[k].meta.is_none();
+    let phone = |k: usize| (v.rows[k].phone.is_empty(), v.rows[k].phone.as_str());
     let mut o: Vec<usize> = (0..v.rows.len()).collect();
     o.sort_by(|&a, &b| {
         let by = match order {
             Order::GroupMetaStart => group(a).cmp(&group(b)).then(no_meta(a).cmp(&no_meta(b))).then(start(a).total_cmp(&start(b))),
+            Order::GroupPhoneStart => group(a).cmp(&group(b)).then(phone(a).cmp(&phone(b))).then(start(a).total_cmp(&start(b))),
             Order::StartGroup => start(a).total_cmp(&start(b)).then(group(a).cmp(&group(b))),
             Order::GroupOff => group(a).cmp(&group(b)).then(off(a).total_cmp(&off(b))),
             Order::Wired => std::cmp::Ordering::Equal,
@@ -1348,39 +1619,39 @@ fn off_color(d: f64) -> (Color32, Color32) {
     (hsl(0.0, 0.65, 0.46 * (1.0 - f)), if f > 0.3 { Color32::WHITE } else { INK })
 }
 
-/// How far a speed fills its half of the Stretch cell, 0 to 1, on a log scale: 30 ppm (a phone's
-/// clock) fills half, 1000 ppm (`SPEED_CHANGE_PPM`, a file played at another speed) all of it.
+/// How far a drift fills its half of the Drift cell, 0 to 1, on a log scale: 0.1 s/h (30 ppm, a
+/// phone's clock) fills half, 3.6 s/h (1000 ppm, `SPEED_CHANGE_PPM`, a file played at another
+/// speed) all of it. Takes ppm.
 fn speed_fill(ppm: f64) -> f32 {
     ((1.0 + ppm.abs()).ln() / (1.0 + audio_match::SPEED_CHANGE_PPM).ln()).min(1.0) as f32
 }
 
-/// Green near 0 ppm, red toward 1000.
+/// Green near 0, red toward 3.6 s/h. Takes ppm.
 fn speed_color(ppm: f64) -> Color32 {
     hsl(130.0 * (1.0 - speed_fill(ppm)), 0.62, 0.46)
 }
 
-/// What a row's Stretch cell says.
+/// What a row's Drift cell says.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Stretch {
-    /// The recording its group's speeds are measured against; its real speed (ppm) when its end
-    /// is wired.
-    Reference(Option<f64>),
-    /// ppm against the reference (or real), its error, and how far the row's wired end is from
-    /// the measured end.
+pub enum DriftCell {
+    /// Its speed reference button is on: its clock runs true.
+    True,
+    /// Its drift in ppm (shown in s/h), the error, and how far the row's wired end is from the
+    /// measured end.
     Speed(f64, f64, Option<f64>),
     Empty,
 }
 
-/// The Stretch cell of row `k`.
-pub fn stretch(v: &MatchView, k: usize) -> Stretch {
+/// The Drift cell of row `k`.
+pub fn drift_cell(v: &MatchView, k: usize) -> DriftCell {
     let r = &v.rows[k];
     if !v.linked(r) {
-        return Stretch::Empty;
+        return DriftCell::Empty;
     }
     match r.speed {
-        _ if r.reference => Stretch::Reference(r.speed.map(|s| s.0)),
-        Some((p, e)) => Stretch::Speed(p, e, r.end_in.zip(r.end).map(|(w, e)| w - e)),
-        None => Stretch::Empty,
+        _ if v.groups[r.group].drift == DriftFrom::File(k) => DriftCell::True,
+        Some((p, e)) => DriftCell::Speed(p, e, r.end_in.zip(r.end).map(|(w, e)| w - e)),
+        None => DriftCell::Empty,
     }
 }
 
@@ -1533,6 +1804,43 @@ fn anchor_icon(p: &egui::Painter, r: Rect, col: Color32) {
     p.add(egui::Shape::line(arc, st));
 }
 
+/// A clock face, drawn in `r`: the speed reference (a clock that runs true).
+fn clock_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let st = Stroke::new((r.width() * 0.1).max(1.0), col);
+    let c = r.center();
+    p.circle_stroke(c, r.width() * 0.42, st);
+    p.line_segment([c, c + Vec2::new(0.0, -r.height() * 0.3)], st);
+    p.line_segment([c, c + Vec2::new(r.width() * 0.22, 0.0)], st);
+}
+
+/// An anchor with a bar over it (a mean, x̄), drawn in `r`: the average anchor.
+fn average_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let s = r.width().min(r.height());
+    let a = Rect::from_center_size(r.center() + Vec2::new(0.0, s * 0.08), Vec2::splat(s * 0.84));
+    anchor_icon(p, a, col);
+    p.line_segment([Pos2::new(r.center().x - s * 0.36, r.top() + s * 0.06), Pos2::new(r.center().x + s * 0.36, r.top() + s * 0.06)], Stroke::new((s * 0.09).max(1.0), col));
+}
+
+/// `s`, shortened until it fits `w` in `font`.
+fn fit_width(p: &egui::Painter, s: &str, w: f32, font: FontId) -> String {
+    let mut n = s.chars().count();
+    let mut t = s.to_string();
+    while n > 2 && p.layout_no_wrap(t.clone(), font.clone(), TEXT).size().x > w {
+        n -= 1;
+        t = shorten(s, n);
+    }
+    t
+}
+
+/// The phone id's hover.
+fn phone_tip(r: &Row) -> String {
+    let mut t = "phone id: rows with the same text are one phone, in one colour: one drift (each file keeps its own start) and one vote in the group's averages. Empty: its own phone".to_string();
+    if !r.phone_hint.is_empty() {
+        t += &format!("\nthe metadata says: {} (only a suggestion: Enter in the empty field takes it)", r.phone_hint);
+    }
+    t
+}
+
 /// A mirror, drawn in `r`: a line with a shape and its reflection. It marks a time that may be the
 /// recording's end read as its start.
 fn mirror_icon(p: &egui::Painter, r: Rect, col: Color32) {
@@ -1554,6 +1862,9 @@ fn shorten(s: &str, n: usize) -> String {
 /// The bits of a row's hover text.
 fn row_hover(v: &MatchView, r: &Row) -> String {
     let mut h = vec![r.name.clone()];
+    if !r.phone.is_empty() {
+        h.push(format!("phone: {}", r.phone));
+    }
     match r.meta {
         Some(t) => h.push(format!("time input: {} UTC ± {} s, {}", timebase::fmt_utc(t), r.meta_err, r.meta_source)),
         None if r.time_wired && !r.meta_source.is_empty() => h.push(format!("the time input gives no time: {}", r.meta_source)),
@@ -1573,21 +1884,26 @@ fn row_hover(v: &MatchView, r: &Row) -> String {
     if v.linked(r) {
         let g = &v.groups[r.group];
         h.push(format!("fitted on {} links of this node, leftover {:.1} ms (root mean square)", r.links, r.leftover * 1000.0));
-        let real = if g.real_speed { "real time (the anchor's wired end)" } else { "" };
-        match (r.reference, r.speed) {
-            (true, Some((p, _))) => h.push(format!("its wired end gives its real speed: {p:+.1} ppm; every row's speed is against real time")),
-            (true, None) => h.push("the group's speeds are measured against this recording".to_string()),
-            (false, Some((p, e))) => {
-                let against = if g.real_speed { real.to_string() } else { g.reference.map_or(String::new(), |k| v.rows[k].name.clone()) };
-                h.push(format!("its clock runs {p:+.1} ± {e:.1} ppm against {against}"));
+        let k = v.rows.iter().position(|x| std::ptr::eq(x, r));
+        match (g.drift, r.speed) {
+            (DriftFrom::File(s), _) if Some(s) == k => h.push("speed reference: its clock runs true; the group's drifts are measured against it".to_string()),
+            (from, Some((p, e))) => {
+                h.push(format!("drift {} ± {:.2} s/h against {}", drift_text(p), s_per_h(e), drift_against(v, g)));
+                h.push(scale_words(p));
+                if from == DriftFrom::AnchorEnd(k.unwrap_or(usize::MAX)) {
+                    h.push("its wired end gives its real drift: every row's drift is against real time".to_string());
+                }
             }
             _ => {}
         }
         if let (Some(s0), Some(e)) = (r.start, r.end) {
             h.push(format!("audio ends {} UTC: {} from start + length", timebase::fmt_utc(e), ms_text(e - s0 - r.len)));
-            if let Some(w) = r.end_in.filter(|_| !r.reference) {
+            if let Some(w) = r.end_in.filter(|_| g.drift != DriftFrom::AnchorEnd(k.unwrap_or(usize::MAX))) {
                 h.push(format!("its wired end is {} from the measured end", ms_text(w - e)));
             }
+        }
+        if let (None, Some(avg)) = (g.anchor, g.average) {
+            h.push(format!("the group is anchored on the average of {} phones' stamps, ± {:.3} s", avg.phones, avg.error));
         }
     }
     for m in &r.marks {
@@ -1679,7 +1995,7 @@ impl crate::look::NodeLook for Look {
         app.match_ui.slots.insert(i, slots);
 
         let x0 = body.left();
-        let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + STRETCH_W + RIGHT_W) * z);
+        let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + DRIFT_W + RIGHT_W) * z);
         let rows_top = body.top() + (BAR_H + RULER_H) * z;
         let pitch = (rh + END_H) * z;
         let row_top = |slot: usize| rows_top + slot as f32 * pitch;
@@ -1729,13 +2045,13 @@ impl crate::look::NodeLook for Look {
             lx = r.right() + 12.0 * z;
         }
         {
-            // The stretch: an amber bar to a dashed line, hatched past it.
+            // The drift: an amber bar to a dashed line, hatched past it.
             let sw = Rect::from_min_size(Pos2::new(lx, y - 5.0 * z), Vec2::new(20.0 * z, 10.0 * z));
             p.rect_filled(sw, 0.0, alpha(AMBER, BAR_ALPHA));
             let cut = sw.left() + 13.0 * z;
             hatch(&p, Rect::from_min_max(Pos2::new(cut, sw.top()), sw.max), 3.0 * z, Stroke::new(z, INK));
             p.extend(egui::Shape::dashed_line(&[Pos2::new(cut, sw.top() - 2.0 * z), Pos2::new(cut, sw.bottom() + 2.0 * z)], Stroke::new(z, BOTH), 2.0 * z, 2.0 * z));
-            let r = p.text(Pos2::new(sw.right() + 5.0 * z, y), Align2::LEFT_CENTER, "stretch: start + length ¦ measured end", font(11.0), DIM);
+            let r = p.text(Pos2::new(sw.right() + 5.0 * z, y), Align2::LEFT_CENTER, "drift: start + length ¦ measured end", font(11.0), DIM);
             lx = r.right() + 12.0 * z;
         }
         let scale = if span < 86400.0 { format!("{} to {}", timebase::fmt_utc_clock(v0), timebase::fmt_utc_clock(v1)) } else { format!("{} to {}", &timebase::fmt_utc(v0)[..10], &timebase::fmt_utc(v1)[..10]) };
@@ -1762,11 +2078,13 @@ impl crate::look::NodeLook for Look {
             ticks += 1;
         }
         p.text(Pos2::new(track.right() + STATUS_W * 0.5 * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Status", font(11.0), DIM);
-        p.text(Pos2::new(track.right() + (STATUS_W + STRETCH_W * 0.5) * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Stretch", font(11.0), DIM);
-        p.text(Pos2::new(track.right() + (STATUS_W + STRETCH_W + 8.0) * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, "output", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + (STATUS_W + DRIFT_W * 0.5) * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Drift", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + (STATUS_W + DRIFT_W + 8.0) * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, "output", font(11.0), DIM);
 
         // The rows.
         let mut press_anchor: Option<usize> = None;
+        let mut press_speed_ref: Option<usize> = None;
+        let mut new_phone: Option<(usize, String)> = None;
         for (slot, &k) in order.iter().enumerate() {
             let r = &v.rows[k];
             let top = row_top(slot);
@@ -1800,10 +2118,75 @@ impl crate::look::NodeLook for Look {
                 end_words(&p, false);
                 continue;
             }
-            // With no room on the ports, the anchor button sits beside the name.
-            let by_name = g.half < ANCHOR_FROM && r.meta.is_some();
+            // With no room on the ports, the anchor and speed reference buttons sit beside the
+            // name, and the phone id shrinks to its colour chip.
+            let thin = g.half < ANCHOR_FROM;
+            let by_name = thin && r.meta.is_some();
+            let linked = v.linked(r);
             wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, inner), Pos2::new(track.left(), inner + strip_h)), 0.0, fade(STRIP));
-            p.text(left_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, if by_name { 21 } else { 25 }), mono(11.5), fade(TEXT));
+            // From the right: the buttons beside the name, then the phone id, then the name.
+            let small = strip_h - 6.0 * z;
+            let mut x = track.left() - 2.0 * z;
+            let mut beside = |on: bool| {
+                on.then(|| {
+                    let b = Rect::from_center_size(Pos2::new(x - small * 0.5, inner + strip_h * 0.5), Vec2::splat(small));
+                    x -= small + 3.0 * z;
+                    b
+                })
+            };
+            let anchor_by_name = beside(by_name);
+            let ref_by_name = beside(thin && linked);
+            let phone_w = if thin { strip_h - 8.0 * z } else { PHONE_W * z };
+            let phone_r = r.uid.is_some().then(|| {
+                let pr = Rect::from_min_max(Pos2::new(x - phone_w, inner + 3.0 * z), Pos2::new(x, inner + strip_h - 3.0 * z));
+                x = pr.left() - 4.0 * z;
+                pr
+            });
+            p.text(left_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, fit_width(&p, &r.name, x - left_col.left() - 8.0 * z, mono(11.5)), mono(11.5), fade(TEXT));
+            // The phone id: rows with the same text are one phone, in one colour.
+            if let (Some(pr), Some(uid)) = (phone_r, r.uid.clone()) {
+                let id = egui::Id::new(("match-phone", i, uid.as_str()));
+                let typing = app.match_ui.phone_edit.as_ref().filter(|e| e.0 == i && e.1 == uid).map(|e| e.2.clone());
+                let tip = phone_tip(r);
+                app.match_ui.phone_at.insert((i, k), pr);
+                if thin && typing.is_none() {
+                    match (!r.phone.is_empty()).then(|| phone_color(&r.phone)) {
+                        Some(c) => {
+                            p.rect_filled(pr, 2.0 * z, fade(c));
+                        }
+                        None => {
+                            p.rect_stroke(pr, 2.0 * z, Stroke::new(z, DIM), StrokeKind::Inside);
+                        }
+                    }
+                    if ui.interact(pr, egui::Id::new(("match-phone-chip", i, r.n)), Sense::click()).on_hover_text(tip).clicked() {
+                        app.match_ui.phone_edit = Some((i, uid.clone(), r.phone.clone()));
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
+                } else {
+                    // Typed across the name while the strip has no room for it.
+                    let fr = if thin { Rect::from_min_max(Pos2::new(left_col.left() + 4.0 * z, pr.top()), pr.max) } else { pr };
+                    let mut text = typing.clone().unwrap_or_else(|| r.phone.clone());
+                    let col = (!text.trim().is_empty()).then(|| phone_color(text.trim()));
+                    p.rect_filled(fr, 2.0 * z, fade(col.unwrap_or(TRACK)));
+                    let hint = if r.phone_hint.is_empty() { "phone" } else { r.phone_hint.as_str() };
+                    let te = egui::TextEdit::singleline(&mut text)
+                        .id(id)
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(3, 0)))
+                        .font(mono(10.5))
+                        .text_color(if col.is_some() { INK } else { TEXT })
+                        .hint_text(egui::RichText::new(hint).font(mono(10.5)).color(alpha(DIM, 0.8)));
+                    let resp = ui.put(fr, te).on_hover_text(tip);
+                    if resp.has_focus() {
+                        app.match_ui.phone_edit = Some((i, uid.clone(), text.clone()));
+                    }
+                    if resp.lost_focus() {
+                        // Enter in the empty field takes the metadata's suggestion.
+                        let take = text.trim().is_empty() && !r.phone_hint.is_empty() && ui.input(|x| x.key_pressed(egui::Key::Enter));
+                        new_phone = Some((k, if take { r.phone_hint.clone() } else { text.clone() }));
+                        app.match_ui.phone_edit = None;
+                    }
+                }
+            }
             // The port swatches: audio over time.
             let audio_sw = Rect::from_min_max(Pos2::new(edge_l, inner + strip_h), Pos2::new(track.left() - z, inner + strip_h + half));
             let time_sw = Rect::from_min_max(Pos2::new(edge_l, audio_sw.bottom()), Pos2::new(track.left() - z, audio_sw.bottom() + half));
@@ -1817,10 +2200,13 @@ impl crate::look::NodeLook for Look {
                 p.text(Pos2::new(x0 + 21.0 * z, time_sw.center().y), Align2::LEFT_CENTER, "audio start time", font(12.0), if r.meta.is_some() { INK } else { DIM });
             }
             // The anchor button, on a time, once the audio has placed the row.
+            let port_button = |sw: Rect| {
+                let s = (half - 3.0 * z).min(20.0 * z).max(8.0 * z);
+                Rect::from_center_size(Pos2::new(sw.right() - s * 0.5 - 5.0 * z, sw.center().y), Vec2::splat(s))
+            };
             if r.meta.is_some() {
-                let s = if by_name { strip_h - 6.0 * z } else { (half - 3.0 * z).min(20.0 * z).max(8.0 * z) };
-                let (line, margin) = if by_name { (inner + strip_h * 0.5, 2.0) } else { (time_sw.center().y, 5.0) };
-                let br = Rect::from_center_size(Pos2::new(time_sw.right() - s * 0.5 - margin * z, line), Vec2::splat(s));
+                let br = anchor_by_name.unwrap_or_else(|| port_button(time_sw));
+                let s = br.width();
                 app.match_ui.anchor_at.insert((i, k), br);
                 let on = v.groups[r.group].anchor == Some(k);
                 if v.done {
@@ -1837,6 +2223,23 @@ impl crate::look::NodeLook for Look {
                 let ink = if by_name { TEXT } else { INK };
                 p.rect_stroke(br, 0.0, Stroke::new(1.5 * z, if v.done { ink } else { alpha(ink, 0.4) }), StrokeKind::Inside);
                 anchor_icon(&p, br.shrink(s * 0.14), if on { BOTH } else if v.done { ink } else { alpha(ink, 0.4) });
+            }
+
+            // The speed reference button, on the audio, once audio has linked the row: its clock
+            // runs true, and the group's drifts are measured against it.
+            if linked {
+                let br = ref_by_name.unwrap_or_else(|| port_button(audio_sw));
+                let on = r.speed_ref;
+                let tip = if on { "speed reference: this file's clock runs true. Click to measure the drifts against the group's average clock again" } else { "speed reference: this file's clock runs true (an official recording, say); the group's drifts are measured against it instead of its average clock" };
+                if ui.interact(br, egui::Id::new(("match-speed-ref", i, r.n)), Sense::click()).on_hover_text(tip).clicked() {
+                    press_speed_ref = Some(k);
+                }
+                let ink = if thin { TEXT } else { INK };
+                if on {
+                    p.rect_filled(br, 0.0, INK);
+                }
+                p.rect_stroke(br, 0.0, Stroke::new(1.5 * z, ink), StrokeKind::Inside);
+                clock_icon(&p, br.shrink(br.width() * 0.16), if on { BOTH } else { ink });
             }
 
             // The timeline.
@@ -1878,8 +2281,8 @@ impl crate::look::NodeLook for Look {
             }
             // The stretch: a dashed line where start + length would end, the bit of bar past it
             // hatched, a bar ending short of it cut; at least 4 px either way, so it shows at any
-            // zoom. The size beside it. The reference has none.
-            if let (Some(s0), Some(e), true) = (r.start, r.end, v.linked(r) && !r.reference) {
+            // zoom. The size beside it. The speed reference has none.
+            if let (Some(s0), Some(e), true) = (r.start, r.end, v.linked(r) && v.groups[r.group].drift != DriftFrom::File(k)) {
                 let d = e - (s0 + r.len);
                 let (xn, xe) = (tx(s0 + r.len), tx(e));
                 if xn > lane.left() && xn < lane.right() {
@@ -1972,9 +2375,10 @@ impl crate::look::NodeLook for Look {
                 }
             }
 
-            // The Stretch cell: the row's speed against its group's reference, split at zero like
-            // Status (slower on the left), green near 0, red toward 1000 ppm.
-            let st_r = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(cell_r.right() + STRETCH_W * z, bottom));
+            // The Drift cell: how fast the row's clock runs, in seconds an hour, against its
+            // group's average clock (or its speed reference, or real time), split at zero like
+            // Status (slower on the left), green near 0, red toward 3.6 s/h.
+            let st_r = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(cell_r.right() + DRIFT_W * z, bottom));
             let fit_text = |p: &egui::Painter, t: &str, w: f32, size: f32| {
                 let mut size = size;
                 while size > 7.0 && p.layout_no_wrap(t.to_string(), mono(size), TEXT).size().x > w - 4.0 * z {
@@ -1982,23 +2386,23 @@ impl crate::look::NodeLook for Look {
                 }
                 size
             };
-            match stretch(&v, k) {
-                Stretch::Reference(real) => {
-                    let t = match real {
-                        Some(ppm) => format!("speed from its\nwired end\n{ppm:+.1} ppm"),
-                        None => "reference".to_string(),
-                    };
-                    let size = t.lines().map(|l| fit_text(&p, l, st_r.width(), 11.0)).fold(11.0, f32::min);
-                    p.text(st_r.center(), Align2::CENTER_CENTER, t, mono(size), fade(DIM));
+            let drift = drift_cell(&v, k);
+            match drift {
+                DriftCell::True => {
+                    let s = (16.0 * z).min(st_r.height() * 0.45);
+                    let icon = Rect::from_center_size(Pos2::new(st_r.center().x, st_r.center().y - s * 0.45), Vec2::splat(s));
+                    clock_icon(&p, icon, fade(TEXT));
+                    let t = "runs true";
+                    p.text(Pos2::new(st_r.center().x, icon.bottom() + 2.0 * z), Align2::CENTER_TOP, t, mono(fit_text(&p, t, st_r.width(), 11.0)), fade(DIM));
                 }
-                Stretch::Speed(ppm, _, wired) => {
+                DriftCell::Speed(ppm, _, wired) => {
                     let mid = st_r.center().x;
                     let full = if ppm < 0.0 { Rect::from_min_max(st_r.min, Pos2::new(mid, st_r.bottom())) } else { Rect::from_min_max(Pos2::new(mid, st_r.top()), st_r.max) };
                     let w = (full.width() * speed_fill(ppm)).max(2.0 * z);
                     let fill = if ppm < 0.0 { Rect::from_min_max(Pos2::new(mid - w, full.top()), Pos2::new(mid, full.bottom())) } else { Rect::from_min_max(Pos2::new(mid, full.top()), Pos2::new(mid + w, full.bottom())) };
                     p.rect_filled(fill, 0.0, fade(speed_color(ppm)));
                     let ink = if speed_fill(ppm) >= 0.95 { INK } else { TEXT };
-                    let t = format!("{}\nppm", ppm_text(ppm));
+                    let t = format!("{}\ns/h", drift_text(ppm));
                     let size = t.lines().map(|l| fit_text(&p, l, full.width(), 12.0)).fold(12.0, f32::min);
                     p.text(full.center(), Align2::CENTER_CENTER, t, mono(size), fade(ink));
                     p.line_segment([Pos2::new(mid, st_r.top()), Pos2::new(mid, st_r.bottom())], Stroke::new(1.0, GRID));
@@ -2010,10 +2414,10 @@ impl crate::look::NodeLook for Look {
                         p.text(empty.center(), Align2::CENTER_CENTER, t, mono(size), fade(TEXT));
                     }
                 }
-                Stretch::Empty => {}
+                DriftCell::Empty => {}
             }
-            if !matches!(stretch(&v, k), Stretch::Empty) {
-                ui.interact(st_r, egui::Id::new(("match-stretch", i, r.n)), Sense::hover()).on_hover_text(row_hover(&v, r));
+            if drift != DriftCell::Empty {
+                ui.interact(st_r, egui::Id::new(("match-drift", i, r.n)), Sense::hover()).on_hover_text(row_hover(&v, r));
             }
 
             // The output.
@@ -2056,9 +2460,9 @@ impl crate::look::NodeLook for Look {
         wide.rect_filled(Rect::from_min_max(Pos2::new(edge_l, rows_bottom), Pos2::new(edge_r, rows_bottom + 2.0 * z)), 0.0, SEAM);
 
         // Group borders: one round each run of neighbouring rows of a group.
+        let mut tabs: Vec<(usize, usize, Rect)> = Vec::new();
         for (gi, grp) in v.groups.iter().enumerate().filter(|(_, g)| g.number > 0) {
             let col = GROUP_COLORS[(grp.number - 1) % GROUP_COLORS.len()];
-            let _ = gi;
             let mut s = 0;
             while s < order.len() {
                 if !grp.rows.contains(&order[s]) {
@@ -2074,6 +2478,16 @@ impl crate::look::NodeLook for Look {
                 let tab = Rect::from_min_size(rect.min, Vec2::new(20.0 * z, 16.0 * z).min(rect.size()));
                 p.rect_filled(tab, 0.0, col);
                 p.text(tab.center(), Align2::CENTER_CENTER, grp.number.to_string(), mono(11.0), INK);
+                // The average anchor, beside the number: drawn now, pressed after the track (on
+                // top of it).
+                if v.done && grp.stamps.is_some() && rect.width() > 40.0 * z {
+                    let b = Rect::from_min_size(Pos2::new(tab.right(), tab.top()), Vec2::new(18.0 * z, tab.height()));
+                    let on = grp.average.is_some();
+                    p.rect_filled(b, 0.0, if on { INK } else { col });
+                    p.rect_stroke(b, 0.0, Stroke::new(z, col), StrokeKind::Inside);
+                    average_icon(&p, b.shrink(1.5 * z), if on { BOTH } else { INK });
+                    tabs.push((gi, s, b));
+                }
                 s = e + 1;
             }
         }
@@ -2143,6 +2557,18 @@ impl crate::look::NodeLook for Look {
         if resp.double_clicked() {
             do_fit = true;
         }
+        let mut press_average = None;
+        for (gi, s, b) in tabs {
+            let grp = &v.groups[gi];
+            let tip = match (grp.average, grp.stamps) {
+                (Some(a), _) => format!("anchored on the average of its stamps: {} phones, one vote each, weighted by their ±; ± {:.3} s. Click to take it away", a.phones, a.error),
+                (None, Some(a)) => format!("anchor this group on the average of its stamps ({} phones, one vote each, weighted by their ±; every stamp counts): puts a dragged group back, and takes the place of a row's anchor", a.phones),
+                _ => String::new(),
+            };
+            if ui.interact(b, egui::Id::new(("match-average", i, gi, s)), Sense::click()).on_hover_text(tip).clicked() {
+                press_average = Some(gi);
+            }
+        }
         if let Some(r) = resp.hover_pos().and_then(|h| row_at(h.y)).filter(|r| r.wired) {
             resp.on_hover_text(row_hover(&v, r));
         }
@@ -2174,6 +2600,15 @@ impl crate::look::NodeLook for Look {
         }
         if let Some(k) = press_anchor {
             app.toggle_anchor(i, k);
+        }
+        if let Some(k) = press_speed_ref {
+            app.toggle_speed_ref(i, k);
+        }
+        if let Some(gi) = press_average {
+            app.toggle_average(i, gi);
+        }
+        if let Some((k, id)) = new_phone {
+            app.set_phone(i, k, &id);
         }
     }
 }
@@ -2228,18 +2663,25 @@ mod tests {
             .collect()
     }
 
-    /// A phone measured at -250 ppm over a 2,400 s file ends 0.6 s after start + length, whichever
-    /// clock id sorts first.
+    /// b's clock runs 250 ppm slow against a's. Read in the group's average clock, a runs 125 ppm
+    /// fast and b 125 ppm slow. With a as the speed reference (its clock runs true), b measures
+    /// -250 ppm, and over a 2,400 s file ends 0.6 s after start + length, whichever clock id sorts
+    /// first.
     #[test]
     fn a_slow_clock_ends_late() {
         for (a, b) in [("a", "b"), ("zz", "b")] {
             let links: Vec<Link> = slow_links().into_iter().map(|l| Link { a: a.into(), b: b.into(), ..l }).collect();
-            let fits = fit_groups(&links, &[a.to_string()].into());
+            let fits = fit_groups(&links, &[a.to_string()].into(), &BTreeMap::new());
             let (fa, fb) = (fits.clocks[a], fits.clocks[b]);
-            assert!((fa.at(1234.0) - 1234.0).abs() < 1e-9, "the reference keeps its own time");
-            let (p, e) = speed_ppm(&fb, 1.0);
+            assert!(fa.at(0.0).abs() < 1e-9, "measured from a's start");
+            let ((pa, _), (pb, _)) = (speed_ppm(&fa, 1.0), speed_ppm(&fb, 1.0));
+            assert!((pa - 125.0).abs() < 1.0 && (pb + 125.0).abs() < 1.0, "around the average: {pa} {pb}");
+            // a runs true.
+            let k = 1.0 / (1.0 + fa.rate);
+            let (p, e) = speed_ppm(&fb, k);
             assert!((p + 250.0).abs() < 1.0 && e < 5.0, "{p} ± {e}");
-            let (s0, s1) = place(&fb, 2400.0, 1000.0, 1.0);
+            assert!(speed_ppm(&fa, k).0.abs() < 1e-6);
+            let (s0, s1) = place(&fb, 2400.0, 1000.0 - k * fa.at(0.0), k);
             assert!((s0 - 1020.0).abs() < 1e-3, "b starts 20 s into a: {s0}");
             assert!((s1 - s0 - 2400.0 - 0.6).abs() < 0.01, "ends {} s after start + length", s1 - s0 - 2400.0);
             assert!(fits.leftover.iter().all(|d| d.abs() < 1e-3), "{:?}", fits.leftover);
@@ -2250,18 +2692,76 @@ mod tests {
     /// time, and every row's end moves by that same speed.
     #[test]
     fn an_anchor_end_scales_every_row() {
-        let fits = fit_groups(&slow_links(), &["a".to_string()].into());
+        let fits = fit_groups(&slow_links(), &["a".to_string()].into(), &BTreeMap::new());
         let (fa, fb) = (fits.clocks["a"], fits.clocks["b"]);
-        let (len_a, len_b, at) = (3000.0, 2400.0, 5000.0);
-        let k = (len_a + 0.4) / len_a;
-        assert_eq!(place(&fa, len_a, at, k).1, at + len_a + 0.4, "the anchor ends at its wired end");
-        let (plain, real) = (place(&fb, len_b, at, 1.0), place(&fb, len_b, at, k));
-        let grew = |x: (f64, f64)| x.1 - x.0;
-        assert!((grew(real) / grew(plain) - k).abs() < 1e-12, "b's length grows by the anchor's speed");
-        assert!((real.0 - at - 20.0 * k).abs() < 1e-3, "and its start moves with the anchor's seconds");
-        let (pa, _) = speed_ppm(&fa, k);
-        let (pb, _) = speed_ppm(&fb, k);
+        let (len_a, len_b, meta) = (3000.0, 2400.0, 5000.0);
+        let q = (len_a + 0.4) / len_a;
+        // Real seconds per second of the average clock, and where its 0 is.
+        let k = q / (1.0 + fa.rate);
+        let at = meta - k * fa.at(0.0);
+        let (s_a, e_a) = place(&fa, len_a, at, k);
+        assert!((s_a - meta).abs() < 1e-9 && (e_a - meta - len_a - 0.4).abs() < 1e-6, "the anchor ends at its wired end: {s_a} {e_a}");
+        let (s_b, e_b) = place(&fb, len_b, at, k);
+        assert!((s_b - meta - 20.0 * q).abs() < 1e-3, "b starts 20 of a's seconds in, at a's real speed: {}", s_b - meta);
+        assert!((e_b - s_b - len_b * q / (1.0 - 250e-6)).abs() < 1e-3, "b's length grows by a's speed and its own");
+        let ((pa, _), (pb, _)) = (speed_ppm(&fa, k), speed_ppm(&fb, k));
         assert!((pa + 133.3).abs() < 0.1 && (pb - pa + 250.0).abs() < 1.0, "real speeds {pa} {pb}");
+    }
+
+    /// Two files of one phone share its drift: a 40 s clip linked once takes the drift its phone's
+    /// hour-long file measured.
+    #[test]
+    fn files_of_one_phone_share_a_drift() {
+        let mut links = slow_links();
+        links.push(Link { a: "a".into(), t_a: 2900.0, b: "clip".into(), t_b: 10.0, error_s: 0.005, from: String::new(), enabled: true });
+        let refs: BTreeSet<String> = ["a".to_string()].into();
+        let alone = fit_groups(&links, &refs, &BTreeMap::new());
+        let phone: BTreeMap<String, String> = [("b".to_string(), "Pixel".to_string()), ("clip".to_string(), "Pixel".to_string())].into();
+        let shared = fit_groups(&links, &refs, &phone);
+        let p = |f: &Fits, c: &str| speed_ppm(&f.clocks[c], 1.0).0;
+        assert!((p(&shared, "clip") - p(&shared, "b")).abs() < 1e-6, "one drift: {} {}", p(&shared, "clip"), p(&shared, "b"));
+        assert!((p(&shared, "b") + 125.0).abs() < 1.0, "one vote for the phone: {}", p(&shared, "b"));
+        assert!((p(&alone, "clip") - p(&alone, "b")).abs() > 50.0, "alone the clip has no drift of its own measured: {} {}", p(&alone, "clip"), p(&alone, "b"));
+        // Each keeps its own start: the clip's 10 s is a's 2900 s.
+        let on_a = corroborate::clock::read_in(&shared.clocks["clip"], &shared.clocks["a"]).at(10.0);
+        assert!((on_a - 2900.0).abs() < 1e-3, "{on_a}");
+    }
+
+    /// The average anchor: one vote per phone, each weighted by its ±, and every stamp counts, one
+    /// 12 years off too.
+    #[test]
+    fn the_average_counts_every_stamp_once_per_phone() {
+        let v = |p: &str, at: f64, e: f64| (p.to_string(), at, e);
+        // Phone A's two stamps make one vote, 101 ± 1; B says 110 ± 1; C's clock is 12 years off.
+        let off = 12.0 * YEAR;
+        let avg = stamp_average(&[v("A", 100.0, 1.0), v("A", 102.0, 1.0), v("B", 110.0, 1.0), v("C", 100.0 + off, 1.0)]).unwrap();
+        assert_eq!(avg.phones, 3);
+        assert!((avg.at - (101.0 + 110.0 + 100.0 + off) / 3.0).abs() < 1e-3, "{}", avg.at);
+        assert!(avg.error > off / 4.0, "the spread shows in the error: {}", avg.error);
+        // A sure stamp counts more than a vague one.
+        let w = stamp_average(&[v("A", 0.0, 1.0), v("B", 10.0, 3.0)]).unwrap();
+        assert!((w.at - 1.0).abs() < 1e-9, "{}", w.at);
+        // One phone alone: its stamps' ± (the spread of one vote is none).
+        let one = stamp_average(&[v("A", 50.0, 2.0)]).unwrap();
+        assert_eq!((one.at, one.error, one.phones), (50.0, 2.0, 1));
+        assert!(stamp_average(&[]).is_none());
+    }
+
+    #[test]
+    fn drifts_read_in_seconds_an_hour() {
+        assert_eq!(drift_text(-250.0), "-0.90");
+        assert_eq!(drift_text(0.4), "0");
+        assert_eq!(drift_text(5000.0), "+18.0");
+        assert!(scale_words(-250.0).contains("×0.9997500") && scale_words(-250.0).contains("×1.0002501"), "{}", scale_words(-250.0));
+    }
+
+    #[test]
+    fn a_phone_is_suggested_from_its_tags() {
+        let t = |k: &str, v: &str| (format!("format.tags.{k}"), v.to_string());
+        assert_eq!(phone_hint(&[t("com.apple.quicktime.make", "Apple"), t("com.apple.quicktime.model", "iPhone 12")]), "Apple iPhone 12");
+        assert_eq!(phone_hint(&[t("com.android.manufacturer", "Samsung"), t("com.android.model", "Samsung SM-G991B")]), "Samsung SM-G991B");
+        assert_eq!(phone_hint(&[t("title", "gig"), ("make".into(), "x".into())]), "");
+        assert_eq!(phone_color("Pixel 7"), phone_color("Pixel 7"));
     }
 
     #[test]
@@ -2272,7 +2772,6 @@ mod tests {
         assert!(green.g() > green.r() && red.r() > 2 * red.g(), "{green:?} {red:?}");
         assert_eq!(ms_text(0.0472), "+47 ms");
         assert_eq!(ms_text(-0.0001), "0 ms");
-        assert_eq!((ppm_text(-0.2), ppm_text(-23.4)), ("0".to_string(), "-23".to_string()));
         assert_eq!(ms_text(-1.3), "-1.30 s");
     }
 

@@ -213,26 +213,32 @@ pub fn fit(anchors: &[Anchor], links: &[Link]) -> Clocks {
     solve_inner(anchors, links, &BTreeMap::new(), false)
 }
 
-/// Each group of linked clocks fitted from `links` and read in the seconds of its reference clock
-/// (the one in `refs` it holds, else its first by id): moment t on a clock is `at(t)` on its
-/// reference, whose own fit is t itself, so the reference counts as running true. Every clock's
-/// speed has the same prior (±`RATE_PRIOR` against real time, as in `solve`), so the reference is
-/// not favoured: holding it still instead, and pulling the others toward its speed, placed Jiku
-/// GT_090912's starts 21 ms off the truth (median, 168 ms for 95 %) against 4 ms (25 ms). The
-/// errors are each clock's against its reference, from a fit with the reference held still. Also
-/// each link's leftover: how far apart its two moments land, seconds (NaN off the fit).
-pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>) -> (BTreeMap<ClockId, Fit>, Vec<f64>) {
+/// Each group of linked clocks fitted from `links`, in the seconds of the group's average clock:
+/// every clock's speed has the same prior (±`RATE_PRIOR` against real time, as in `solve`), so
+/// the fit puts the group's speeds around 0, one vote per speed, each weighted by how well the
+/// links measure it, none dropped. Clocks with the same `device` (files of one phone) share one
+/// speed: one vote. Holding one clock still instead, and pulling the others toward its speed,
+/// placed Jiku GT_090912's starts 21 ms off the truth (median, 168 ms for 95 %) against 4 ms
+/// (25 ms), read in that clock's seconds.
+///
+/// Moment t on a clock is `at(t)` seconds of the average clock from the start (moment 0) of the
+/// group's reference clock (the one in `refs` it holds, else its first by id); `read_in` reads a
+/// fit in another clock's seconds. The errors are each clock's against the reference, from a fit
+/// with the reference held still. Also each link's leftover: how far apart its two moments land,
+/// seconds (NaN off the fit).
+pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>, device: &BTreeMap<ClockId, String>) -> (BTreeMap<ClockId, Fit>, Vec<f64>) {
     // The reference held still: the solve measures a relative group against its first clock by
     // id, so the reference is named to sort first. This gives the groups and the errors.
     let name = |c: &str| if refs.contains(c) { format!("0{c}") } else { format!("1{c}") };
     let renamed: Vec<Link> = links.iter().map(|l| Link { a: name(&l.a), b: name(&l.b), ..l.clone() }).collect();
-    let held = fit(&[], &renamed);
+    let renamed_device: BTreeMap<ClockId, String> = device.iter().map(|(c, d)| (name(c), d.clone())).collect();
+    let held = solve_inner(&[], &renamed, &renamed_device, false);
     let ref_of: BTreeMap<ClockId, ClockId> = held.clocks.iter().map(|(k, c)| (k[1..].to_string(), c.group[1..].to_string())).collect();
-    // Every clock alike, each group anchored on its reference (where does not matter: it is read
-    // back in the reference's seconds). This gives the values.
+    // Every clock alike, each group anchored on its reference (where does not matter: it is
+    // measured from the reference's start). This gives the values.
     let roots: BTreeSet<&ClockId> = ref_of.values().collect();
     let anchors: Vec<Anchor> = roots.iter().map(|c| Anchor { clock: (*c).clone(), t: 0.0, utc: 0.0, error_s: 1.0, from: String::new(), enabled: true }).collect();
-    let alike = fit(&anchors, links);
+    let alike = solve_inner(&anchors, links, device, false);
     let mut out = BTreeMap::new();
     for (c, f) in &ref_of {
         let (gc, gf) = (alike.get(c).fit, alike.get(f).fit);
@@ -240,8 +246,7 @@ pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>) -> (BTreeMap<ClockI
         if !gc.offset.is_finite() || !gf.offset.is_finite() {
             continue;
         }
-        let at = gf.back(gc.at(gc.center));
-        let fit = if c == f { ZERO } else { Fit { offset: at - gc.center, rate: (1.0 + gc.rate) / (1.0 + gf.rate) - 1.0, center: gc.center, var_offset: err.var_offset, var_rate: err.var_rate, cov: err.cov } };
+        let fit = Fit { offset: gc.offset - gf.at(0.0), var_offset: err.var_offset, var_rate: err.var_rate, cov: err.cov, ..gc };
         out.insert(c.clone(), fit);
     }
     let leftover = links
@@ -252,6 +257,12 @@ pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>) -> (BTreeMap<ClockI
         })
         .collect();
     (out, leftover)
+}
+
+/// Fit `c` read in the seconds of clock `r` (both fitted to one time): moment t on `c` is moment
+/// `at(t)` on `r`. Keeps `c`'s errors.
+pub fn read_in(c: &Fit, r: &Fit) -> Fit {
+    Fit { offset: r.back(c.at(c.center)) - c.center, rate: (1.0 + c.rate) / (1.0 + r.rate) - 1.0, ..*c }
 }
 
 /// As `solve`, but clocks with the same `device` run at one speed (each keeps its own offset).

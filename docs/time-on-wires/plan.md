@@ -251,6 +251,30 @@ Tests:
 
 From the interview of 2026-11-11, after stage 3. It's all inside Audio match; nothing is global.
 
+Done 2026-11-11. Differences from the plan below:
+- `clock::fit_against` now gives each clock in the group's average clock, measured from the
+  reference recording's start, with the phone ids as its device map (`clock::read_in` reads a fit
+  in another clock's seconds). Every row's drift is then against the average, or against the
+  speed reference (real seconds per average second = 1 ÷ its clock's), or against real time from
+  the anchor's wired end. On Jiku GT_090912 the per-group fit now puts every start where the global
+  solve does in real seconds as well (both make the average clock run true): 177 ms off the truth
+  (median, 405 ms for 95 %) from references up to 900 s away, against 280 ms with the reference's
+  clock running true.
+- After a run an unanchored group sits at the same average the button anchors on (each phone's
+  vote weighted by ±), not at the plain mean of the bars' middles. The button then moves it only
+  when it was dragged.
+- The average's error is the larger of the votes' weighted spread ÷ √phones and what their ±
+  give: one phone alone has no spread, and its stamps' ± stays.
+- A phone's vote is its stamps' weighted mean, with their typical ± (not shrunk by their number:
+  one phone's stamps share its clock's error).
+- The fit's errors are still each clock's against the reference recording (the anchor's, else the
+  speed reference's, else the longest). Proper error margins remain the later job.
+- The speed reference button is a clock face on the row's audio swatch (beside the name on thin
+  rows); the average anchor is an anchor with a bar over it beside the group's number.
+- The suggestion is taken with Enter in the empty field. The result file gives per row its phone,
+  its anchor, whether it is the speed reference, and its drift (s/h, error, clock speed, against
+  what); ppm is gone from it too.
+
 What stage 3 left open:
 - the anchor's file was taken as perfect;
 - a dragged group could not get back to its average;

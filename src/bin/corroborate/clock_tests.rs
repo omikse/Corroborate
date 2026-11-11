@@ -277,7 +277,7 @@ fn not_comparable_and_the_result_file() {
 /// both clocks, and the node's own fit puts b's 10 s at a's 30.5 s, in one group. A third file, a
 /// quieter copy of a, is marked the same recording as a (and b is not); a and its copy's links
 /// span 45 s, enough for their drift (none). The anchor's end wired 0.4 s past start + length
-/// moves every end by the anchor's real speed. PNGs audio_match_stretch and audio_match_marks.
+/// moves every end by the anchor's real speed. PNGs audio_match_drift and audio_match_marks.
 #[test]
 fn audio_match_links_two_recordings() {
     let ev = corroborate::synth::notes(90.0, 8000, 11);
@@ -335,7 +335,7 @@ fn audio_match_links_two_recordings() {
     d.app().wire(v, "value", m, "time 1");
     d.frames(3);
     let Ok(Data::Time { utc: Some(free_b), source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no unanchored time out of row 2") };
-    assert!((free_b - 1020.5).abs() < 0.01 && source.contains("average of metadata"), "{free_b} {source}");
+    assert!((free_b - 1020.5).abs() < 0.01 && source.contains("unanchored: the average of 1 phone's stamps"), "{free_b} {source}");
     let len_b = d.app().match_view(m).rows[1].len;
     let Ok(Data::Time { utc: Some(end_b), .. }) = d.app().value_from(m, "end 2") else { panic!("no end time out of row 2") };
     assert!((end_b - free_b - len_b).abs() < 1e-6, "the end is the start plus the length");
@@ -408,18 +408,19 @@ fn audio_match_links_two_recordings() {
     assert!(d.app().nodes[m].kind.rows().iter().any(|(k, v)| k == "order" && v == "group-off"), "the order is kept");
     assert_eq!(d.app().match_ui.slots[&m][..3], [0, 2, 1], "the anchor, then 2 s off, then 2.5 s off");
     d.shot("audio_match_by_how_far_off");
-    // The Stretch column: the anchor is the reference; the others' speeds against it, near 0.
-    use crate::audio_match_node::{stretch, Stretch};
-    assert_eq!(stretch(&view, 0), Stretch::Reference(None));
-    for k in [1, 2] {
-        let Stretch::Speed(ppm, _, None) = stretch(&view, k) else { panic!("row {}: {:?}", k + 1, stretch(&view, k)) };
+    // The Drift column: every row's drift against the group's average clock, the anchor's too,
+    // near 0.
+    use crate::audio_match_node::{drift_cell, DriftCell, DriftFrom};
+    assert_eq!(view.groups[view.rows[0].group].drift, DriftFrom::Average);
+    for k in [0, 1, 2] {
+        let DriftCell::Speed(ppm, _, None) = drift_cell(&view, k) else { panic!("row {}: {:?}", k + 1, drift_cell(&view, k)) };
         assert!(ppm.abs() < 300.0, "row {}: {ppm} ppm", k + 1);
     }
     let Ok(Data::Time { source, .. }) = d.app().value_from(m, "end 2") else { panic!("no end out of row 2") };
-    assert!(source.contains("measured speed") && source.contains("fitted on"), "{source}");
-    d.shot("audio_match_stretch");
+    assert!(source.contains("measured drift") && source.contains("s/h against the group's average clock") && source.contains("fitted on"), "{source}");
+    d.shot("audio_match_drift");
     // The anchor's end wired 0.4 s past start + length: its clock runs slow against real time, so
-    // every row's seconds are longer, and the anchor's Stretch cell says its speed came from there.
+    // every row's seconds are longer, and the anchor's Drift cell gives its real drift.
     let (len_a, (s2, e2)) = {
         let v = d.app().match_view(m);
         (v.rows[0].len, (v.rows[1].start.unwrap(), v.rows[1].end.unwrap()))
@@ -429,14 +430,70 @@ fn audio_match_links_two_recordings() {
     d.frames(3);
     let view = d.app().match_view(m);
     let k = (len_a + 0.4) / len_a;
-    let Stretch::Reference(Some(real)) = stretch(&view, 0) else { panic!("{:?}", stretch(&view, 0)) };
-    assert!((real - (1.0 / k - 1.0) * 1e6).abs() < 1.0, "the anchor runs {real} ppm against real time");
+    assert_eq!(view.groups[view.rows[0].group].drift, DriftFrom::AnchorEnd(0));
+    let DriftCell::Speed(real, _, Some(wired)) = drift_cell(&view, 0) else { panic!("{:?}", drift_cell(&view, 0)) };
+    assert!((real - (1.0 / k - 1.0) * 1e6).abs() < 1.0 && wired.abs() < 1e-6, "the anchor runs {real} ppm against real time, its end on its wired end");
+    // Every row's seconds grow by one factor, the anchor's real speed against the average clock.
     let (s2k, e2k) = (view.rows[1].start.unwrap(), view.rows[1].end.unwrap());
-    assert!(((s2k - 1000.0) - k * (s2 - 1000.0)).abs() < 1e-6 && ((e2k - s2k) - k * (e2 - s2)).abs() < 1e-6, "row 2 moves by the same speed: {s2} {e2} -> {s2k} {e2k}");
+    let grew = (s2k - 1000.0) / (s2 - 1000.0);
+    assert!(((e2k - s2k) / (e2 - s2) - grew).abs() < 1e-6 && (grew / k - 1.0).abs() < 300e-6, "row 2 moves by the same speed: {s2} {e2} -> {s2k} {e2k}");
     let Ok(Data::Time { utc: Some(end1), .. }) = d.app().value_from(m, "end 1") else { panic!("no end out of row 1") };
     assert!((end1 - (1000.0 + len_a + 0.4)).abs() < 1e-6, "the anchor's end is its wired end: {end1}");
     d.shot("audio_match_anchor_end");
     d.app().graph.disconnect(m, "end in 1");
+    d.frames(2);
+
+    // Phone ids, typed on the name strips: a and its copy are one phone (one drift, one vote).
+    for k in [0, 2] {
+        let at = d.app().match_ui.phone_at[&(m, k)].center();
+        d.click_at(at.x, at.y);
+        d.h.event(egui::Event::Text("Rode".into()));
+        d.frames(1);
+        d.press(egui::Key::Enter);
+    }
+    d.frames(2);
+    let view = d.app().match_view(m);
+    assert_eq!((view.rows[0].phone.as_str(), view.rows[1].phone.as_str(), view.rows[2].phone.as_str()), ("Rode", "", "Rode"));
+    assert!(d.app().changes.last().unwrap().name.starts_with("phone of"), "logged");
+    assert!(d.app().project_text().contains("phone "), "kept with the project");
+    let (p0, p2) = (view.rows[0].speed.unwrap().0, view.rows[2].speed.unwrap().0);
+    assert!((p0 - p2).abs() < 1e-6, "one phone, one drift: {p0} {p2}");
+    d.shot("audio_match_phones");
+    // The average anchor on the group's tab: it takes the place of row 1's anchor. Each phone
+    // votes once for where a starts: Rode with a (1000 ± 2) and its copy (998 ± 1), 998.4 ± 1.26;
+    // b's stamp, 20.5 s after a, says 1002.5 ± 1.
+    let gi = view.rows[0].group;
+    d.app().toggle_average(m, gi);
+    d.frames(3);
+    let view = d.app().match_view(m);
+    let g = &view.groups[gi];
+    let avg = g.average.expect("anchored on the average");
+    assert!(g.anchor.is_none() && avg.phones == 2, "{g:?}");
+    let want = (998.4 / 1.6 + 1002.5) / (1.0 / 1.6 + 1.0);
+    assert!((view.rows[0].start.unwrap() - want).abs() < 0.01, "a starts at the phones' average: {} against {want}", view.rows[0].start.unwrap());
+    let Ok(Data::Time { source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time out of row 2") };
+    assert!(source.contains("anchored on the average of 2 phones' stamps"), "{source}");
+    assert!(view.anchored(&view.rows[1]), "the outputs carry the anchor mark");
+    assert!(d.app().changes.last().unwrap().new.contains("average"), "logged");
+    d.shot("audio_match_average");
+    // Row 1's anchor takes the average's place again.
+    d.app().toggle_anchor(m, 0);
+    d.frames(2);
+    let view = d.app().match_view(m);
+    assert!(view.groups[gi].average.is_none() && view.groups[gi].anchor == Some(0));
+    // The speed reference: b's clock runs true; the others are measured against it.
+    d.app().toggle_speed_ref(m, 1);
+    d.frames(3);
+    let view = d.app().match_view(m);
+    assert_eq!(view.groups[gi].drift, DriftFrom::File(1));
+    assert_eq!(drift_cell(&view, 1), DriftCell::True);
+    assert!(view.rows[1].speed.unwrap().0.abs() < 1e-6);
+    let Ok(Data::Time { source, .. }) = d.app().value_from(m, "end 1") else { panic!("no end out of row 1") };
+    assert!(source.contains("(speed reference)"), "{source}");
+    d.shot("audio_match_speed_reference");
+    d.app().toggle_speed_ref(m, 1);
+    d.frames(2);
+    assert_eq!(d.app().match_view(m).groups[gi].drift, DriftFrom::Average);
     d.app().graph.disconnect(m, "time 2");
     d.app().graph.disconnect(m, "time 3");
     d.app().toggle_anchor(m, 0);
@@ -469,11 +526,11 @@ fn audio_match_links_two_recordings() {
     assert!(app.value_from(m, "gaps").is_err() && app.value_from(m, "quality").is_err(), "the outputs went");
     assert!(view.leftover.is_some_and(|l| l < 0.05), "{:?}", view.leftover);
     // The node's own fit: b's 10 s is a's 30.5 s.
-    let fits = crate::audio_match_node::fit_groups(&found.links, &[ua.clone()].into());
-    let on_a = fits.clocks[&ub].at(10.0);
+    let fits = crate::audio_match_node::fit_groups(&found.links, &[ua.clone()].into(), &Default::default());
+    let on_a = corroborate::clock::read_in(&fits.clocks[&ub], &fits.clocks[&ua]).at(10.0);
     assert!((on_a - 30.5).abs() < 0.002, "b's 10 s is a's {on_a}");
     let json = crate::audio_match_node::json(app, m);
-    assert!(json.contains("\"same_recording\":[") && json.contains("\"leftover_s\""), "{json}");
+    assert!(json.contains("\"same_recording\":[") && json.contains("\"leftover_s\"") && json.contains("\"s_per_h\":") && json.contains("\"clock_speed\":"), "{json}");
     app.stop_all();
     d.frames(2);
     d.shot("audio_match_marks");
@@ -1197,19 +1254,18 @@ fn audio_match_timeline() {
     }
     assert!(d.app().ev.clocks.contradictions.is_empty(), "{:?}", d.app().ev.clocks.contradictions.len());
     for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
-        println!("{:28} {:?} {:?}", x.name, cell(&v, k).0, crate::audio_match_node::stretch(&v, k));
+        println!("{:28} {:?} {:?}", x.name, cell(&v, k).0, crate::audio_match_node::drift_cell(&v, k));
     }
-    // The node's own fit of its group against the global clock solve: each row's start, in the
-    // anchor's seconds. (In real seconds they differ by the anchor's own speed: the node counts
-    // the anchor's clock as running true, the global solve the group's average.)
+    // The node's own fit of its group against the global clock solve: each row's start from the
+    // anchor's, in real seconds. Both count the group's average clock as running true.
     let a = v.groups.iter().find_map(|g| g.anchor).expect("anchored");
     let meta_a = v.rows[a].meta.unwrap();
     let ga = d.app().ev.clocks.get(v.rows[a].clock.as_deref().unwrap());
     let mut worst = 0.0f64;
     for r in v.rows.iter().filter(|r| r.wired) {
         let gr = d.app().ev.clocks.get(r.clock.as_deref().unwrap());
-        let (own, global) = (r.start.unwrap() - meta_a, ga.back(gr.at(0.0)));
-        println!("{:28} {:?} own fit {own:+.4} s, global {global:+.4} s from the anchor's start, in its seconds: {:+.3} ms", r.name, crate::audio_match_node::stretch(&v, v.rows.iter().position(|x| x.n == r.n).unwrap()), (own - global) * 1000.0);
+        let (own, global) = (r.start.unwrap() - meta_a, gr.at(0.0) - ga.at(0.0));
+        println!("{:28} {:?} own fit {own:+.4} s, global {global:+.4} s from the anchor's start: {:+.3} ms", r.name, crate::audio_match_node::drift_cell(&v, v.rows.iter().position(|x| x.n == r.n).unwrap()), (own - global) * 1000.0);
         worst = worst.max((own - global).abs());
     }
     println!("per-group fit against the global solve: worst {:.3} ms, median leftover {:.2} ms", worst * 1000.0, v.leftover.unwrap_or(f64::NAN) * 1000.0);
