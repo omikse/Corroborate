@@ -45,8 +45,10 @@ td{padding:4px 8px;height:30px;border-top:1px solid #30343a;white-space:nowrap;o
 td.placed{white-space:normal;line-height:1.3;font-size:11.5px}
 td.n{color:var(--dim);font-family:var(--mono);width:34px;padding-left:12px}
 td.m{font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.cues{white-space:normal;line-height:1.9}
 td.cues span{display:inline-block;font:10px var(--mono);padding:1px 5px;margin-right:3px;border-radius:2px;background:#33373e;color:var(--dim)}
 td.cues span.on{background:#4a2c2b;color:#f0b0ae}
+td.cues span.cf{background:#2c3a4a;color:#a9c8f0}
 td.placed.bad{color:var(--cut)}
 td.placed.none{color:var(--faint)}
 tr{position:relative}
@@ -83,7 +85,7 @@ td.ports{width:70px;position:relative}
 <h2>The node</h2>
 <div class="stage">
 <div class="node" id="node">
-  <div class="title"><span>Cut detector</span><span class="kind">Detectors · edited.mp4 · 2:00.0 · 30 frames/s · hum 50 Hz</span></div>
+  <div class="title"><span>Cut detector</span><span class="kind">Detectors · edited.mp4 · 2:00.0 · 30 frames/s</span></div>
   <div class="ins" id="ins"></div>
   <div class="sec">
     <div class="lbl">the file, its cues and its cuts</div>
@@ -110,11 +112,12 @@ td.ports{width:70px;position:relative}
   <span><span class="chip" style="background:var(--video)"></span>video</span>
   <span><span class="chip" style="background:var(--time)"></span>time</span>
   <span><span class="chip" style="background:var(--event)"></span>event</span>
+  <span><span class="chip" style="background:#2c3a4a"></span>confirmed by an event</span>
 </section>
 
 <section class="notes">
-  <div class="note"><h3>Jump cuts need sound</h3><p>At 0:47.0 four seconds are gone from one camera position: the picture barely changes (scdet 4, under 10). The hum's frequency steps and phone 2's lag jumps, so the cut is still found.</p></div>
-  <div class="note"><h3>Hum phase can be blind</h3><p>126 frames at 30/s are 4.2 s, exactly 210 cycles of 50 Hz: the phase does not move. At 25 frames/s every frame is 2 cycles, so any frame-exact cut leaves 50 Hz phase unchanged. The hum lane says which of phase or frequency fired.</p></div>
+  <div class="note"><h3>Jump cuts need sound</h3><p>At 0:47.0 four seconds are gone from one camera position: the picture barely changes (scdet 4, under 10). Phone 2's lag jumps by −49.2 s, so the cut is still found, and an event wired in confirms it.</p></div>
+  <div class="note"><h3>Events confirm, they don't cut</h3><p>Any node's event output can be wired in: single moments with an error. One near a cut shows as a blue "+" chip in the table. The event at 0:33.0 has no cue beside it, so it stays a mark; click there to cut by hand.</p></div>
   <div class="note"><h3>A flash is not a cut</h3><p>0:60.2 crosses the picture threshold (27) and nothing else agrees. It was switched off by hand; switch it on and piece 3 splits into two that land side by side.</p></div>
   <div class="note"><h3>Not placed is shown, not hidden</h3><p>Piece 4 overlaps no other recording and its hum is too weak for the grid log, so it keeps its as-played time and says so. Turn off the cut at 0:22.4 and piece 1 spans a cut: Audio match then sees its lag jump inside.</p></div>
 </section>
@@ -146,13 +149,12 @@ const noise = (lo, hi) => Array.from({length: DUR}, (_, i) => ({t: i + 0.5, v: l
 
 const LANES = [
   {id: 'pic', name: 'picture', unit: 'scdet', max: 50, thr: 10, vals: {22.4: 38, 47.0: 4, 60.2: 27, 71.6: 31, 95.3: 6}, bg: noise(0.4, 3.5)},
-  {id: 'snd', name: 'sound level', unit: 'dB step', max: 12, thr: 4, vals: {22.4: 9, 47.0: 1.2, 60.2: 0.4, 71.6: 6, 95.3: 2}, bg: noise(0.1, 1.4)},
-  {id: 'hum', name: 'hum (ENF edits)', unit: 'σ', max: 8, thr: 3, vals: {22.4: 2, 47.0: 6.5, 60.2: 0.3, 71.6: 4, 95.3: 5.5}, bg: noise(0.1, 1.1),
-   why: {22.4: 'hum weak here', 47.0: 'frequency step 4 mHz, phase 0° (210 whole cycles)', 71.6: 'phase jump 120°', 95.3: 'phase jump 240°, frequency step 2 mHz'}},
+  {id: 'snd', name: 'sound level', unit: 'dB step', max: 12, thr: 4, vals: {22.4: 9, 47.0: 1.2, 60.2: 0.4, 71.6: 6, 95.3: 5}, bg: noise(0.1, 1.4)},
   {id: 'key', name: 'keyframes, gaps', kind: 'binary', vals: {22.4: 1, 71.6: 1},
    why: {22.4: 'keyframe off the 2 s rhythm', 71.6: 'keyframe off the 2 s rhythm'}},
   {id: 'p2', name: 'vs phone 2', kind: 'cmp', cover: [[0, 71.6]], jumps: [{t: 22.4, label: '+28.8 s'}, {t: 47.0, label: '−49.2 s'}]},
   {id: 'p3', name: 'vs phone 3', kind: 'cmp', cover: [[31.2, 47.0], [95.3, 120]], jumps: [{t0: 47.0, t1: 95.3, label: '−36.3 s, somewhere in here'}]},
+  {id: 'ev', name: 'events 1', kind: 'events', marks: [{t: 33.0, err: 0.5}, {t: 47.1, err: 0.5}, {t: 71.5, err: 0.5}, {t: 95.3, err: 0.5}]},
 ];
 const CANDS = [22.4, 47.0, 60.2, 71.6, 95.3];
 // state per cut: 'auto' (follows thresholds), 'on', 'off', 'hand'
@@ -160,6 +162,10 @@ const state = new Map(CANDS.map(t => [t, 'auto']));
 state.set(60.2, 'off');
 
 function cue(lane, t) {
+  if (lane.kind === 'events') {
+    const m = lane.marks.find(m => Math.abs(m.t - t) <= m.err + 1 / FPS);
+    return {pass: false, confirm: !!m, text: m ? `confirms: event at ${mmss(m.t)} ± ${m.err} s` : 'no event here'};
+  }
   if (lane.kind === 'binary') return {pass: !!lane.vals[t], text: lane.vals[t] ? lane.why[t] : '—'};
   if (lane.kind === 'cmp') {
     const j = lane.jumps.find(j => j.t !== undefined && Math.abs(j.t - t) < 0.3);
@@ -180,11 +186,12 @@ const cuts = () => [...state.keys()].filter(accepted).sort((a, b) => a - b);
 // ---------- inputs ----------
 const INS = [
   ['audio', 'edited.mp4', '--audio'], ['video', 'edited.mp4', '--video'], ['time', '20:41:10.000 ± 1.0 s (file)', '--time'],
-  ['compare with', 'phone 2', '--audio'], ['compare with', 'phone 3', '--audio'], ['cues', 'ENF (power hum) · edits', '--event'],
+  ['compare with', 'phone 2', '--audio'], ['compare with', 'phone 3', '--audio'], ['events 1', 'Another node · events', '--event'],
 ];
 document.getElementById('ins').innerHTML = INS.map(([n, from, c]) =>
   `<div class="in"><span class="wire" style="background:var(${c})"></span><span class="port" style="border-color:var(${c});background:var(${c})"></span>${n} <b>${from}</b></div>`).join('') +
-  `<div class="in"><span class="port" style="border-style:dashed"></span><span style="color:var(--faint)">compare with (free)</span></div>`;
+  `<div class="in"><span class="port" style="border-style:dashed"></span><span style="color:var(--faint)">compare with (free)</span></div>` +
+  `<div class="in"><span class="port" style="border-style:dashed"></span><span style="color:var(--faint)">events (free)</span></div>`;
 
 // ---------- the plot ----------
 const svg = document.getElementById('plot');
@@ -240,6 +247,12 @@ function drawLanes() {
       const h = el('path', {d: `M${L + W + 2} ${ty}l9 -5v10z`, fill: '#8a9099', style: 'cursor:ns-resize'}, laneG);
       h.dataset.lane = i;
       el('text', {x: L + W - 4, y: ty - 3, fill: '#8a9099', 'font-size': 9, 'text-anchor': 'end'}, laneG).textContent = `${l.thr.toFixed(l.max < 20 ? 1 : 0)} ${l.unit}`;
+    } else if (l.kind === 'events') {
+      for (const m of l.marks) {
+        el('line', {x1: X(m.t - m.err), x2: X(m.t + m.err), y1: base - 10, y2: base - 10, stroke: '#7aa7e0', 'stroke-width': 1}, laneG);
+        el('path', {d: `M${X(m.t)} ${base - 16}l5 6l-5 6l-5 -6z`, fill: '#e07a6a'}, laneG);
+      }
+      el('text', {x: L + W - 4, y: y0 + 13, fill: '#565c66', 'font-size': 9, 'text-anchor': 'end'}, laneG).textContent = 'single moments ± error, confirm only';
     } else if (l.kind === 'binary') {
       for (let t = 0; t < DUR; t += 2) el('line', {x1: X(t), x2: X(t), y1: base, y2: base - 6, stroke: '#4a4f58'}, laneG);
       for (const t of Object.keys(l.vals)) el('path', {d: `M${X(+t)} ${base - hmax}l5 9h-10z`, fill: '#e0524f'}, laneG);
@@ -292,13 +305,14 @@ function pieces() {
 function drawTable() {
   const ps = pieces();
   const tbl = document.getElementById('pieces');
-  tbl.innerHTML = `<colgroup><col style="width:46px"><col style="width:140px"><col style="width:62px"><col style="width:200px"><col style="width:140px"><col><col style="width:84px"></colgroup><tr><th>#</th><th>in the file</th><th>length</th><th>cut before it</th><th>time out, as played</th><th>placed</th><th style="text-align:right">out</th></tr>` +
+  tbl.innerHTML = `<colgroup><col style="width:46px"><col style="width:120px"><col style="width:62px"><col style="width:230px"><col style="width:140px"><col><col style="width:84px"></colgroup><tr><th>#</th><th>in the file</th><th>length</th><th>cut before it</th><th>time out, as played</th><th>placed</th><th style="text-align:right">out</th></tr>` +
     ps.map(p => {
       let cues = '<span>start of file</span>';
       if (p.before !== null) {
         const s = state.get(p.before);
         cues = s === 'hand' ? '<span class="on">by hand</span>' :
-          LANES.map(l => cue(l, p.before).pass ? `<span class="on">${l.id === 'pic' ? 'picture' : l.id === 'snd' ? 'sound' : l.id === 'hum' ? 'hum' : l.id === 'key' ? 'keyframe' : l.name.replace('vs ', '')}</span>` : '').join('') || '<span class="on">your click</span>';
+          (LANES.map(l => { const q = cue(l, p.before), nm = l.id === 'pic' ? 'picture' : l.id === 'snd' ? 'sound' : l.id === 'key' ? 'keyframe' : l.name.replace('vs ', '');
+            return q.pass ? `<span class="on">${nm}</span>` : q.confirm ? `<span class="cf">+ ${nm}</span>` : ''; }).join('') || '<span class="on">your click</span>');
       }
       const cls = p.place.bad ? 'bad' : p.place.none ? 'none' : '';
       return `<tr><td class="n"><span class="chip" style="background:hsl(${p.hue} 22% 40%)"></span>${p.n}</td>
@@ -360,7 +374,7 @@ svg.addEventListener('pointermove', e => {
   if (c !== undefined) {
     const t = +c, s = state.get(t);
     const lines = s === 'hand' ? ['cut by hand (click removes it)'] :
-      LANES.map(l => { const q = cue(l, t); return `${q.pass ? '✓' : '·'} ${l.name.padEnd(22)} ${q.text}`; });
+      LANES.map(l => { const q = cue(l, t); return `${q.pass ? '✓' : q.confirm ? '+' : '·'} ${l.name.padEnd(22)} ${q.text}`; });
     const head = `${mmss(t)}  frame ${Math.round(t * FPS)}  ` + (accepted(t) ? (s === 'on' ? 'on (your click)' : s === 'hand' ? '' : 'cut') : s === 'off' ? 'off (your click)' : 'no cue over threshold');
     tip.textContent = head + '\n' + lines.join('\n');
     tip.style.display = 'block'; tip.style.left = Math.min(e.clientX + 14, innerWidth - 370) + 'px'; tip.style.top = e.clientY + 14 + 'px';
@@ -404,8 +418,8 @@ const A = '#e0a458', V = '#e0c85a', Ti = '#7aa7e0', E = '#e07a6a';
 const src = box(10, 8, 150, 80, 'SOURCER · edited.mp4', [['audio', A, 'out'], ['video', V, 'out'], ['time', Ti, 'out']]);
 const p2 = box(10, 100, 150, 46, 'SOURCER · phone 2', [['audio', A, 'out']]);
 const p3 = box(10, 154, 150, 46, 'SOURCER · phone 3', [['audio', A, 'out']]);
-const enf = box(230, 210, 150, 46, 'ENF (power hum)', [['audio', A, 'in'], ['edits', E, 'out']]);
-const cd = box(430, 8, 160, 194, 'Cut detector', [['audio', A, 'in'], ['video', V, 'in'], ['time', Ti, 'in'], ['compare with', A, 'in'], ['compare with ', A, 'in'], ['cues', E, 'in'],
+const enf = box(230, 210, 150, 46, 'Another node', [['audio', A, 'in'], ['events', E, 'out']]);
+const cd = box(430, 8, 160, 194, 'Cut detector', [['audio', A, 'in'], ['video', V, 'in'], ['time', Ti, 'in'], ['compare with', A, 'in'], ['compare with ', A, 'in'], ['events 1', E, 'in'],
   ['audio 1', A, 'out'], ['time 1', Ti, 'out'], ['audio 2', A, 'out'], ['…', '#6e747c', 'out']]);
 const am = box(700, 8, 200, 194, 'Audio match', [['audio 1', A, 'in'], ['time 1', Ti, 'in'], ['audio 2', A, 'in'], ['…', '#6e747c', 'in'], ['audio 6 (phone 2)', A, 'in'], ['audio 7 (phone 3)', A, 'in'],
   ['synced 1', Ti, 'out'], ['synced 2', Ti, 'out'], ['…', '#6e747c', 'out']]);
@@ -413,7 +427,7 @@ const wire = (a, b, col) => { const dx = Math.max(30, (b[0] - a[0]) / 2);
   w('path', {d: `M${a[0]} ${a[1]}C${a[0] + dx} ${a[1]} ${b[0] - dx} ${b[1]} ${b[0]} ${b[1]}`, fill: 'none', stroke: col, 'stroke-width': 1.6, opacity: .85}); };
 wire(src.audioout, cd.audioin, A); wire(src.videoout, cd.videoin, V); wire(src.timeout, cd.timein, Ti);
 wire(p2.audioout, cd['compare within'], A); wire(p3.audioout, cd['compare with in'], A);
-wire(src.audioout, enf.audioin, A); wire(enf.editsout, cd.cuesin, E);
+wire(src.audioout, enf.audioin, A); wire(enf.eventsout, cd['events 1in'], E);
 wire(cd['audio 1out'], am['audio 1in'], A); wire(cd['time 1out'], am['time 1in'], Ti); wire(cd['audio 2out'], am['audio 2in'], A);
 for (const [k, lab] of [['audio 6 (phone 2)in', 'phone 2'], ['audio 7 (phone 3)in', 'phone 3']]) { const q = am[k];
   w('path', {d: `M${q[0] - 40} ${q[1]}H${q[0]}`, stroke: A, 'stroke-width': 1.6, 'stroke-dasharray': '3 3'}); }

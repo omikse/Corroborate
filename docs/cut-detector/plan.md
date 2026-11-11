@@ -38,9 +38,8 @@ Two rules from the graph shape the design:
   `edits` output cannot feed the same cut detector. The detector therefore compares against other
   recordings itself, with the same library calls (`audio_match`), through an input `compare with`.
   Audio match's `edits` output can then be retired (one mechanism, not two).
-- Shared technology stays in the library (module granularity). The hum phase belongs in the ENF
-  library code, and ENF's `edits` output gives its breaks as plain events, wired into the detector's
-  `cues` input, as agreed earlier.
+- Other nodes' findings come in as plain events, not as anything node-specific. The detector does
+  not know or care which node made them (decided 2026-11-12).
 
 ## What is out there (external survey)
 
@@ -76,6 +75,10 @@ The same holds for 60 Hz at 30 frames a second. In those cases only the hum freq
 stretch is long enough for the grid to drift) and the other cues can see the cut. At 30 frames a second
 with 50 Hz hum each frame is 1⅔ cycles, so the phase jumps by 240° unless a multiple of 3 frames is
 removed.
+
+Whether a hum node adds anything to the noise lane is open: the noise lane measures how loud each
+band is, so it sees the hum get louder or quieter, but not its phase or frequency stepping at the same
+loudness. Either way it reaches the detector only as plain events.
 
 ### Timestamps and stream outages
 
@@ -118,7 +121,11 @@ Inputs:
 - `time` (optional): when the recording starts.
 - `compare with` (audio, many, optional): other recordings of the same event; lag jumps against each
   are a cue lane of their own.
-- `cues` (event, many, optional): cut events from other nodes, for example ENF's `edits`.
+- `events` (event, many, optional): moments from any node that confirm cuts. Each event is a single
+  time (`t_start` only, no end), with its `error_s` as how far it may be from the cut (one frame
+  when it has none). An event confirms a cut found by a lane when it falls within that error; on its
+  own it does not make a cut, it shows as a mark you can click to cut there. Each wired input is a
+  lane of its own, named after the wire's source, with marks and no threshold.
 
 Outputs, one row per piece (grow like Audio match's rows):
 - `audio n`, `video n`, `length n`: the piece.
@@ -133,10 +140,11 @@ one clock speed.
 ### On the canvas (see the mockup)
 
 1. A filmstrip and waveform of the whole file.
-2. One lane per cue, under it, aligned in time: picture, sound level and noise, hum (from ENF's
-   events), timestamps and keyframes, and one lane per recording in `compare with`. Each cue is a mark
-   whose height is its strength; the lane's threshold is a line the user can drag.
-3. Cuts: a red line where a cue passes its threshold. A click switches a cut off (dashed grey) or puts
+2. One lane per cue, under it, aligned in time: picture, sound level, background noise, keyframes
+   and gaps, one lane per recording in `compare with`, and one per wired `events` input. A computed
+   cue is a mark whose height is its strength, and the lane's threshold is a line the user can drag;
+   an events lane has marks only.
+3. Cuts: a red line where a computed cue passes its threshold (events only confirm). A click switches a cut off (dashed grey) or puts
    one where no cue reached (a hand cut, marked as such). Hover says which cues agree and by how much.
 4. A table of pieces: number, in the file from–to, length, cues behind its start cut, and the output
    port.
@@ -148,8 +156,8 @@ one clock speed.
 1. **Picture and timestamps, by hand first.** The node with filmstrip, ffmpeg `scdet` lane, packet gaps
    and keyframes lane, freeze, black and silence marks; hand cuts; pieces out as rows. Test: a
    synthetic clip cut with ffmpeg at known frames; PySceneDetect on the same clips as the oracle.
-2. **Sound cues.** Noise level jumps (Pan 2012) and the sound level lane in the library; ENF's hum phase
-   and frequency breaks (Rodríguez 2010, Esquef 2014) as ENF's `edits` output, wired into `cues`; the
+2. **Sound cues.** Noise level jumps (Pan 2012) and the sound level lane in the library;
+   the `events` input; the
    `compare with` lane through `audio_match::gaps`, each jump then located to a fraction of a second with short GCC-PHAT (generalized cross-correlation with phase transform) windows round it (Audio match's links are 15 s apart). Retire Audio match's `edits` output. Test: Jiku
    recordings cut by a few seconds (jump cuts) with no picture change.
 3. **Pieces as one device and the placed strip.** Same phone id suggestion, one clock speed, the
