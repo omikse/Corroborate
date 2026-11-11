@@ -247,6 +247,63 @@ Tests:
 - an anchor end wired 0.4 s past start + length shifts every row's end by the same speed;
 - `drive` PNGs.
 
+### 3b · Phones, the group's average clock, and drift in s/h
+
+From the interview of 2026-11-11, after stage 3. It's all inside Audio match; nothing is global.
+
+What stage 3 left open:
+- the anchor's file was taken as perfect;
+- a dragged group could not get back to its average;
+- each file counted as its own phone;
+- speeds were shown in ppm (parts per million), a unit that means little to most people.
+
+1. **Phone id.** A free-text field on each row's name strip, beside the file name.
+   - Rows with the same text are one phone and share a colour. An empty field is its own phone,
+     which is today's behaviour.
+   - Make, model or serial from the metadata, when the file has them, shows greyed as a
+     suggestion. It counts only once a person accepts or types it.
+   - Saved per recording (`phone <uid>`), logged and undone like the anchor.
+   - With no room on the strip, the field shrinks to its colour chip, and a click edits it.
+   - A new Order option, Group › phone › start, puts a phone's files together.
+2. **One drift per phone.** Files of one phone keep their own offsets (each started when it was
+   pressed) but share one drift, one crystal: `clock::fit_against` takes the phone ids as the
+   device map (the `solve_devices` mechanism). A short clip then borrows its phone's drift from
+   the longer files.
+3. **The group's average clock sets the drift**, not any one file.
+   - One vote per phone, weighted by how well each phone's drift is measured.
+   - Every phone counts: a weighted mean, with nothing dropped for being far off. A sped-up file
+     shows its speed change mark.
+   - The anchor row stops reading "reference" and shows its own drift like every row.
+   - **Speed reference:** a button of its own on each row says "this file's clock runs true",
+     e.g. the official concert recording from a professional camera. One per group; it overrides
+     the average.
+   - An end wired into the anchor row still gives the real drift and overrides both.
+4. **The average anchor.** A button on the group's number tab.
+   - It puts a dragged group back at its average.
+   - It anchors the group on a virtual anchor instead of one file. Its position is the weighted
+     mean of the group's stamps: each stamp votes for where the group sits, one vote per phone,
+     weighted by its ±. Every stamp counts, one 12 years off included; wrong metadata shows
+     plainly on the timeline, and fixing it is a person's job (a Time node).
+   - Its error is the stamps' weighted spread ÷ √phones.
+   - The outputs get the anchor mark. The source line says "anchored on the average of N phones'
+     stamps".
+   - It and a file anchor exclude each other. Dragging stops while anchored.
+   - After a run, groups stay unanchored, marked ?, at that average.
+5. **Drift, in seconds per hour.** One name everywhere:
+   - the Stretch column becomes **Drift**, in s/h; −0.9 s/h is a clock losing 0.9 s an hour,
+     i.e. −250 ppm;
+   - the hover gives the exact scale, ×0.9997500 (real seconds per file second);
+   - ppm stays internal only;
+   - the colour runs from green near 0 to red at 3.6 s/h (1000 ppm, `SPEED_CHANGE_PPM`).
+
+Tests:
+- two files sharing a phone id share one drift, and a 40 s clip takes its phone's;
+- the average anchor puts a group at the weighted mean of its stamps, one vote per phone, a
+  stamp 12 years off included;
+- the speed reference button makes that file's drift 0 and measures the others against it;
+- the drift reads in s/h, with the scale in the hover;
+- `drive` PNGs of the phone ids with colours, the average anchor, and the Drift column.
+
 ### 4 · Remove the pool
 
 What the global solve touches today, module by module, and what each becomes. Surveyed
