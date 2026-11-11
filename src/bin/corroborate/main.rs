@@ -1495,6 +1495,16 @@ impl App {
                 let at = Pos2::new(400.0, 300.0) - self.pan;
                 self.add_menu(ui, at);
             });
+            // The data types: what travels on wires, who gives and takes each; a click adds a
+            // Value node of it.
+            ui.menu_button("Types", |ui| {
+                if let Some(ty) = self.types_menu(ui) {
+                    let at = Pos2::new(400.0, 300.0) - self.pan;
+                    let n = self.add(Kind::Value { ty: ty.into(), rows: corroborate::modules::value::defaults(ty) }, at);
+                    self.pick_only(n);
+                    self.save_project();
+                }
+            });
             if bar_button(ui, "Arrange", Extra::ArrangeIcon, false, true).on_hover_text("lay out the nodes on this level by their wires; Ctrl+Z puts them back").clicked() {
                 self.clean_up(ui.input(|i| i.time));
             }

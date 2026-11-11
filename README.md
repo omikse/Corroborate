@@ -37,7 +37,7 @@ The top bar: the project menu (its button is the project's name, with • while 
 changes); **▶ Run**, **■ Stop** and **↻ Restart**, always there, Run lit while running and showing
 how many nodes run (Run while running does nothing; Restart starts again); **+ Add node**, which
 also has **Live device** (this computer's microphones and capture cards, asked of ffmpeg when it
-opens) and **Value of a type**; **Arrange**; and a warning when recordings are missing or changed,
+opens) and **Value of a type**; **Types**, every data type that travels on wires; **Arrange**; and a warning when recordings are missing or changed,
 which opens their list. Messages are at the bottom of the canvas, over the line of keys.
 
 Projects: the project menu has **Rename…**, **New…** (Ctrl+N), **Open…** (Ctrl+O), **Open recent**,
@@ -97,7 +97,7 @@ What travels on a wire has a type, and every type is a folder like a module: `sr
 (in the tool, `app\types\<id>\`, read again every second; a change there wins over the built-in
 one). It says the type's `label`, `color`, `flow`, `description` and its `[[field]]`s (name, type
 number|text|datetime|bool|choice|file, label, unit, min, max, default, required); the format is at
-the top of `src/types.rs`. **+ Add node → Value of a type** lists them all with where each came from;
+the top of `src/types.rs`. **Types** in the top bar (and **+ Add node → Value of a type**) lists them all with where each came from;
 hovering one names the modules that give and take it, clicking one adds a Value node of it.
 
 A dot on a node always means the same:

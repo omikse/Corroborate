@@ -288,11 +288,12 @@ fn a_dot_says_its_type() {
     d.shot("canvas_dot_hover");
 }
 
+/// The Types menu in the top bar lists every data type, says who gives and takes it, and a click
+/// adds a Value node of it. Add node → Value of a type lists the same.
 #[test]
 fn types_menu() {
     let (mut d, ..) = three();
-    d.click("+ Add node");
-    d.click_contains("Value of a type");
+    d.click("Types");
     for t in ["Audio", "Location", "Event", "JSON"] {
         assert!(d.h.query_by_label(t).is_some(), "{t} is listed");
     }
@@ -302,6 +303,15 @@ fn types_menu() {
     d.shot("types_menu");
     let (give, take) = types_menu::users("location");
     assert!(give.iter().any(|m| m == "Combine locations") && take.iter().any(|m| m == "Map"), "{give:?} {take:?}");
+    let before = d.app().nodes.len();
+    d.click("Location");
+    d.frames(5);
+    assert_eq!(d.app().nodes.len(), before + 1, "a click adds a Value node");
+    assert!(d.app().nodes.iter().any(|n| matches!(&n.kind, Kind::Value { ty, .. } if ty == "location")), "of the type clicked");
+    d.press(egui::Key::Escape);
+    d.click("+ Add node");
+    d.click_contains("Value of a type");
+    assert!(d.h.query_by_label("Location").is_some(), "Add node lists the types too");
 }
 
 /// A Value node of type location draws its circle on a Map; one of type time goes into the
