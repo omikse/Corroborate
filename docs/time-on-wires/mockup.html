@@ -39,6 +39,10 @@ section{display:flex;flex-direction:column;gap:12px}
 .ports span{padding:1px 8px;color:var(--ink)}
 .lane{background:var(--track);position:relative;border-top:2px solid var(--seam)}
 .lane .b{position:absolute;top:5px;bottom:5px;opacity:.6}
+.lane .nom{position:absolute;top:2px;bottom:2px;border-left:1.5px dashed var(--text);opacity:.7}
+.lane .sl{position:absolute;top:5px;bottom:5px;width:4px;background:repeating-linear-gradient(45deg,var(--amber) 0 2px,transparent 2px 4px)}
+.lane .sl.cut{background:repeating-linear-gradient(45deg,var(--track) 0 2px,transparent 2px 4px)}
+.lane .sll{position:absolute;bottom:6px;color:var(--text);font-size:10.5px;background:rgba(16,18,20,.7);padding:0 3px;border-radius:2px}
 .st{position:relative;border-top:2px solid var(--seam);background:var(--track);display:flex}
 .st .h{flex:1;display:flex;align-items:center;justify-content:center;font-size:12px;gap:4px}
 .st.split::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#4a505a}
@@ -118,7 +122,7 @@ code{font:12px var(--mono);color:var(--amber)}
 
   <section>
     <div><h2>1 · The Audio match node</h2>
-    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and time (start of recording). A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: time (recalculated start) and time (recalculated end), blue like every time port. The end is the start plus the file's length at the measured speed, so the Stretch column's ppm shows up as the end landing earlier or later than start + length. The mark in each time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status. The last row has no metadata and audio matched it to nothing, so there is nothing to place it by: the whole row is greyed out and both outputs give nothing. A row with metadata but no match still gives its metadata time as the start, and start + length as the end.</p></div>
+    <p>View all, the Order dropdown (open here), the legend, Status split at zero, no blue start line. Inputs: audio, and audio start time. A second column, Stretch, shows how fast each recording's clock runs against its group's anchor: slower on the left, faster on the right, green near 0, red toward 1000 ppm, where a sped-up file begins. Outputs: audio start time and audio end time, blue like every time port. The end is the start plus the file's length at the measured speed, so the Stretch column's ppm shows up as the end landing earlier or later than start + length. The timeline draws it: a dashed line where start + length would end, the amber bar running past it (hatched) or stopping short of it (cut), and the size beside it, "end +47 ms". The hatch is drawn at least 4 px wide so it shows at any zoom; the label gives the true size. The mark in each time field says whether the group is anchored (anchor) or placed by metadata or by hand (?). The six outputs along the bottom are gone; what they found shows as marks in Status. The last row has no metadata and audio matched it to nothing, so there is nothing to place it by: the whole row is greyed out and both outputs give nothing. A row with metadata but no match still gives its metadata time as the start, and start + length as the end.</p></div>
     <div class="scroll">
       <div class="am" id="node">
         <div class="title"><span>Audio match</span><span>detector</span></div>
@@ -129,6 +133,7 @@ code{font:12px var(--mono);color:var(--amber)}
           <span style="display:inline-block;width:80px;height:4px;background:#4a505a;border-radius:2px;position:relative"><span style="position:absolute;left:44px;top:-6px;width:10px;height:16px;background:var(--text);border-radius:2px"></span></span>
           <span style="margin-left:12px"><span class="sw" style="background:var(--amber)"></span>time calculated from audio</span>
           <span><span class="sw" style="background:var(--blue)"></span>time from metadata</span>
+          <span><span class="sw" style="border-left:1.5px dashed var(--text);background:repeating-linear-gradient(45deg,var(--amber) 0 2px,transparent 2px 4px)"></span>stretch: start + length ┆ measured end</span>
           <span style="margin-left:auto;color:var(--dim);font-family:var(--mono)">12:15:43 to 12:24:10</span>
           <div class="menu"><div class="on">Group › metadata › start</div><div>Start › group</div><div>Group › how far off</div><div>As wired</div></div>
         </div>
@@ -254,21 +259,28 @@ const ppmCol=p=>{const a=Math.min(Math.abs(p)/1000,1);return `hsl(${130*(1-a)},6
 const marks={gap:'<span title="0.4 s missing against …4408059" style="color:var(--text)">⟂ gap</span>',same:'<span style="color:var(--text)">= same recording</span>'};
 h+=rows.map((r,k)=>{
   if(r.dead){const f='opacity:.45';
-    return `<div class="name" style="height:58px;${f}">${r.n}<div class="ports"><span style="background:var(--amber)">audio</span><span style="background:var(--off);color:var(--dim)">time (start of recording)</span></div></div>`
+    return `<div class="name" style="height:58px;${f}">${r.n}<div class="ports"><span style="background:var(--amber)">audio</span><span style="background:var(--off);color:var(--dim)">audio start time</span></div></div>`
      +`<div class="lane" style="${f}"><span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--dim)">no metadata, and audio found no match: nothing to place it by</span></div>`
      +`<div class="st" style="${f}"><div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no links found</span><span>no time metadata</span></div></div>`
      +`<div class="st" style="${f}"></div>`
-     +`<div class="out" style="${f}"><div class="nm">…${r.n.slice(-7)}</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated start)</div><div class="f" style="background:var(--off);color:var(--dim)">time (recalculated end)</div></div>`;}
+     +`<div class="out" style="${f}"><div class="nm">…${r.n.slice(-7)}</div><div class="f" style="background:var(--off);color:var(--dim)">audio start time</div><div class="f" style="background:var(--off);color:var(--dim)">audio end time</div></div>`;}
   const bar=(x,c)=>x?`<div class="b" style="left:${x[0]}%;width:${x[1]-x[0]}%;background:${c}"></div>`:'';
   let lane=bar(r.b,'var(--blue)')+bar(r.a,'var(--amber)');
   if(r.grp) lane+=`<span style="position:absolute;left:3px;top:3px;background:${r.grp==1?'var(--g1)':'var(--g2)'};color:var(--ink);padding:0 4px">${r.grp}</span>`;
   if(r.anchor) lane+=`<span style="position:absolute;left:calc(${r.a[1]}% - 16px);top:6px;color:var(--ink)">⚓</span>`;
+  if(r.ppm&&!r.anchor){
+    const len=(r.a[1]-r.a[0])/100*510, sh=-r.ppm*1e-6*len, x=r.a[1];
+    const lab=`end ${sh>0?'+':'−'}${Math.abs(sh)<0.1?(Math.abs(sh)*1000).toFixed(0)+' ms':Math.abs(sh).toFixed(2)+' s'}`;
+    lane+=`<div class="nom" style="left:${x}%"></div>`;
+    lane+=sh>0?`<div class="sl" style="left:${x}%"></div>`:`<div class="sl cut" style="left:calc(${x}% - 4px)"></div>`;
+    lane+=x>80?`<span class="sll" style="right:calc(${100-x}% + 8px)">${lab}</span>`:`<span class="sll" style="left:calc(${x}% + 8px)">${lab}</span>`;
+  }
   let st,cls='st';
   if(r.anchor) st=`<div class="h" style="font-size:18px">⚓</div>`;
   else if(r.none) st=`<div class="h" style="color:var(--dim)">no time metadata</div>`;
   else{cls+=' split';const t=(r.d>0?'+':'−')+Math.abs(r.d).toFixed(1)+' s';const c=`<div class="h" style="background:${col(r.d)};color:var(--ink)">${t}</div>`,e=`<div class="h">${r.mark?marks[r.mark]:''}</div>`;st=r.d<0?c+e:e+c}
   if(r.none&&r.mark) st=`<div class="h" style="color:var(--dim);flex-direction:column;gap:0"><span>no time metadata</span>${marks[r.mark]}</div>`;
-  const meta=r.b?`<span style="background:var(--blue)">time (start of recording)</span>`:`<span style="background:var(--off);color:var(--dim)">time (start of recording)</span>`;
+  const meta=r.b?`<span style="background:var(--blue)">audio start time</span>`:`<span style="background:var(--off);color:var(--dim)">audio start time</span>`;
   const mk=r.anc?'⚓':'?';
   let sx;
   if(r.anchor) sx=`<div class="st" style="background:var(--node)"><div class="h" style="flex-direction:column;gap:0;color:var(--dim)"><span style="color:var(--text)">reference</span><span style="font-size:10.5px">0 ppm by definition</span></div></div>`;
@@ -278,8 +290,8 @@ h+=rows.map((r,k)=>{
    +`<div class="${cls}" ${r.anchor?'style="background:var(--node)"':''}>${st}</div>`
    +sx
    +`<div class="out" style="position:relative${r.hl?';outline:2px solid var(--text);outline-offset:-2px':''}"><div class="nm">…${r.n.slice(-7)}</div>`
-   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated start)<span class="dot"></span></div>`
-   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>time (recalculated end)<span class="dot"></span></div></div>`;
+   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>audio start time<span class="dot"></span></div>`
+   +`<div class="f" style="background:var(--blue)"><span class="mk">${mk}</span>audio end time<span class="dot"></span></div></div>`;
 }).join('');
 document.getElementById('g').innerHTML=h;
 function bracket(){

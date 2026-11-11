@@ -70,8 +70,8 @@ After the change:
   - The Status cell is split at zero: − colours the left half, + the right half.
   - The blue start line in the lanes goes.
   - The output field shows an anchor or ? in its upper left corner.
-  - Port names: the inputs are "audio" and "time (start of recording)"; the outputs are
-    "time (recalculated start)" and "time (recalculated end)".
+  - Port names: the inputs are "audio" and "audio start time"; the outputs are
+    "audio start time" and "audio end time".
   - The time outputs are blue, the colour of every time port (it was amber).
   - A second status column, Stretch, shows the row's speed against its group's anchor in ppm.
     - It is split at zero: slower on the left, faster on the right.
@@ -107,7 +107,7 @@ Only `src/modules/Audio match/node.rs` and its tests.
    - The port names change. The saved port names (`audio n`, `time n`, `synced n`) stay, so wires
      in old projects hold.
    - Only the labels drawn on the node and the hover texts change.
-   - A new output per row, `end n`, "time (recalculated end)": until stage 3 measures speeds it is
+   - A new output per row, `end n`, "audio end time": until stage 3 measures speeds it is
      start + length.
 5. Unanchored outputs: `synced_time` stops refusing groups with no anchor.
    - A row with no metadata and no links is greyed out (the `dead` fade covers the whole row, the
@@ -175,11 +175,19 @@ Tests:
 2. The fit is shown in the row's hover and in the time output's source line: links, leftover, ppm. The foot
    line gives the median leftover. The Stretch column is added here, once the speeds exist, with
    room in the node's width for it.
-3. Placement (`match_view_now`) uses the group's own fit instead of `ev.clocks`.
-4. The end output uses the measured speed: end = start + length × (1 + speed against the anchor).
+3. The stretch on the timeline: the amber bar runs from the start to the measured end, at its real
+   length.
+   - A dashed line marks where start + length would end.
+   - The bit past it is hatched; a bar ending short of it is cut.
+   - A label beside it gives the size ("end +47 ms").
+   - The hatch is at least 4 px wide so it shows at any zoom.
+   - The legend gets a third entry: "stretch: start + length ┆ measured end".
+   - The anchor row has none: it is the reference.
+4. Placement (`match_view_now`) uses the group's own fit instead of `ev.clocks`.
+5. The end output uses the measured speed: end = start + length × (1 + speed against the anchor).
    - Its ± is the start's ± and the speed's error × length, added as squares.
    - Its hover says how far it lands from start + length.
-5. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
+6. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
    on hover, if the bottom outputs go.
 
 Tests:
