@@ -108,7 +108,8 @@ Tests:
 ### 2 · Steps on the Time type
 
 1. `Data::Time { source: String }` becomes `steps: Vec<Step>`, where
-   `Step { node, what, change }`.
+   `Step { node, what, change, error_s, starts }`. `starts` is an "=" step, which begins the error
+   sum afresh. `error_s` on the Time is kept as the sum, so nodes that only read it are unchanged.
    - The JSON form is a `"steps"` list.
    - A plugin's `"source"` text is read as one step.
 2. Every place that makes a Time (about 20: data.rs, bus.rs, evidence.rs, SOURCER, Time, Value,
@@ -125,8 +126,16 @@ Tests:
      the end"), saved in the node's rows (`1.note`). It becomes the row's step.
      - With no note, the step is worded from the numbers alone ("+ 0.4 s").
      - A wired row names what fed it ("− 166.2 s, length of x.mp4").
-   - **The error box:** filled in, it adds a step ("error ±1 s") with its own note. Empty, it keeps
-     the incoming error and adds no step. Today it always replaces the error.
+   - **A ± per row** (`1.error_s`), with the error box under Result gone.
+     - Result's ± is worked out, not typed: √(sum of every row's ±²), the incoming rows included.
+       Independent errors add as squares, so the largest dominates (±1, ±0.02 and ±0.05 give
+       ±1.001).
+     - An "=" row (a start: SOURCER's metadata, an Audio match anchor) begins the sum afresh;
+       the rows above it stop counting.
+     - A typed row with an empty ± counts as exact (0). A wired length brings its own ± (about a
+       frame).
+     - A hover on Result's ± shows the sum written out: "√(1² + 0.02² + 0.05²)".
+   - So each step carries its own ±, and the Time type's `error_s` is that sum.
    - No separate list of steps going out: the stack is that list. The next node down shows this
      node's rows among its own faded ones.
    - The node's label stays as it is; the steps carry the reasons.
@@ -135,7 +144,8 @@ Tests:
 
 Tests:
 - a SOURCER → Time → Audio match chain shows three steps in order, with the numbers each changed;
-- a Time node's notes become its steps, and an empty error box keeps the incoming error;
+- a Time node's notes become its steps;
+- Result's ± is the square-root sum since the last "=" row (±1, ±0.02, ±0.05 → ±1.001);
 - `drive` PNGs of the Time node with its steps folded and open;
 - the JSON round-trips.
 
