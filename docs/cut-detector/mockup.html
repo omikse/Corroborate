@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cut Detector</title>
+<style>
+:root{
+  --canvas:#16181c; --node:#2a2d33; --head:#23262b; --box:#1b1e23; --boxline:#3a3f47; --seam:#101215;
+  --text:#d8dbe0; --dim:#8a9099; --faint:#565c66; --grey:#4a4f58;
+  --cut:#e0524f; --ok:#8cdc6e; --warn:#e0a458;
+  --audio:#e0a458; --video:#e0c85a; --time:#7aa7e0; --length:#d98c8c; --event:#e07a6a;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,monospace; --sans:"Inter",system-ui,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--text);font:13px/1.45 var(--sans);padding:28px 16px 48px}
+main{max-width:980px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+h1{font-size:18px;margin:0;font-weight:600}
+h2{font-size:14px;margin:0 0 6px;font-weight:600}
+p{margin:0;color:var(--dim);max-width:760px}
+.stage{overflow-x:auto;padding:6px 0 10px}
+code{font:12px var(--mono);color:var(--text)}
+
+/* node */
+.node{position:relative;width:920px;background:var(--node);border:1px solid var(--boxline);border-radius:4px;margin-left:40px}
+.title{height:30px;display:flex;align-items:center;gap:8px;padding:0 10px;background:var(--head);border-bottom:1px solid var(--seam);border-radius:4px 4px 0 0}
+.title .kind{margin-left:auto;color:var(--dim);font-size:11px}
+.ins{padding:6px 0 4px}
+.in{position:relative;height:20px;display:flex;align-items:center;padding-left:12px;color:var(--dim);font-size:12px;gap:8px}
+.in b{font-weight:400;color:var(--text)}
+.port{position:absolute;width:10px;height:10px;border-radius:50%;border:1.5px solid var(--grey);background:var(--node)}
+.in .port{left:-6px;top:5px}
+.in .wire{position:absolute;left:-40px;top:9px;width:34px;height:2px}
+.sec{border-top:1px solid var(--seam);padding:8px 0}
+.lbl{font:10px var(--mono);color:var(--faint);padding:0 12px 4px;letter-spacing:.04em;text-transform:uppercase}
+svg text{font-family:var(--mono)}
+#plot{display:block;cursor:crosshair;user-select:none}
+.hint{font-size:11px;color:var(--faint);padding:2px 12px 0}
+
+/* pieces table */
+table{border-collapse:collapse;width:100%;font-size:12px;table-layout:fixed}
+th{font:10px var(--mono);color:var(--faint);text-align:left;font-weight:400;padding:0 8px 4px;text-transform:uppercase;letter-spacing:.04em}
+td{padding:4px 8px;height:30px;border-top:1px solid #30343a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td.placed{white-space:normal;line-height:1.3;font-size:11.5px}
+td.n{color:var(--dim);font-family:var(--mono);width:34px;padding-left:12px}
+td.m{font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.cues span{display:inline-block;font:10px var(--mono);padding:1px 5px;margin-right:3px;border-radius:2px;background:#33373e;color:var(--dim)}
+td.cues span.on{background:#4a2c2b;color:#f0b0ae}
+td.placed.bad{color:var(--cut)}
+td.placed.none{color:var(--faint)}
+tr{position:relative}
+td.ports{width:70px;position:relative}
+.outp{position:absolute;right:-6px;width:10px;height:10px;border-radius:50%}
+.outl{position:absolute;right:10px;font:9.5px var(--mono);color:var(--faint)}
+.chip{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+#tip{position:fixed;pointer-events:none;background:#0f1114;border:1px solid var(--boxline);border-radius:3px;padding:7px 9px;font:11.5px/1.5 var(--mono);color:var(--text);display:none;z-index:9;max-width:360px;white-space:pre}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--dim)}
+.legend i{display:inline-block;width:18px;height:0;border-top:2px solid var(--cut);vertical-align:3px;margin-right:6px}
+.legend i.off{border-top:2px dashed var(--faint)}
+.legend i.hand{border-top:2px solid #f0a0e0}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.note{background:#1d2025;border:1px solid #2c3036;border-radius:4px;padding:10px 12px}
+.note h3{margin:0 0 4px;font-size:12.5px;font-weight:600}
+.note p{font-size:12px}
+@media (max-width:700px){ .node{margin-left:24px} }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>Cut detector — mockup</h1>
+<p>An edited video, cut in five places and shuffled. Every cue lane is drawn under the picture and the sound; a red line is a cut, and each piece leaves as a recording of its own. Click a cut to switch it off or on, click empty space to add a cut by hand, drag a lane's ◂ (right end) to move its threshold.</p>
+</header>
+
+<section>
+<h2>Wiring</h2>
+<div class="stage"><svg id="wiring" width="920" height="262" viewBox="0 0 920 262"></svg></div>
+</section>
+
+<section>
+<h2>The node</h2>
+<div class="stage">
+<div class="node" id="node">
+  <div class="title"><span>Cut detector</span><span class="kind">Detectors · edited.mp4 · 2:00.0 · 30 frames/s · hum 50 Hz</span></div>
+  <div class="ins" id="ins"></div>
+  <div class="sec">
+    <div class="lbl">the file, its cues and its cuts</div>
+    <svg id="plot" width="918" height="10"></svg>
+    <div class="hint">Lane marks are cue strengths; the dotted line is the lane's threshold. A cut needs one lane over its threshold, or your click.</div>
+  </div>
+  <div class="sec">
+    <div class="lbl">pieces (each one a recording; video and length outputs show once wired)</div>
+    <table id="pieces"></table>
+  </div>
+  <div class="sec">
+    <div class="lbl">placed: where the pieces land on real time (from what is wired downstream)</div>
+    <svg id="placed" width="918" height="96"></svg>
+  </div>
+</div>
+</div>
+</section>
+
+<section class="legend">
+  <span><i></i>cut (a cue over its threshold)</span>
+  <span><i class="off"></i>switched off by you</span>
+  <span><i class="hand"></i>cut by hand</span>
+  <span><span class="chip" style="background:var(--audio)"></span>audio</span>
+  <span><span class="chip" style="background:var(--video)"></span>video</span>
+  <span><span class="chip" style="background:var(--time)"></span>time</span>
+  <span><span class="chip" style="background:var(--event)"></span>event</span>
+</section>
+
+<section class="notes">
+  <div class="note"><h3>Jump cuts need sound</h3><p>At 0:47.0 four seconds are gone from one camera position: the picture barely changes (scdet 4, under 10). The hum's frequency steps and phone 2's lag jumps, so the cut is still found.</p></div>
+  <div class="note"><h3>Hum phase can be blind</h3><p>126 frames at 30/s are 4.2 s, exactly 210 cycles of 50 Hz: the phase does not move. At 25 frames/s every frame is 2 cycles, so any frame-exact cut leaves 50 Hz phase unchanged. The hum lane says which of phase or frequency fired.</p></div>
+  <div class="note"><h3>A flash is not a cut</h3><p>0:60.2 crosses the picture threshold (27) and nothing else agrees. It was switched off by hand; switch it on and piece 3 splits into two that land side by side.</p></div>
+  <div class="note"><h3>Not placed is shown, not hidden</h3><p>Piece 4 overlaps no other recording and its hum is too weak for the grid log, so it keeps its as-played time and says so. Turn off the cut at 0:22.4 and piece 1 spans a cut: Audio match then sees its lag jump inside.</p></div>
+</section>
+</main>
+<div id="tip"></div>
+
+<script>
+(() => {
+const DUR = 120, FPS = 30, L = 150, W = 740, NODE_W = 918;
+const X = t => L + t / DUR * W;
+const T = x => Math.max(0, Math.min(DUR, (x - L) / W * DUR));
+const BASE = 20 * 3600 + 41 * 60 + 10; // the file's wired start, 20:41:10.000
+const pad = (n, w) => String(n).padStart(w, '0');
+const clock = s => { const v = BASE + s, h = Math.floor(v / 3600), m = Math.floor(v % 3600 / 60), r = v % 60;
+  return `${pad(h,2)}:${pad(m,2)}:${r.toFixed(1).padStart(4,'0')}`; };
+const mmss = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
+
+// What really happened (the mockup's truth): stretches of the event, in file order.
+const STRETCH = [
+  {a: 0, b: 22.4, ev: 0, by: 'Audio match · phone 2', hue: 210},
+  {a: 22.4, b: 47.0, ev: 51.2, by: 'Audio match · phone 2', hue: 30},
+  {a: 47.0, b: 71.6, ev: 26.6, by: 'Audio match · phone 2', hue: 140},
+  {a: 71.6, b: 95.3, ev: null, why: 'not placed: no other recording hears it, hum too weak for the grid log', hue: 280},
+  {a: 95.3, b: 120, ev: 87.8, by: 'Audio match · phone 3', hue: 55},
+];
+
+let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const noise = (lo, hi) => Array.from({length: DUR}, (_, i) => ({t: i + 0.5, v: lo + rnd() * (hi - lo)}));
+
+const LANES = [
+  {id: 'pic', name: 'picture', unit: 'scdet', max: 50, thr: 10, vals: {22.4: 38, 47.0: 4, 60.2: 27, 71.6: 31, 95.3: 6}, bg: noise(0.4, 3.5)},
+  {id: 'snd', name: 'sound level', unit: 'dB step', max: 12, thr: 4, vals: {22.4: 9, 47.0: 1.2, 60.2: 0.4, 71.6: 6, 95.3: 2}, bg: noise(0.1, 1.4)},
+  {id: 'hum', name: 'hum (ENF edits)', unit: 'σ', max: 8, thr: 3, vals: {22.4: 2, 47.0: 6.5, 60.2: 0.3, 71.6: 4, 95.3: 5.5}, bg: noise(0.1, 1.1),
+   why: {22.4: 'hum weak here', 47.0: 'frequency step 4 mHz, phase 0° (210 whole cycles)', 71.6: 'phase jump 120°', 95.3: 'phase jump 240°, frequency step 2 mHz'}},
+  {id: 'key', name: 'keyframes, gaps', kind: 'binary', vals: {22.4: 1, 71.6: 1},
+   why: {22.4: 'keyframe off the 2 s rhythm', 71.6: 'keyframe off the 2 s rhythm'}},
+  {id: 'p2', name: 'vs phone 2', kind: 'cmp', cover: [[0, 71.6]], jumps: [{t: 22.4, label: '+28.8 s'}, {t: 47.0, label: '−49.2 s'}]},
+  {id: 'p3', name: 'vs phone 3', kind: 'cmp', cover: [[31.2, 47.0], [95.3, 120]], jumps: [{t0: 47.0, t1: 95.3, label: '−36.3 s, somewhere in here'}]},
+];
+const CANDS = [22.4, 47.0, 60.2, 71.6, 95.3];
+// state per cut: 'auto' (follows thresholds), 'on', 'off', 'hand'
+const state = new Map(CANDS.map(t => [t, 'auto']));
+state.set(60.2, 'off');
+
+function cue(lane, t) {
+  if (lane.kind === 'binary') return {pass: !!lane.vals[t], text: lane.vals[t] ? lane.why[t] : '—'};
+  if (lane.kind === 'cmp') {
+    const j = lane.jumps.find(j => j.t !== undefined && Math.abs(j.t - t) < 0.3);
+    if (j) return {pass: true, text: `lag jumps ${j.label}`};
+    const b = lane.jumps.find(j => j.t0 !== undefined && t > j.t0 && t < j.t1);
+    if (b) return {pass: false, text: `a jump between ${mmss(b.t0)} and ${mmss(b.t1)}, not located`};
+    const covered = lane.cover.some(([a, b]) => t >= a && t <= b);
+    return {pass: false, text: covered ? 'no jump' : 'no overlap here'};
+  }
+  const v = lane.vals[t] ?? 0;
+  const extra = lane.why && lane.why[t] ? ` (${lane.why[t]})` : '';
+  return {pass: v >= lane.thr, text: `${v} ${lane.unit}, threshold ${lane.thr}${extra}`};
+}
+const auto = t => LANES.some(l => cue(l, t).pass);
+const accepted = t => { const s = state.get(t); return s === 'hand' || s === 'on' || (s === 'auto' && auto(t)); };
+const cuts = () => [...state.keys()].filter(accepted).sort((a, b) => a - b);
+
+// ---------- inputs ----------
+const INS = [
+  ['audio', 'edited.mp4', '--audio'], ['video', 'edited.mp4', '--video'], ['time', '20:41:10.000 ± 1.0 s (file)', '--time'],
+  ['compare with', 'phone 2', '--audio'], ['compare with', 'phone 3', '--audio'], ['cues', 'ENF (power hum) · edits', '--event'],
+];
+document.getElementById('ins').innerHTML = INS.map(([n, from, c]) =>
+  `<div class="in"><span class="wire" style="background:var(${c})"></span><span class="port" style="border-color:var(${c});background:var(${c})"></span>${n} <b>${from}</b></div>`).join('') +
+  `<div class="in"><span class="port" style="border-style:dashed"></span><span style="color:var(--faint)">compare with (free)</span></div>`;
+
+// ---------- the plot ----------
+const svg = document.getElementById('plot');
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, at, parent) => { const e = document.createElementNS(NS, tag); for (const k in at) e.setAttribute(k, at[k]); (parent || svg).appendChild(e); return e; };
+const STRIP_Y = 8, STRIP_H = 34, WAVE_Y = 48, WAVE_H = 40, LANE_Y = 100, LANE_H = 46;
+const H = LANE_Y + LANES.length * LANE_H + 22;
+svg.setAttribute('height', H);
+
+function stretchAt(t) { return STRETCH.find(s => t >= s.a && t < s.b) || STRETCH[STRETCH.length - 1]; }
+
+function drawStatic() {
+  // filmstrip: frames every 5 s, coloured by what they show
+  el('text', {x: 12, y: STRIP_Y + 21, fill: '#8a9099', 'font-size': 11}).textContent = 'picture';
+  for (let t = 0; t < DUR; t += 2.5) {
+    const s = stretchAt(t + 1.25), flash = Math.abs(t + 1.25 - 60.2) < 1.3;
+    const g = el('rect', {x: X(t) + 0.5, y: STRIP_Y, width: W / DUR * 2.5 - 1, height: STRIP_H, rx: 1,
+      fill: flash ? `hsl(${s.hue} 30% 70%)` : `hsl(${s.hue} 22% ${26 + 6 * Math.sin(t / 3)}%)`});
+  }
+  // waveform
+  el('text', {x: 12, y: WAVE_Y + 24, fill: '#8a9099', 'font-size': 11}).textContent = 'sound';
+  let d = '';
+  for (let i = 0; i <= 740; i += 2) {
+    const t = i / W * DUR, s = stretchAt(t), loud = {210: .7, 30: .45, 140: .55, 280: .3, 55: .8}[s.hue];
+    const a = (0.25 + 0.75 * rnd()) * loud * WAVE_H / 2;
+    d += `M${L + i} ${WAVE_Y + WAVE_H / 2 - a}V${WAVE_Y + WAVE_H / 2 + a}`;
+  }
+  el('path', {d, stroke: '#e0a458', 'stroke-width': 1.4, opacity: .75});
+  // time axis
+  for (let t = 0; t <= DUR; t += 10) {
+    el('line', {x1: X(t), x2: X(t), y1: H - 18, y2: H - 14, stroke: '#565c66'});
+    el('text', {x: X(t), y: H - 3, fill: '#565c66', 'font-size': 10, 'text-anchor': 'middle'}).textContent = mmss(t).replace('.0', '');
+  }
+}
+
+let laneG;
+function drawLanes() {
+  if (laneG) laneG.remove();
+  laneG = el('g', {});
+  LANES.forEach((l, i) => {
+    const y0 = LANE_Y + i * LANE_H, base = y0 + LANE_H - 8, hmax = LANE_H - 12;
+    el('rect', {x: L, y: y0 + 2, width: W, height: LANE_H - 6, fill: '#25282d', rx: 2}, laneG);
+    el('text', {x: 12, y: y0 + 21, fill: '#8a9099', 'font-size': 11}, laneG).textContent = l.name;
+    if (!l.kind) {
+      const k = hmax / l.max;
+      for (const p of l.bg) el('line', {x1: X(p.t), x2: X(p.t), y1: base, y2: base - p.v * k, stroke: '#4a4f58', 'stroke-width': 2}, laneG);
+      for (const [t, v] of Object.entries(l.vals)) {
+        const pass = v >= l.thr;
+        el('rect', {x: X(+t) - 2, y: base - Math.min(v, l.max) * k, width: 4, height: Math.min(v, l.max) * k, fill: pass ? '#e0524f' : '#7a7f88'}, laneG);
+      }
+      const ty = base - l.thr * k;
+      el('line', {x1: L, x2: L + W, y1: ty, y2: ty, stroke: '#8a9099', 'stroke-dasharray': '2 3', 'stroke-width': 1}, laneG);
+      const h = el('path', {d: `M${L + W + 2} ${ty}l9 -5v10z`, fill: '#8a9099', style: 'cursor:ns-resize'}, laneG);
+      h.dataset.lane = i;
+      el('text', {x: L + W - 4, y: ty - 3, fill: '#8a9099', 'font-size': 9, 'text-anchor': 'end'}, laneG).textContent = `${l.thr.toFixed(l.max < 20 ? 1 : 0)} ${l.unit}`;
+    } else if (l.kind === 'binary') {
+      for (let t = 0; t < DUR; t += 2) el('line', {x1: X(t), x2: X(t), y1: base, y2: base - 6, stroke: '#4a4f58'}, laneG);
+      for (const t of Object.keys(l.vals)) el('path', {d: `M${X(+t)} ${base - hmax}l5 9h-10z`, fill: '#e0524f'}, laneG);
+      el('text', {x: L + W - 4, y: y0 + 13, fill: '#565c66', 'font-size': 9, 'text-anchor': 'end'}, laneG).textContent = 'ticks: keyframes';
+    } else {
+      for (const [a, b] of l.cover) el('rect', {x: X(a), y: base - 8, width: X(b) - X(a), height: 6, fill: '#e0a458', opacity: .45, rx: 2}, laneG);
+      for (const j of l.jumps) {
+        if (j.t !== undefined) {
+          el('path', {d: `M${X(j.t)} ${base - hmax}l5 9h-10z`, fill: '#e0524f'}, laneG);
+          el('text', {x: X(j.t) + 7, y: y0 + 14, fill: '#d8dbe0', 'font-size': 10}, laneG).textContent = j.label;
+        } else {
+          el('path', {d: `M${X(j.t0)} ${base - hmax + 4}v-4H${X(j.t1)}v4`, fill: 'none', stroke: '#e0a458', 'stroke-width': 1.2}, laneG);
+          el('text', {x: (X(j.t0) + X(j.t1)) / 2, y: y0 + 18, fill: '#e0a458', 'font-size': 10, 'text-anchor': 'middle'}, laneG).textContent = j.label;
+        }
+      }
+    }
+  });
+}
+
+let cutG;
+function drawCuts() {
+  if (cutG) cutG.remove();
+  cutG = el('g', {});
+  for (const [t, s] of [...state.entries()].sort((a, b) => a[0] - b[0])) {
+    const on = accepted(t), hand = s === 'hand';
+    const col = hand ? '#f0a0e0' : on ? '#e0524f' : '#6a707a';
+    el('line', {x1: X(t), x2: X(t), y1: 2, y2: H - 20, stroke: col, 'stroke-width': on ? 1.6 : 1.2, 'stroke-dasharray': on ? '' : '4 4'}, cutG);
+    el('text', {x: X(t), y: 0, dy: 0, fill: col, 'font-size': 9.5, 'text-anchor': 'middle'}, cutG);
+    const hit = el('rect', {x: X(t) - 6, y: 0, width: 12, height: H - 20, fill: 'transparent', style: 'cursor:pointer'}, cutG);
+    hit.dataset.cut = t;
+  }
+}
+
+// ---------- pieces ----------
+function pieces() {
+  const c = cuts(), edges = [0, ...c, DUR];
+  return edges.slice(0, -1).map((a, i) => {
+    const b = edges[i + 1], s = stretchAt(a + 1e-6);
+    let place;
+    if (b > s.b + 0.05) {
+      const inside = STRETCH.filter(x => x.a > a + 0.05 && x.a < b - 0.05).map(x => mmss(x.a));
+      place = {bad: true, text: `spans a cut at ${inside.join(', ')}: its match's lag jumps inside, no one fit`};
+    } else if (s.ev === null) place = {none: true, text: s.why};
+    else place = {ev: s.ev + (a - s.a), text: `${clock(s.ev + (a - s.a))}  · ${s.by}`};
+    const before = i === 0 ? null : a;
+    return {n: i + 1, a, b, before, place, hue: s.hue};
+  });
+}
+
+function drawTable() {
+  const ps = pieces();
+  const tbl = document.getElementById('pieces');
+  tbl.innerHTML = `<colgroup><col style="width:46px"><col style="width:140px"><col style="width:62px"><col style="width:200px"><col style="width:140px"><col><col style="width:84px"></colgroup><tr><th>#</th><th>in the file</th><th>length</th><th>cut before it</th><th>time out, as played</th><th>placed</th><th style="text-align:right">out</th></tr>` +
+    ps.map(p => {
+      let cues = '<span>start of file</span>';
+      if (p.before !== null) {
+        const s = state.get(p.before);
+        cues = s === 'hand' ? '<span class="on">by hand</span>' :
+          LANES.map(l => cue(l, p.before).pass ? `<span class="on">${l.id === 'pic' ? 'picture' : l.id === 'snd' ? 'sound' : l.id === 'hum' ? 'hum' : l.id === 'key' ? 'keyframe' : l.name.replace('vs ', '')}</span>` : '').join('') || '<span class="on">your click</span>';
+      }
+      const cls = p.place.bad ? 'bad' : p.place.none ? 'none' : '';
+      return `<tr><td class="n"><span class="chip" style="background:hsl(${p.hue} 22% 40%)"></span>${p.n}</td>
+        <td class="m">${mmss(p.a)} – ${mmss(p.b)}</td><td class="m">${(p.b - p.a).toFixed(1)} s</td>
+        <td class="cues">${cues}</td><td class="m">${clock(p.a)} ± 1.0</td>
+        <td class="placed ${cls}">${p.place.text}</td>
+        <td class="ports"><span class="outl" style="top:2px">audio ${p.n}</span><span class="outp" style="top:4px;background:var(--audio)"></span>
+          <span class="outl" style="top:15px">time ${p.n}</span><span class="outp" style="top:17px;background:var(--time)"></span></td></tr>`;
+    }).join('') +
+    `<tr><td class="n"></td><td colspan="5" style="color:var(--faint)">every accepted cut, with its cues</td><td class="ports"><span class="outl" style="top:9px">cuts</span><span class="outp" style="top:10px;background:var(--event)"></span></td></tr>`;
+}
+
+function drawPlaced() {
+  const ps = pieces(), g = document.getElementById('placed');
+  g.innerHTML = '';
+  const EV = 130, PX = t => L + t / EV * W;
+  const mk = (tag, at) => el(tag, at, g);
+  const defs = mk('defs', {});
+  const pat = el('pattern', {id: 'hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)'}, defs);
+  el('line', {x1: 0, y1: 0, x2: 0, y2: 6, stroke: '#4a4f58', 'stroke-width': 2}, pat);
+  mk('text', {x: 12, y: 30, fill: '#8a9099', 'font-size': 11}).textContent = 'real time';
+  mk('rect', {x: L, y: 14, width: W, height: 28, fill: 'url(#hatch)', opacity: .7});
+  const placed = ps.filter(p => p.place.ev !== undefined).sort((a, b) => a.place.ev - b.place.ev);
+  for (const p of placed) {
+    const x = PX(p.place.ev), w = (p.b - p.a) / EV * W;
+    mk('rect', {x, y: 14, width: w, height: 28, fill: `hsl(${p.hue} 22% 34%)`, stroke: '#16181c'});
+    mk('text', {x: x + w / 2, y: 32, fill: '#d8dbe0', 'font-size': 12, 'text-anchor': 'middle'}).textContent = p.n;
+  }
+  for (let t = 0; t <= EV; t += 10) {
+    mk('line', {x1: PX(t), x2: PX(t), y1: 44, y2: 48, stroke: '#565c66'});
+    mk('text', {x: PX(t), y: 59, fill: '#565c66', 'font-size': 10, 'text-anchor': 'middle'}).textContent = clock(t).slice(3, 8);
+  }
+  const rest = ps.filter(p => p.place.ev === undefined);
+  const order = placed.map(p => p.n).join(' ');
+  mk('text', {x: L, y: 82, fill: '#8a9099', 'font-size': 11}).textContent =
+    `file order ${ps.map(p => p.n).join(' ')}  →  true order ${order || '—'}` +
+    (rest.length ? `   ·   not placed: ${rest.map(p => p.n).join(', ')}` : '') + '   ·   hatched: time not in the file';
+}
+
+function redraw() { drawLanes(); drawCuts(); drawTable(); drawPlaced(); }
+drawStatic(); redraw();
+
+// ---------- interaction ----------
+const tip = document.getElementById('tip');
+const pt = e => { const r = svg.getBoundingClientRect(); return {x: e.clientX - r.left, y: e.clientY - r.top}; };
+let drag = null, moved = false;
+svg.addEventListener('pointerdown', e => {
+  const lane = e.target.dataset && e.target.dataset.lane;
+  if (lane !== undefined) { drag = +lane; moved = false; svg.setPointerCapture(e.pointerId); e.preventDefault(); }
+});
+svg.addEventListener('pointermove', e => {
+  const p = pt(e);
+  if (drag !== null) {
+    const l = LANES[drag], y0 = LANE_Y + drag * LANE_H, base = y0 + LANE_H - 8, hmax = LANE_H - 12;
+    l.thr = Math.max(l.max * 0.02, Math.min(l.max, (base - p.y) / hmax * l.max));
+    l.thr = Math.round(l.thr * 10) / 10; moved = true; redraw(); return;
+  }
+  const c = e.target.dataset && e.target.dataset.cut;
+  if (c !== undefined) {
+    const t = +c, s = state.get(t);
+    const lines = s === 'hand' ? ['cut by hand (click removes it)'] :
+      LANES.map(l => { const q = cue(l, t); return `${q.pass ? '✓' : '·'} ${l.name.padEnd(22)} ${q.text}`; });
+    const head = `${mmss(t)}  frame ${Math.round(t * FPS)}  ` + (accepted(t) ? (s === 'on' ? 'on (your click)' : s === 'hand' ? '' : 'cut') : s === 'off' ? 'off (your click)' : 'no cue over threshold');
+    tip.textContent = head + '\n' + lines.join('\n');
+    tip.style.display = 'block'; tip.style.left = Math.min(e.clientX + 14, innerWidth - 370) + 'px'; tip.style.top = e.clientY + 14 + 'px';
+  } else tip.style.display = 'none';
+});
+svg.addEventListener('pointerup', e => {
+  if (drag !== null) { drag = null; return; }
+  const c = e.target.dataset && e.target.dataset.cut;
+  if (c !== undefined) {
+    const t = +c, s = state.get(t);
+    if (s === 'hand') state.delete(t);
+    else state.set(t, accepted(t) ? 'off' : (auto(t) ? 'auto' : 'on'));
+  } else {
+    const p = pt(e);
+    if (p.x < L || p.x > L + W || p.y > H - 20) return;
+    const t = Math.round(T(p.x) * FPS) / FPS;
+    if ([...state.keys()].some(k => Math.abs(k - t) < 1)) return;
+    state.set(+t.toFixed(2), 'hand');
+  }
+  tip.style.display = 'none'; redraw();
+});
+svg.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+
+// ---------- wiring diagram ----------
+const wz = document.getElementById('wiring');
+const w = (tag, at) => el(tag, at, wz);
+const box = (x, y, wd, ht, title, rows, side) => {
+  w('rect', {x, y, width: wd, height: ht, rx: 4, fill: '#2a2d33', stroke: '#3a3f47'});
+  w('rect', {x, y, width: wd, height: 20, rx: 4, fill: '#23262b'});
+  w('text', {x: x + 8, y: y + 14, fill: '#d8dbe0', 'font-size': 11, 'font-family': 'system-ui'}).textContent = title;
+  const pos = {};
+  rows.forEach(([name, col, io], i) => {
+    const yy = y + 34 + i * 16, xx = io === 'in' ? x : x + wd;
+    w('circle', {cx: xx, cy: yy - 4, r: 4.5, fill: col});
+    w('text', {x: io === 'in' ? x + 9 : x + wd - 9, y: yy, fill: '#8a9099', 'font-size': 10, 'text-anchor': io === 'in' ? 'start' : 'end'}).textContent = name;
+    pos[name + io] = [xx, yy - 4];
+  });
+  return pos;
+};
+const A = '#e0a458', V = '#e0c85a', Ti = '#7aa7e0', E = '#e07a6a';
+const src = box(10, 8, 150, 80, 'SOURCER · edited.mp4', [['audio', A, 'out'], ['video', V, 'out'], ['time', Ti, 'out']]);
+const p2 = box(10, 100, 150, 46, 'SOURCER · phone 2', [['audio', A, 'out']]);
+const p3 = box(10, 154, 150, 46, 'SOURCER · phone 3', [['audio', A, 'out']]);
+const enf = box(230, 210, 150, 46, 'ENF (power hum)', [['audio', A, 'in'], ['edits', E, 'out']]);
+const cd = box(430, 8, 160, 194, 'Cut detector', [['audio', A, 'in'], ['video', V, 'in'], ['time', Ti, 'in'], ['compare with', A, 'in'], ['compare with ', A, 'in'], ['cues', E, 'in'],
+  ['audio 1', A, 'out'], ['time 1', Ti, 'out'], ['audio 2', A, 'out'], ['…', '#6e747c', 'out']]);
+const am = box(700, 8, 200, 194, 'Audio match', [['audio 1', A, 'in'], ['time 1', Ti, 'in'], ['audio 2', A, 'in'], ['…', '#6e747c', 'in'], ['audio 6 (phone 2)', A, 'in'], ['audio 7 (phone 3)', A, 'in'],
+  ['synced 1', Ti, 'out'], ['synced 2', Ti, 'out'], ['…', '#6e747c', 'out']]);
+const wire = (a, b, col) => { const dx = Math.max(30, (b[0] - a[0]) / 2);
+  w('path', {d: `M${a[0]} ${a[1]}C${a[0] + dx} ${a[1]} ${b[0] - dx} ${b[1]} ${b[0]} ${b[1]}`, fill: 'none', stroke: col, 'stroke-width': 1.6, opacity: .85}); };
+wire(src.audioout, cd.audioin, A); wire(src.videoout, cd.videoin, V); wire(src.timeout, cd.timein, Ti);
+wire(p2.audioout, cd['compare within'], A); wire(p3.audioout, cd['compare with in'], A);
+wire(src.audioout, enf.audioin, A); wire(enf.editsout, cd.cuesin, E);
+wire(cd['audio 1out'], am['audio 1in'], A); wire(cd['time 1out'], am['time 1in'], Ti); wire(cd['audio 2out'], am['audio 2in'], A);
+for (const [k, lab] of [['audio 6 (phone 2)in', 'phone 2'], ['audio 7 (phone 3)in', 'phone 3']]) { const q = am[k];
+  w('path', {d: `M${q[0] - 40} ${q[1]}H${q[0]}`, stroke: A, 'stroke-width': 1.6, 'stroke-dasharray': '3 3'}); }
+})();
+</script>
+</body>
+</html>
