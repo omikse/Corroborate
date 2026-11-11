@@ -50,6 +50,14 @@ After the change:
     correct a group to real time the same way, with a start and end of its own.
   - There is no stretched audio output. If synced playback is ever needed, a small node can take
     audio plus start and end.
+  - **An optional end input per row,** "audio end time (optional)": a thin third stripe under
+    "audio start time", grey until wired. Unwired, the end counts as start + length.
+    - Wired on the anchor row, it sets the group's real speed, so the Stretch figures become real
+      rather than relative to the anchor. The anchor's Stretch cell says "speed from its wired end".
+    - On other rows, it is compared with the measured end, as the start is with Status.
+    - On a row with no audio match, it passes straight through to "audio end time".
+    - Possible sources: ENF (start and end tied to the grid), a speed detector run before Audio
+      match, or a file's modified time from SOURCER as a rough end with a wide ±.
   - The model assumes one steady speed per recording. Files with cuts break it; they stay findings
     (the gap mark) until the cut detector splits them.
 - **Rows with nothing to place them by:** a row with no metadata that audio matched to nothing is
@@ -70,8 +78,8 @@ After the change:
   - The Status cell is split at zero: − colours the left half, + the right half.
   - The blue start line in the lanes goes.
   - The output field shows an anchor or ? in its upper left corner.
-  - Port names: the inputs are "audio" and "audio start time"; the outputs are
-    "audio start time" and "audio end time".
+  - Port names: the inputs are "audio", "audio start time" and "audio end time (optional)"; the
+    outputs are "audio start time" and "audio end time".
   - The time outputs are blue, the colour of every time port (it was amber).
   - A second status column, Stretch, shows the row's speed against its group's anchor in ppm.
     - It is split at zero: slower on the left, faster on the right.
@@ -109,6 +117,9 @@ Only `src/modules/Audio match/node.rs` and its tests.
    - Only the labels drawn on the node and the hover texts change.
    - A new output per row, `end n`, "audio end time": until stage 3 measures speeds it is
      start + length.
+   - A new optional input per row, `end in n`, "audio end time (optional)", drawn as a thin grey
+     stripe under the start time. In stage 1 it passes straight through to the end output when
+     wired. The row grows by the stripe (about 12 px at the default height).
 5. Unanchored outputs: `synced_time` stops refusing groups with no anchor.
    - A row with no metadata and no links is greyed out (the `dead` fade covers the whole row, the
      outputs included), and `synced_time` gives an error naming why.
@@ -187,13 +198,18 @@ Tests:
 5. The end output uses the measured speed: end = start + length × (1 + speed against the anchor).
    - Its ± is the start's ± and the speed's error × length, added as squares.
    - Its hover says how far it lands from start + length.
-6. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
+6. The optional end input:
+   - **Wired on the anchor row:** it gives the anchor's real speed, (end − start) ÷ length. Every
+     row's speed is then that times its speed against the anchor.
+   - **Wired on another row:** it is compared with the measured end, as Status compares the start.
+7. Same recording, speed change and gaps become marks in the Status cell's empty half, with details
    on hover, if the bottom outputs go.
 
 Tests:
 - a `drive` PNG of the Stretch column;
 - on Jiku GT_090912, the per-group fit agrees with today's solve to within 1 ms per row;
 - a phone measured at −250 ppm over a 2,400 s file ends 0.6 s after start + length;
+- an anchor end wired 0.4 s past start + length shifts every row's end by the same speed;
 - `drive` PNGs.
 
 ### 4 · Remove the pool
