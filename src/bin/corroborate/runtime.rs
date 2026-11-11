@@ -36,6 +36,8 @@ pub struct NodeState {
     pub source: sourcer_node::SourceState,
     /// Audio match: how far each wired recording has got.
     pub matching: Vec<crate::audio_match_node::Stage>,
+    /// Audio match: what the match found, its links among it, once it has ended.
+    pub found: Option<std::sync::Arc<crate::audio_match_node::Found>>,
     /// What a program sent on each of its outputs (the data bus), and a count of the changes.
     pub outbox: Vec<(&'static str, corroborate::data::Data)>,
     pub outbox_rev: u64,

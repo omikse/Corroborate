@@ -193,6 +193,26 @@ Tests:
 
 ### 3 · Audio match fits its own groups
 
+Done 2026-11-11. Differences from the plan below:
+- The fit is `clock::fit_against`, the clock solve without its breakdown (`clock::fit`), read in
+  the reference's seconds. The reference is the anchor's recording, else the group's longest
+  (so an unanchored group shows speeds too). Every clock gets the global solve's speed prior; the
+  reference is not held still. Holding it still and pulling the others toward its speed placed
+  Jiku GT_090912's starts 21 ms off the truth (median; 168 ms for 95 %) against 4 ms (25 ms).
+- "Agrees with today's solve within 1 ms" holds in the anchor's seconds (Jiku group 6: 0.002 ms).
+  In real seconds the two differ by the anchor's own speed, which audio cannot measure. The node
+  counts the anchor's clock as running true; the global solve made the group's average clock
+  run true. On Jiku the average is closer to the truth (starts 177 ms off against 280 ms, median,
+  from references up to 900 s away), since the reference phones ran up to 266 ppm fast. The
+  anchor's wired end fixes it.
+- The speed is the clock's seconds per reference second, minus 1, so a slow clock is negative.
+  End = start + length ÷ (1 + speed): −250 ppm over 2,400 s ends 0.6 s late.
+- The errors of a speed and of an end come from a fit with the reference held still. Proper
+  error margins remain the later job.
+- The match keeps what it found (`Found`: links, same recording, speed change, gaps, quality,
+  each pair's drift) in the node's state. The result file writes it; the outbox keeps only
+  `links`.
+
 1. Each synced group is fitted from this node's own links only.
    - Use `clock::solve` on just those links, inside the node.
    - Out of the fit come each row's offset and speed against the anchor, with errors, and the

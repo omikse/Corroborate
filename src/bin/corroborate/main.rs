@@ -591,8 +591,14 @@ impl App {
         // Saved before Audio match's rows had a time each.
         let old_file = keep_ids && !text.lines().any(|l| l.starts_with("format|"));
         let mut old_time: Vec<(NodeId, NodeId)> = Vec::new();
+        // Audio match's outputs that became marks in its Status cells (2026-11-11).
+        let mut gone = 0;
         for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
+                if matches!(self.nodes[a].kind, Kind::AudioMatch { .. }) && ["quality", "clock drift", "same recording", "speed change", "gaps"].contains(&o.as_str()) {
+                    gone += 1;
+                    continue;
+                }
                 if i == "time" && matches!(self.nodes[b].kind, Kind::AudioMatch { .. }) {
                     old_time.push((a, b));
                     continue;
@@ -606,6 +612,9 @@ impl App {
                     let _ = self.connect_grown(a, &o, b, &i);
                 }
             }
+        }
+        if gone > 0 {
+            self.msg = format!("{gone} wire{} dropped: Audio match no longer has the outputs quality, clock drift, same recording, speed change and gaps (they show as marks in its Status column)", if gone == 1 { "" } else { "s" });
         }
         if old_file {
             for &i in &new {

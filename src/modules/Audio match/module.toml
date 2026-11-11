@@ -27,39 +27,11 @@ many = true
 name = "links"
 kind = "link"
 title = "links"
-about = "Where two recordings hear the same sound: moment t_a on one clock is moment t_b on the other, each with an error from how clearly the audio matched. They go into the clock solve (wired or not), which learns offsets and drift."
+about = "Where two recordings hear the same sound: moment t_a on one clock is moment t_b on the other, each with an error from how clearly the audio matched. The node fits its own groups from them; until the global clock solve goes, they go into it too (wired or not)."
 needs = ["audio", "audio 2"]
 when = "recordings overlap in time and hear the same sounds"
 source = "Wang 2003 (landmarks); Guggenberger, Lux, Böszörmenyi (AudioAlign); Knapp, Carter 1976 (GCC-PHAT)"
 min_quality = "weak"
-
-[[output]]
-name = "quality"
-kind = "quality"
-title = "quality"
-about = "How well the recordings matched: pairs linked, links, chunks tried, fingerprint candidates and those the cross-correlation did not confirm, per pair."
-needs = ["audio", "audio 2"]
-when = "always"
-min_quality = "none"
-
-[[output]]
-name = "clock drift"
-kind = "json"
-title = "clock drift"
-about = "For each pair whose links span 30 s or more: how fast one clock runs against the other (ppm, with its error), from a line through that pair's links alone. The clock solve learns drift from all links together; this is each pair's own view of it (on Jiku within 24 ppm of the truth, median)."
-needs = ["audio", "audio 2"]
-when = "long overlaps"
-source = "Guggenberger, Lux, Böszörmenyi 2015"
-min_quality = "good"
-
-[[output]]
-name = "same recording"
-kind = "event"
-title = "same recording"
-about = "Two files that are one recording (a re-upload, a copy, a re-encode): not independent witnesses. An event on each file over the stretch they share, when their audio correlates over 0.8 (two phones at one event: 0.64 at most on Jiku; a video against its own audio: 1.000)."
-needs = ["audio", "audio 2"]
-when = "identical audio, no second microphone"
-min_quality = "good"
 
 [[output]]
 name = "edits"
@@ -88,28 +60,13 @@ needs = ["audio", "audio 2", "audio 3", "locations of the recordings"]
 when = "three or more recordings at known places"
 min_quality = "good"
 
-[[output]]
-name = "speed change"
-kind = "event"
-title = "speed change"
-about = "A recording played faster or slower than it was recorded: its clock drift against another over 1000 ppm beyond 3 sigma, far past a quartz clock's 300. Fingerprints match up to about 1 % of speed change only; more is not found."
-needs = ["audio", "audio 2"]
-when = "long overlap"
-min_quality = "good"
-
-[[output]]
-name = "gaps"
-kind = "event"
-title = "gaps"
-about = "Where a pair's offset jumps by 0.1 s or more (and 5 sigma) between two links in a row: one recording lacks a stretch the other has (paused or cut there), or the other has an insert. An event on the one that lacks it, between its two links. Its links on either side then disagree in the clock solve; the cut detector is to split it there."
-needs = ["audio", "audio 2"]
-when = "overlapping recordings, one paused or cut"
-min_quality = "weak"
-
 # Two per row: when the recording starts and ends ("synced 1" and "end 1", drawn as audio start
-# time and audio end time). Anchored: the group's anchored time, with the anchor's error and the
-# audio links' error. Unanchored: where the metadata (or a drag) puts the group, with the row's own
-# metadata error. The end is the start plus the length, or the wired end passed straight through.
+# time and audio end time), from the group's own fit of this node's links. Anchored: from the
+# anchor's time, with the anchor's error and the fit's. Unanchored: where the metadata (or a drag)
+# puts the group, with the row's own metadata error. The end is the start plus the length at the
+# measured speed; a row audio did not link passes its wired end straight through. What the match
+# finds besides (same recording, speed change, gaps) shows as marks in the row's Status cell, and
+# goes into the result file with the quality and each pair's clock drift.
 [[output]]
 name = "synced"
 kind = "time"

@@ -1,29 +1,35 @@
 //! The Audio match node in the workbench: the time module. Each row takes one recording's audio and
-//! the time its metadata claims, and gives a better time on its yellow output.
+//! the time its metadata claims, and gives a better start and end time on its outputs.
 //!
 //! Once the graph runs it takes the audio each wired source decodes (16 kHz, kept by the SOURCER) as
 //! soon as that source is done, brings it to 8 kHz (the fingerprints' rate, `audio_match::halve`), and
 //! fingerprints it, a core per recording; a source that gave no audio has its file decoded here
-//! instead. Then it matches every pair (`corroborate::audio_match`) on its own thread, and puts the
-//! links (with both clocks named) and their quality on its outputs; the links go into the clock solve
-//! from there like any link output. Files only for now: a stream or microphone wired in is named in
-//! the status and left out. Compiled into the `corroborate` program.
+//! instead. Then it matches every pair (`corroborate::audio_match`) on its own thread, puts the
+//! links (with both clocks named) on its links output, and keeps them with what else it found
+//! (`Found`: same recording, speed change, gaps, the quality) in the node's state. Files only for
+//! now: a stream or microphone wired in is named in the status and left out. Compiled into the
+//! `corroborate` program.
 //!
 //! On the node, one row per recording: blue is where its time input (audio start time) puts it,
 //! amber where audio puts it. Recordings linked by audio are a synced group, which exists only here.
-//! Audio says only how a group's recordings lie against each other, so until the group has an
-//! anchor its amber bars are shown with the middle of the bars on the middle of its blue ones, and
-//! the person may drag them (saved with the project, logged); those times come out marked "?". A
-//! person picks one row's time as the group's anchor: the audio's start snaps to it, every other row
-//! keeps its real offset, and the group's times leave through the clock solve, marked with an
-//! anchor. Each row gives its audio start time and audio end time (start + length, or its optional
-//! end input passed straight through). A row with no time metadata that audio linked to nothing has
-//! nothing to place it by: it is greyed out and gives nothing. Nothing is ever hidden or left out
-//! for being far off: a time 200 years away stays in view until a person corrects it in a Time node.
+//! Each group is fitted from this node's links alone (`fit_groups`): every recording's offset and
+//! speed against the group's reference recording (the anchor's, else the longest), whose clock
+//! counts as running true. Audio says only how a group's recordings lie against each other, so
+//! until the group has an anchor its amber bars are shown with the middle of the bars on the middle
+//! of its blue ones, and the person may drag them (saved with the project, logged); those times
+//! come out marked "?". A person picks one row's time as the group's anchor: the audio's start
+//! snaps to it, every other row follows along the fit, marked with an anchor. Each row gives its
+//! audio start time and audio end time: start + length at the measured speed (an end wired into
+//! the anchor row makes the speeds real). A row with no time metadata that audio linked to nothing
+//! has nothing to place it by: it is greyed out and gives nothing. Nothing is ever hidden or left
+//! out for being far off: a time 200 years away stays in view until a person corrects it in a
+//! Time node.
 
 use super::*;
 use corroborate::audio_match::{self, Clip, Placed};
+use corroborate::clock::Link;
 use corroborate::data::{Data, Event};
+use corroborate::sync::Fit;
 use corroborate::module_manifest::{PortLabel, PortLook, Side};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -78,6 +84,22 @@ pub struct Row {
     /// Where audio puts its start (shown after a match), and how far from there the time input is.
     pub start: Option<f64>,
     pub off: Option<f64>,
+    /// Where audio puts its end: the start plus its length at the speed the fit measured.
+    pub end: Option<f64>,
+    /// The errors (1 sigma) of `start` and `end`, seconds.
+    pub start_err: f64,
+    pub end_err: f64,
+    /// How fast its clock runs against its group's reference recording, ppm (negative: slow), and
+    /// the error; against real time when the anchor's end is wired. None for the reference itself
+    /// (unless its end is wired) and for a row audio did not link.
+    pub speed: Option<(f64, f64)>,
+    /// The group's speeds are measured against this recording.
+    pub reference: bool,
+    /// This node's links on its clock, and how far they sit from the fit (root mean square), s.
+    pub links: usize,
+    pub leftover: f64,
+    /// What the match found on it: same recording, speed change, gaps.
+    pub marks: Vec<Mark>,
     /// In `MatchView::groups`.
     pub group: usize,
     pub stage: Option<Stage>,
@@ -99,6 +121,99 @@ pub struct Group {
     pub anchor: Option<usize>,
     /// Unanchored, and dragged by hand away from where its metadata puts it.
     pub moved: bool,
+    /// The row whose recording its speeds are measured against: the anchor's, else the longest.
+    pub reference: Option<usize>,
+    /// The anchor row's end is wired: its speeds are real, not against the anchor.
+    pub real_speed: bool,
+}
+
+/// What the match found on a recording besides its links.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkKind {
+    Same,
+    Speed,
+    Gap,
+}
+
+/// A finding on a row: drawn in its Status cell, the words on hover.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub kind: MarkKind,
+    pub text: String,
+}
+
+/// What a match found, kept with the node's state once it ends.
+#[derive(Clone, Debug, Default)]
+pub struct Found {
+    /// Every link, both clocks named.
+    pub links: Vec<Link>,
+    pub same: Vec<Event>,
+    pub speed: Vec<Event>,
+    pub gaps: Vec<Event>,
+    /// For the result file: the quality type's JSON, and each pair's own clock drift.
+    pub quality: String,
+    pub drift: String,
+}
+
+/// One fit of a node's links: each clock against its group's reference recording.
+#[derive(Debug)]
+pub struct Fits {
+    /// Moment t on a clock is moment `at(t)` on its group's reference clock.
+    pub clocks: BTreeMap<String, Fit>,
+    /// Each link's leftover: how far apart its two moments land on the fit, seconds.
+    pub leftover: Vec<f64>,
+}
+
+/// Fits `links`, each group of linked clocks read in the seconds of the clock in `refs` it holds
+/// (`clock::fit_against`): that clock keeps its own time.
+pub fn fit_groups(links: &[Link], refs: &BTreeSet<String>) -> Fits {
+    let (clocks, leftover) = corroborate::clock::fit_against(links, refs);
+    Fits { clocks, leftover }
+}
+
+/// How fast a clock fitted `f` runs: its seconds per second of the reference, minus 1, in ppm,
+/// and the error; `k` is real seconds per second of the reference.
+fn speed_ppm(f: &Fit, k: f64) -> (f64, f64) {
+    ((1.0 / (k * (1.0 + f.rate)) - 1.0) * 1e6, f.var_rate.sqrt() * 1e6)
+}
+
+/// Where a recording fitted `f` starts and ends: its moments 0 and `len` on the reference clock,
+/// into real time by where the reference starts (`at`) and its speed `k` (real seconds per second).
+pub fn place(f: &Fit, len: f64, at: f64, k: f64) -> (f64, f64) {
+    (at + k * f.at(0.0), at + k * f.at(len))
+}
+
+/// A clock with no links: its own time.
+const SAME_CLOCK: Fit = Fit { offset: 0.0, rate: 0.0, center: 0.0, var_offset: 0.0, var_rate: 0.0, cov: 0.0 };
+
+/// The fit, in words, for a row's time: "; fitted on 31 links, leftover 4.2 ms", or nothing for a
+/// row audio did not link.
+fn fit_words(v: &MatchView, r: &Row) -> String {
+    if !v.linked(r) || r.links == 0 {
+        return String::new();
+    }
+    let against = v.groups[r.group].reference.filter(|_| !r.reference).map_or(String::new(), |k| format!(" against {}", v.rows[k].name));
+    let speed = match r.speed {
+        Some((p, e)) if !r.reference => format!(", speed {p:+.1} ± {e:.1} ppm{against}"),
+        _ => String::new(),
+    };
+    format!("; fitted on {} links, leftover {:.1} ms{speed}", r.links, r.leftover * 1000.0)
+}
+
+/// `+47 ms`, `-1.30 s`.
+pub(crate) fn ms_text(d: f64) -> String {
+    if d.abs() < 0.0005 {
+        "0 ms".to_string()
+    } else if d.abs() < 1.0 {
+        format!("{:+.0} ms", d * 1000.0)
+    } else {
+        format!("{d:+.2} s")
+    }
+}
+
+/// `-23`, `+4`, `0`.
+fn ppm_text(p: f64) -> String {
+    if p.abs() < 0.5 { "0".to_string() } else { format!("{p:+.0}") }
 }
 
 /// What a node's rows are this frame.
@@ -113,11 +228,18 @@ pub struct MatchView {
     /// The stamps of the group the hint is about agree better read as ends: how far they disagree
     /// as starts and as ends, by group.
     pub spreads: Vec<Option<(f64, f64)>>,
+    /// How far the links sit from their groups' fits, the median, seconds.
+    pub leftover: Option<f64>,
 }
 
 impl MatchView {
     pub fn anchored(&self, r: &Row) -> bool {
         self.groups.get(r.group).is_some_and(|g| g.anchor.is_some())
+    }
+
+    /// Audio linked it to another recording, and placed it.
+    pub fn linked(&self, r: &Row) -> bool {
+        self.done && r.start.is_some() && self.groups.get(r.group).is_some_and(|g| g.rows.iter().filter(|&&k| self.rows[k].clock.is_some()).count() >= 2)
     }
 }
 
@@ -197,11 +319,26 @@ impl App {
         v
     }
 
+    /// The fit of node `i`'s links against references `refs`, worked out once per run and choice
+    /// of references (`run`: the state's run and outbox revision).
+    fn match_fits(&self, i: NodeId, run: (u64, u64), links: &[Link], refs: BTreeSet<String>) -> Rc<Fits> {
+        let key = (run.0, run.1, refs);
+        if let Some((k, f)) = self.match_ui.fits.borrow().get(&i) {
+            if *k == key {
+                return f.clone();
+            }
+        }
+        let f = Rc::new(fit_groups(links, &key.2));
+        self.match_ui.fits.borrow_mut().insert(i, (key, f.clone()));
+        f
+    }
+
     fn match_view_now(&self, i: NodeId) -> MatchView {
-        let (done, running, stages) = {
+        let (done, running, stages, found, run) = {
             let s = self.nodes[i].state.lock().unwrap();
-            (s.done, s.running, s.matching.clone())
+            (s.done, s.running, s.matching.clone(), s.found.clone(), (s.run_id, s.outbox_rev))
         };
+        let links: &[Link] = found.as_deref().map_or(&[], |f| &f.links);
         let saved: BTreeSet<&str> = self.nodes[i].kind.rows().iter().filter_map(|(k, _)| k.strip_prefix("anchor ")).collect();
         let spec = &self.graph.nodes()[i].spec;
         let mut rows: Vec<Row> = Vec::new();
@@ -260,8 +397,7 @@ impl App {
             }
         }
         if done {
-            let uid = &self.nodes[i].uid;
-            for l in self.ev.links.iter().filter(|l| l.enabled && l.from == *uid) {
+            for l in links {
                 if let (Some(&a), Some(&b)) = (by_clock.get(l.a.as_str()), by_clock.get(l.b.as_str())) {
                     let (a, b) = (root(&mut parent, a), root(&mut parent, b));
                     parent[a.max(b)] = a.min(b);
@@ -286,7 +422,12 @@ impl App {
                 g.number = number;
             }
             g.anchor = g.rows.iter().copied().find(|&k| rows[k].meta.is_some() && rows[k].uid.as_deref().is_some_and(|u| saved.contains(u)));
+            // Speeds are measured against the anchor's recording, else the group's longest.
+            g.reference = g.anchor.or_else(|| g.rows.iter().copied().filter(|&k| rows[k].clock.is_some()).max_by(|&a, &b| rows[a].len.total_cmp(&rows[b].len).then(b.cmp(&a))));
         }
+        let refs: BTreeSet<String> = groups.iter().filter_map(|g| rows[g.reference?].clock.clone()).collect();
+        let fits = (done && !links.is_empty()).then(|| self.match_fits(i, run, links, refs));
+        let fit_of = |r: &Row| r.clock.as_ref().and_then(|c| fits.as_ref()?.clocks.get(c)).copied().unwrap_or(SAME_CLOCK);
         let shift_of = |g: &Group| saved_shift(&self.nodes[i].kind, &g.key);
         for g in &mut groups {
             g.moved = g.anchor.is_none() && shift_of(g) != 0.0;
@@ -295,34 +436,53 @@ impl App {
         // The middle of every time there is: where a group with no time at all is shown.
         let all_mids: Vec<f64> = rows.iter().filter_map(|r| r.meta.map(|t| mid(t, r.len))).collect();
         let mut spreads = vec![None; groups.len()];
+        let mut leftover = None;
         if done {
-            for (gi, g) in groups.iter().enumerate() {
-                let starts: Vec<f64> = rows.iter().map(|r| r.clock.as_deref().map_or(0.0, |c| self.ev.clocks.get(c).at(0.0))).collect();
-                let start = |k: usize| starts[k];
+            for (gi, g) in groups.iter_mut().enumerate() {
                 let audio_rows: Vec<usize> = g.rows.iter().copied().filter(|&k| rows[k].clock.is_some()).collect();
                 let timed: Vec<usize> = audio_rows.iter().copied().filter(|&k| rows[k].meta.is_some()).collect();
                 let linked = audio_rows.len() >= 2;
                 if !linked && timed.is_empty() {
                     continue; // alone, with no time: nowhere to show it
                 }
-                let shift = match g.anchor {
-                    Some(a) if rows[a].clock.as_deref().is_some_and(|c| self.ev.clocks.get(c).kind == corroborate::clock::Kind::Absolute) => 0.0,
-                    Some(a) => rows[a].meta.unwrap_or(0.0) - start(a),
+                let start = |k: usize| fit_of(&rows[k]).at(0.0);
+                // Where the reference clock's 0 is in real time, and real seconds per its second.
+                let (at, k_real) = match g.anchor {
+                    Some(a) => {
+                        let meta = rows[a].meta.unwrap_or(0.0);
+                        // The anchor's wired end gives its real speed.
+                        let k = rows[a].end_in.filter(|_| rows[a].len > 0.0).map(|e| (e - meta) / rows[a].len).filter(|k| *k > 0.0);
+                        g.real_speed = k.is_some();
+                        (meta, k.unwrap_or(1.0))
+                    }
                     None => {
                         let metas: Vec<f64> = timed.iter().map(|&k| mid(rows[k].meta.unwrap_or(0.0), rows[k].len)).collect();
                         let over: &[usize] = if timed.is_empty() { &audio_rows } else { &timed };
                         let audios: Vec<f64> = over.iter().map(|&k| mid(start(k), rows[k].len)).collect();
                         let centre = mean(&metas).or(mean(&all_mids)).unwrap_or(0.0);
-                        centre - mean(&audios).unwrap_or(0.0) + shift_of(g)
+                        (centre - mean(&audios).unwrap_or(0.0) + shift_of(g), 1.0)
                     }
                 };
+                // Unanchored, each time keeps its own metadata error; a row with none the group's largest.
+                let largest = timed.iter().map(|&k| rows[k].meta_err).fold(0.0, f64::max);
+                let anchor_err = g.anchor.map(|a| rows[a].meta_err);
                 for &k in &audio_rows {
-                    let at = start(k) + shift;
-                    rows[k].start = Some(at);
-                    rows[k].off = rows[k].meta.map(|t| t - at);
+                    let f = fit_of(&rows[k]);
+                    let (s0, s1) = place(&f, rows[k].len, at, k_real);
+                    let r = &mut rows[k];
+                    r.start = Some(s0);
+                    r.end = Some(s1);
+                    r.off = r.meta.map(|t| t - s0);
+                    r.start_err = match anchor_err {
+                        Some(e) => e.hypot(f.error_at(0.0)),
+                        None => r.meta.map_or(largest, |_| r.meta_err),
+                    };
+                    r.end_err = r.start_err.hypot(f.var_rate.sqrt() * r.len);
+                    r.reference = linked && g.reference == Some(k);
+                    r.speed = (linked && (!r.reference || g.real_speed)).then(|| speed_ppm(&f, k_real));
                 }
                 if linked && g.anchor.is_none() {
-                    let recs: Vec<Placed> = audio_rows.iter().map(|&k| Placed { stamp: rows[k].meta, len: rows[k].len, start: start(k) }).collect();
+                    let recs: Vec<Placed> = audio_rows.iter().map(|&k| Placed { stamp: rows[k].meta, len: rows[k].len, start: fit_of(&rows[k]).at(0.0) }).collect();
                     spreads[gi] = audio_match::stamp_spread(&recs, false).zip(audio_match::stamp_spread(&recs, true));
                 }
                 // How far off is about its own length: compared directly once anchored; before an
@@ -332,13 +492,41 @@ impl App {
                     rows[k].hint = rows[k].meta.is_some() && if g.anchor.is_some() { rows[k].off.is_some_and(|d| (d.abs() - rows[k].len).abs() <= HINT_S) } else { as_ends };
                 }
             }
+            // Each row's links and how far they sit from the fit; the marks the match left on it.
+            if let Some(fits) = &fits {
+                let mut per: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
+                for (l, d) in links.iter().zip(&fits.leftover).filter(|(_, d)| d.is_finite()) {
+                    for c in [l.a.as_str(), l.b.as_str()] {
+                        let e = per.entry(c).or_default();
+                        e.0 += 1;
+                        e.1 += d * d;
+                    }
+                }
+                for r in rows.iter_mut() {
+                    if let Some(&(n, sq)) = r.clock.as_deref().and_then(|c| per.get(c)) {
+                        (r.links, r.leftover) = (n, (sq / n as f64).sqrt());
+                    }
+                }
+                let mut all: Vec<f64> = fits.leftover.iter().filter(|d| d.is_finite()).map(|d| d.abs()).collect();
+                all.sort_by(f64::total_cmp);
+                leftover = all.get(all.len() / 2).copied();
+            }
+            if let Some(f) = &found {
+                for r in rows.iter_mut() {
+                    for (kind, evs) in [(MarkKind::Same, &f.same), (MarkKind::Speed, &f.speed), (MarkKind::Gap, &f.gaps)] {
+                        for e in evs.iter().filter(|e| r.clock.as_deref() == Some(e.clock.as_str())) {
+                            r.marks.push(Mark { kind, text: format!("{}: {}", e.label, e.detail) });
+                        }
+                    }
+                }
+            }
             if let Some(lost) = self.match_ui.lost.get(&i) {
                 for r in rows.iter_mut() {
                     r.lost = r.uid.as_ref().is_some_and(|u| lost.contains(u));
                 }
             }
         }
-        MatchView { rows, groups, done, running, real, spreads }
+        MatchView { rows, groups, done, running, real, spreads, leftover }
     }
 
     /// The anchors node `i`'s groups have: the audio's start is at that row's time.
@@ -355,9 +543,10 @@ impl App {
     }
 
     /// The better time on output `out`: "synced 3" is row 3's audio start time, "end 3" its audio
-    /// end time. Anchored, through the clock solve; unanchored, where the group's metadata (or a
-    /// drag) puts it, with the row's own metadata error. The end is the start plus the length, or
-    /// the row's end input passed straight through when wired.
+    /// end time. Anchored, from the anchor's time along the group's own fit; unanchored, where the
+    /// group's metadata (or a drag) puts it, with the row's own metadata error. The end is the
+    /// start plus the length at the speed the fit measured; a row audio did not link passes its
+    /// wired end straight through, or gives start + length.
     pub(crate) fn synced_time(&self, i: NodeId, out: &str) -> Result<Data, String> {
         let (end, n) = match (out.strip_prefix("synced "), out.strip_prefix("end ")) {
             (Some(n), _) => (false, n),
@@ -365,39 +554,40 @@ impl App {
             _ => return Err("no such output".into()),
         };
         let n: usize = n.parse().map_err(|_| "no such output")?;
-        if end {
+        let v = self.match_view(i);
+        let r = v.rows.get(n - 1).ok_or("no such row")?;
+        if end && !v.linked(r) {
             if let Some((f, o)) = self.graph.feeder(i, &format!("end in {n}")) {
                 return self.value_from(f, o);
             }
         }
-        let v = self.match_view(i);
-        let r = v.rows.get(n - 1).ok_or("no such row")?;
         if cell(&v, n - 1).1 {
             return Err("no time metadata, and audio linked it to nothing: nothing to place it by".into());
         }
         let clock = r.clock.clone().ok_or("no audio wired into this row")?;
         let g = &v.groups[r.group];
-        let (utc, error_s, source) = match g.anchor {
-            Some(a) => {
-                let (utc, e) = self.ev.clocks.to_utc(&clock, 0.0).ok_or("its synced group's anchor is not in the clock solve")?;
-                (utc, e, format!("Audio match, anchored on the time of {}", v.rows[a].name))
-            }
+        let at = r.start.ok_or(if v.done { "audio did not place it" } else { "not matched yet: run the graph" })?;
+        let source = match g.anchor {
+            Some(a) => format!("Audio match, anchored on the time of {}", v.rows[a].name),
             None => {
-                let at = r.start.ok_or(if v.done { "audio did not place it" } else { "not matched yet: run the graph" })?;
-                let errs: Vec<f64> = g.rows.iter().filter(|&&k| v.rows[k].meta.is_some()).map(|&k| v.rows[k].meta_err).collect();
-                if errs.is_empty() {
+                if !g.rows.iter().any(|&k| v.rows[k].meta.is_some()) {
                     return Err("no time metadata in its synced group: nothing to place it by".into());
                 }
-                // A row with no metadata of its own takes the group's largest error.
-                let e = if r.meta.is_some() { r.meta_err } else { errs.iter().copied().fold(0.0, f64::max) };
                 let how = if g.moved { "moved by hand" } else { "average of metadata" };
-                (at, e, format!("Audio match, unanchored: {how}"))
+                format!("Audio match, unanchored: {how}")
             }
         };
+        let fitted = fit_words(&v, r);
         Ok(if end {
-            Data::Time { clock, t: r.len, utc: Some(utc + r.len), error_s, source: format!("{source}, plus its length {:.3} s", r.len) }
+            let e = r.end.unwrap_or(at + r.len);
+            let how = match r.speed {
+                _ if r.reference && g.real_speed => "; its wired end".to_string(),
+                Some((ppm, _)) => format!("; its length at the measured speed {ppm:+.1} ppm, {} from start + length", ms_text(e - at - r.len)),
+                None => format!(", plus its length {:.3} s", r.len),
+            };
+            Data::Time { clock, t: r.len, utc: Some(e), error_s: r.end_err, source: format!("{source}{how}{fitted}") }
         } else {
-            Data::Time { clock, t: 0.0, utc: Some(utc), error_s, source }
+            Data::Time { clock, t: 0.0, utc: Some(at), error_s: r.start_err, source: format!("{source}{fitted}") }
         })
     }
 
@@ -647,14 +837,8 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         }
         let r = results(&used, &found, &errors);
         set(&|s| {
-            s.outbox = vec![
-                ("links", Data::Custom { kind: "link", json: r.links.clone() }),
-                ("quality", Data::Custom { kind: "quality", json: r.quality.clone() }),
-                ("clock drift", Data::Json(r.drift.clone())),
-                ("same recording", Data::Events(r.same.clone())),
-                ("speed change", Data::Events(r.speed.clone())),
-                ("gaps", Data::Events(r.gaps.clone())),
-            ];
+            s.outbox = vec![("links", Data::Custom { kind: "link", json: r.links.clone() })];
+            s.found = Some(Arc::new(r.found.clone()));
             s.outbox_rev += 1;
             s.status = format!("{}{note}", r.status);
             s.running = false;
@@ -703,21 +887,16 @@ fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
     if out.is_empty() { Err("no audio".into()) } else { Ok(out) }
 }
 
-/// What the match gives on the node's outputs.
+/// What the match gives: its links output, and what it found, kept with the node's state.
+/// `found`'s quality is the `quality` type's fields, then the counts it rests on and each pair's;
+/// its drift a JSON list, one per pair with a long enough span of links, of how fast a's clock
+/// runs against b's (`audio_match::drift`); its same recording an event on each of the two clocks
+/// over the matched stretch, its speed change one on b's clock, its gaps one on the recording
+/// that lacks the stretch.
 struct Results {
     /// JSON list of the `link` type, both clocks named.
     links: String,
-    /// The `quality` type's fields, then the counts it rests on and each pair's.
-    quality: String,
-    /// JSON list, one per pair with a long enough span of links: how fast a's clock runs
-    /// against b's (`audio_match::drift`).
-    drift: String,
-    /// For each pair that is one recording twice, an event on each of the two clocks over the
-    /// matched stretch; for each pair one of which plays at another speed, one on b's clock.
-    same: Vec<Event>,
-    speed: Vec<Event>,
-    /// Where a pair's offset jumps: an event on the recording that lacks the stretch.
-    gaps: Vec<Event>,
+    found: Found,
     status: String,
 }
 
@@ -732,6 +911,7 @@ fn span(hits: &[audio_match::Hit], a: bool) -> (f64, f64) {
 fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors: &[String]) -> Results {
     let (mut drifts, mut same, mut speed, mut gaps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut links = Vec::new();
+    let mut fitted = Vec::new();
     let mut pairs = Vec::new();
     let (mut chunks, mut cands, mut weak, mut linked) = (0, 0, 0, 0);
     let mut group: Vec<usize> = (0..used.len()).collect();
@@ -814,6 +994,7 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
             }
         }
         for h in &p.hits {
+            fitted.push(Link { a: wa.clock.clone(), t_a: h.t_a, b: wb.clock.clone(), t_b: h.t_b, error_s: h.error_s, from: String::new(), enabled: true });
             links.push(format!(
                 "{{\"a\":\"{}\",\"t_a\":{:.6},\"b\":\"{}\",\"t_b\":{:.6},\"error_s\":{:.6},\"source\":\"audio match: {} / {}, PSR {:.1}, {} fingerprint votes\"}}",
                 json_escape(&wa.clock),
@@ -870,7 +1051,7 @@ fn results(used: &[&Wired], found: &[(usize, usize, audio_match::Pair)], errors:
     if !gaps.is_empty() {
         status += &format!(", {} gap{}", gaps.len(), if gaps.len() == 1 { "" } else { "s" });
     }
-    Results { links: format!("[{}]", links.join(",")), quality, drift: format!("[{}]", drifts.join(",")), same, speed, gaps, status }
+    Results { links: format!("[{}]", links.join(",")), found: Found { links: fitted, same, speed, gaps, quality, drift: format!("[{}]", drifts.join(",")) }, status }
 }
 
 /// The node's part of the result file: what it gave on each output, and each row's better time.
@@ -886,10 +1067,27 @@ pub fn json(app: &App, i: NodeId) -> String {
             let synced = app.synced_time(i, &format!("synced {}", r.n)).map_or("null".to_string(), |d| d.to_json());
             let end = app.synced_time(i, &format!("end {}", r.n)).map_or("null".to_string(), |d| d.to_json());
             let g = &v.groups[r.group];
-            format!("{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"synced\":{synced},\"end\":{end}}}", r.n, json_escape(&r.name), g.number, g.anchor == Some(r.n - 1))
+            let speed = r.speed.map_or("null".to_string(), |(p, e)| format!("{{\"ppm\":{p:.2},\"error_ppm\":{e:.2}}}"));
+            let marks: Vec<String> = r.marks.iter().map(|m| format!("\"{}\"", json_escape(&m.text))).collect();
+            format!(
+                "{{\"row\":{},\"recording\":\"{}\",\"time_in\":{meta},\"group\":{},\"anchor\":{},\"reference\":{},\"speed\":{speed},\"links\":{},\"leftover_s\":{:.6},\"marks\":[{}],\"synced\":{synced},\"end\":{end}}}",
+                r.n,
+                json_escape(&r.name),
+                g.number,
+                g.anchor == Some(r.n - 1),
+                r.reference,
+                r.links,
+                r.leftover,
+                marks.join(",")
+            )
         })
         .collect();
-    format!(",\"outputs\":{{{}}},\"rows\":[{}]", outs.join(","), rows.join(","))
+    let found = app.nodes[i].state.lock().unwrap().found.clone();
+    let found = found.map_or(String::new(), |f| {
+        let ev = |v: &[Event]| Data::Events(v.to_vec()).to_json();
+        format!(",\"quality\":{},\"clock_drift\":{},\"same_recording\":{},\"speed_change\":{},\"gaps\":{}", f.quality, f.drift, ev(&f.same), ev(&f.speed), ev(&f.gaps))
+    });
+    format!(",\"outputs\":{{{}}}{found},\"rows\":[{}]", outs.join(","), rows.join(","))
 }
 
 // ---------------------------------------------------------------- the rows on the node
@@ -914,16 +1112,19 @@ pub struct MatchUi {
     pub anchor_at: HashMap<(NodeId, usize), Rect>,
     /// Each node's rows this frame (cleared at the start of the canvas).
     pub cache: std::cell::RefCell<HashMap<NodeId, Rc<MatchView>>>,
+    /// Each node's last fit, by run, outbox revision and references.
+    fits: std::cell::RefCell<HashMap<NodeId, ((u64, u64, BTreeSet<String>), Rc<Fits>)>>,
 }
 
 // Unzoomed, from the top of the node.
-const NODE_W: f32 = 980.0;
+const NODE_W: f32 = 1080.0;
 const TOP: f32 = HEAD + 4.0;
 const BAR_H: f32 = 30.0;
 const RULER_H: f32 = 26.0;
 const FOOT_H: f32 = 46.0;
 const LEFT_W: f32 = 170.0;
 const STATUS_W: f32 = 116.0;
+const STRETCH_W: f32 = 100.0;
 const RIGHT_W: f32 = 116.0;
 const ROW_DEFAULT: f32 = 64.0;
 /// The thinnest row is its file name and nothing else.
@@ -1147,6 +1348,76 @@ fn off_color(d: f64) -> (Color32, Color32) {
     (hsl(0.0, 0.65, 0.46 * (1.0 - f)), if f > 0.3 { Color32::WHITE } else { INK })
 }
 
+/// How far a speed fills its half of the Stretch cell, 0 to 1, on a log scale: 30 ppm (a phone's
+/// clock) fills half, 1000 ppm (`SPEED_CHANGE_PPM`, a file played at another speed) all of it.
+fn speed_fill(ppm: f64) -> f32 {
+    ((1.0 + ppm.abs()).ln() / (1.0 + audio_match::SPEED_CHANGE_PPM).ln()).min(1.0) as f32
+}
+
+/// Green near 0 ppm, red toward 1000.
+fn speed_color(ppm: f64) -> Color32 {
+    hsl(130.0 * (1.0 - speed_fill(ppm)), 0.62, 0.46)
+}
+
+/// What a row's Stretch cell says.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stretch {
+    /// The recording its group's speeds are measured against; its real speed (ppm) when its end
+    /// is wired.
+    Reference(Option<f64>),
+    /// ppm against the reference (or real), its error, and how far the row's wired end is from
+    /// the measured end.
+    Speed(f64, f64, Option<f64>),
+    Empty,
+}
+
+/// The Stretch cell of row `k`.
+pub fn stretch(v: &MatchView, k: usize) -> Stretch {
+    let r = &v.rows[k];
+    if !v.linked(r) {
+        return Stretch::Empty;
+    }
+    match r.speed {
+        _ if r.reference => Stretch::Reference(r.speed.map(|s| s.0)),
+        Some((p, e)) => Stretch::Speed(p, e, r.end_in.zip(r.end).map(|(w, e)| w - e)),
+        None => Stretch::Empty,
+    }
+}
+
+/// A finding's mark, drawn in `r`: two squares (a copy), two chevrons (another speed), a broken
+/// line (a gap).
+fn mark_icon(p: &egui::Painter, r: Rect, kind: MarkKind, col: Color32) {
+    let at = |x: f32, y: f32| r.min + Vec2::new(x / 16.0 * r.width(), y / 16.0 * r.height());
+    let st = Stroke::new((r.width() * 0.1).max(1.0), col);
+    match kind {
+        MarkKind::Same => {
+            p.rect_stroke(Rect::from_min_max(at(1.0, 1.0), at(11.0, 11.0)), 0.0, st, StrokeKind::Inside);
+            p.rect_stroke(Rect::from_min_max(at(5.0, 5.0), at(15.0, 15.0)), 0.0, st, StrokeKind::Inside);
+        }
+        MarkKind::Speed => {
+            for dx in [0.0, 6.0] {
+                p.add(egui::Shape::line(vec![at(2.0 + dx, 2.0), at(8.0 + dx, 8.0), at(2.0 + dx, 14.0)], st));
+            }
+        }
+        MarkKind::Gap => {
+            p.line_segment([at(0.0, 8.0), at(5.0, 8.0)], st);
+            p.line_segment([at(11.0, 8.0), at(16.0, 8.0)], st);
+            p.line_segment([at(5.0, 3.0), at(5.0, 13.0)], st);
+            p.line_segment([at(11.0, 3.0), at(11.0, 13.0)], st);
+        }
+    }
+}
+
+/// Diagonal lines across `r`, `gap` apart.
+fn hatch(p: &egui::Painter, r: Rect, gap: f32, st: Stroke) {
+    let c = p.with_clip_rect(r.intersect(p.clip_rect()));
+    let mut x = r.left() - r.height();
+    while x < r.right() {
+        c.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x + r.height(), r.top())], st);
+        x += gap;
+    }
+}
+
 /// What a row's status cell says.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cell {
@@ -1299,6 +1570,29 @@ fn row_hover(v: &MatchView, r: &Row) -> String {
         let word = if v.anchored(r) { "audio starts" } else { "audio shown at" };
         h.push(format!("{word} {} UTC", timebase::fmt_utc(t)));
     }
+    if v.linked(r) {
+        let g = &v.groups[r.group];
+        h.push(format!("fitted on {} links of this node, leftover {:.1} ms (root mean square)", r.links, r.leftover * 1000.0));
+        let real = if g.real_speed { "real time (the anchor's wired end)" } else { "" };
+        match (r.reference, r.speed) {
+            (true, Some((p, _))) => h.push(format!("its wired end gives its real speed: {p:+.1} ppm; every row's speed is against real time")),
+            (true, None) => h.push("the group's speeds are measured against this recording".to_string()),
+            (false, Some((p, e))) => {
+                let against = if g.real_speed { real.to_string() } else { g.reference.map_or(String::new(), |k| v.rows[k].name.clone()) };
+                h.push(format!("its clock runs {p:+.1} ± {e:.1} ppm against {against}"));
+            }
+            _ => {}
+        }
+        if let (Some(s0), Some(e)) = (r.start, r.end) {
+            h.push(format!("audio ends {} UTC: {} from start + length", timebase::fmt_utc(e), ms_text(e - s0 - r.len)));
+            if let Some(w) = r.end_in.filter(|_| !r.reference) {
+                h.push(format!("its wired end is {} from the measured end", ms_text(w - e)));
+            }
+        }
+    }
+    for m in &r.marks {
+        h.push(m.text.clone());
+    }
     if let Some((s, e)) = v.spreads.get(r.group).copied().flatten() {
         h.push(format!("this group's times disagree by about {s:.1} s read as starts, {e:.1} s read as ends"));
     }
@@ -1356,10 +1650,8 @@ impl crate::look::NodeLook for Look {
         if let Some(n) = number("end ") {
             return at(Side::Right, row(n) + lead + (room + END_H) * 0.75);
         }
-        // The other outputs: along the bottom edge, at the right.
-        let fixed = ["links", "quality", "clock drift", "same recording", "speed change", "gaps"];
-        let k = fixed.iter().position(|f| *f == name)?;
-        Some(PortLook { side: Some(Side::Bottom), at: Some(NODE_W - 50.0 - (fixed.len() - 1 - k) as f32 * 102.0), ..Default::default() })
+        // The links: on the bottom edge, at the right.
+        (name == "links").then(|| PortLook { side: Some(Side::Bottom), at: Some(NODE_W - 50.0), ..Default::default() })
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
@@ -1387,7 +1679,7 @@ impl crate::look::NodeLook for Look {
         app.match_ui.slots.insert(i, slots);
 
         let x0 = body.left();
-        let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + RIGHT_W) * z);
+        let track_x = (x0 + LEFT_W * z, body.right() - (STATUS_W + STRETCH_W + RIGHT_W) * z);
         let rows_top = body.top() + (BAR_H + RULER_H) * z;
         let pitch = (rh + END_H) * z;
         let row_top = |slot: usize| rows_top + slot as f32 * pitch;
@@ -1398,7 +1690,7 @@ impl crate::look::NodeLook for Look {
         }
 
         // The axis.
-        let bars: Vec<(f64, f64)> = v.rows.iter().flat_map(|r| [r.meta.map(|t| (t, t + r.len)), r.start.map(|t| (t, t + r.len))]).flatten().collect();
+        let bars: Vec<(f64, f64)> = v.rows.iter().flat_map(|r| [r.meta.map(|t| (t, t + r.len)), r.start.map(|t| (t, r.end.unwrap_or(t + r.len).max(t + r.len)))]).flatten().collect();
         let fit = fit_axis(&bars);
         let held = app.match_ui.grab.as_ref().filter(|g| g.0 == i).map(|g| g.2);
         let (v0, v1) = held.or(app.match_ui.views.get(&i).copied()).unwrap_or(fit);
@@ -1436,6 +1728,16 @@ impl crate::look::NodeLook for Look {
             let r = p.text(Pos2::new(sw.right() + 5.0 * z, y), Align2::LEFT_CENTER, text, font(11.0), DIM);
             lx = r.right() + 12.0 * z;
         }
+        {
+            // The stretch: an amber bar to a dashed line, hatched past it.
+            let sw = Rect::from_min_size(Pos2::new(lx, y - 5.0 * z), Vec2::new(20.0 * z, 10.0 * z));
+            p.rect_filled(sw, 0.0, alpha(AMBER, BAR_ALPHA));
+            let cut = sw.left() + 13.0 * z;
+            hatch(&p, Rect::from_min_max(Pos2::new(cut, sw.top()), sw.max), 3.0 * z, Stroke::new(z, INK));
+            p.extend(egui::Shape::dashed_line(&[Pos2::new(cut, sw.top() - 2.0 * z), Pos2::new(cut, sw.bottom() + 2.0 * z)], Stroke::new(z, BOTH), 2.0 * z, 2.0 * z));
+            let r = p.text(Pos2::new(sw.right() + 5.0 * z, y), Align2::LEFT_CENTER, "stretch: start + length ¦ measured end", font(11.0), DIM);
+            lx = r.right() + 12.0 * z;
+        }
         let scale = if span < 86400.0 { format!("{} to {}", timebase::fmt_utc_clock(v0), timebase::fmt_utc_clock(v1)) } else { format!("{} to {}", &timebase::fmt_utc(v0)[..10], &timebase::fmt_utc(v1)[..10]) };
         let scale = p.layout_no_wrap(scale, mono(11.5), DIM);
         let at = Pos2::new(body.right() - 8.0 * z - scale.size().x, y - scale.size().y * 0.5);
@@ -1460,7 +1762,8 @@ impl crate::look::NodeLook for Look {
             ticks += 1;
         }
         p.text(Pos2::new(track.right() + STATUS_W * 0.5 * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Status", font(11.0), DIM);
-        p.text(Pos2::new(track.right() + (STATUS_W + 8.0) * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, "output", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + (STATUS_W + STRETCH_W * 0.5) * z, track.top() + RULER_H * 0.5 * z), Align2::CENTER_CENTER, "Stretch", font(11.0), DIM);
+        p.text(Pos2::new(track.right() + (STATUS_W + STRETCH_W + 8.0) * z, track.top() + RULER_H * 0.5 * z), Align2::LEFT_CENTER, "output", font(11.0), DIM);
 
         // The rows.
         let mut press_anchor: Option<usize> = None;
@@ -1543,7 +1846,7 @@ impl crate::look::NodeLook for Look {
                 (c > a || (b.0 <= v1 && b.1 >= v0)).then(|| Rect::from_min_max(Pos2::new(a, lane.top()), Pos2::new(c.max(a + 2.0 * z), lane.bottom())))
             };
             let blue = r.meta.map(|t| (t, t + r.len));
-            let amber = r.start.map(|t| (t, t + r.len));
+            let amber = r.start.map(|t| (t, r.end.unwrap_or(t + r.len)));
             let (mut gone, mut shown) = (None, false);
             // See-through, so an overlap shows both bars.
             for (bar, col) in [(blue, BLUE), (amber, AMBER)] {
@@ -1572,6 +1875,29 @@ impl crate::look::NodeLook for Look {
             if let Some(g) = gone.filter(|_| !shown) {
                 let (at, side, text) = if g < 0.0 { (lane.left() + 6.0 * z, Align2::LEFT_CENTER, format!("< {}", gap_text(g))) } else { (lane.right() - 6.0 * z, Align2::RIGHT_CENTER, format!("{} >", gap_text(g))) };
                 p.text(Pos2::new(at, lane.center().y), side, text, mono(11.0), DIM);
+            }
+            // The stretch: a dashed line where start + length would end, the bit of bar past it
+            // hatched, a bar ending short of it cut; at least 4 px either way, so it shows at any
+            // zoom. The size beside it. The reference has none.
+            if let (Some(s0), Some(e), true) = (r.start, r.end, v.linked(r) && !r.reference) {
+                let d = e - (s0 + r.len);
+                let (xn, xe) = (tx(s0 + r.len), tx(e));
+                if xn > lane.left() && xn < lane.right() {
+                    let w = (xe - xn).abs().max(4.0 * z);
+                    let piece = if d >= 0.0 { Rect::from_min_max(Pos2::new(xn, lane.top()), Pos2::new(xn + w, lane.bottom())) } else { Rect::from_min_max(Pos2::new(xn - w, lane.top()), Pos2::new(xn, lane.bottom())) };
+                    if d >= 0.0 {
+                        p.rect_filled(piece, 0.0, fade(alpha(AMBER, BAR_ALPHA)));
+                        hatch(&p, piece, 3.0 * z, Stroke::new(z, fade(INK)));
+                    } else {
+                        p.rect_filled(piece, 0.0, TRACK);
+                        p.rect_stroke(piece, 0.0, Stroke::new(z, fade(alpha(AMBER, BAR_ALPHA))), StrokeKind::Inside);
+                    }
+                    p.extend(egui::Shape::dashed_line(&[Pos2::new(xn, lane.top()), Pos2::new(xn, lane.bottom())], Stroke::new(z, fade(BOTH)), 3.0 * z, 2.0 * z));
+                    let text = p.layout_no_wrap(format!("end {}", ms_text(d)), mono(10.5), fade(TEXT));
+                    let right = piece.right().max(xn) + 4.0 * z;
+                    let at = if right + text.size().x < lane.right() { right } else { piece.left().min(xn) - 4.0 * z - text.size().x };
+                    p.galley(Pos2::new(at, lane.bottom() - 4.0 * z - text.size().y), text, TEXT);
+                }
             }
 
             // The status cell.
@@ -1624,21 +1950,88 @@ impl crate::look::NodeLook for Look {
                 }
                 Cell::Empty => {}
             }
+            // What the match found on it: marks in the cell's empty half (or its lower right),
+            // the words on hover.
+            if !r.marks.is_empty() {
+                let s = (13.0 * z).min(cell_r.height() * 0.4);
+                let kinds: Vec<MarkKind> = [MarkKind::Same, MarkKind::Speed, MarkKind::Gap].into_iter().filter(|k| r.marks.iter().any(|m| m.kind == *k)).collect();
+                let room = match &status {
+                    Cell::Off(d, _) if *d < 0.0 => Rect::from_min_max(Pos2::new(cell_r.center().x, cell_r.top()), cell_r.max),
+                    Cell::Off(..) => Rect::from_min_max(cell_r.min, Pos2::new(cell_r.center().x, cell_r.bottom())),
+                    _ => cell_r,
+                };
+                let row_w = kinds.len() as f32 * (s + 3.0 * z) - 3.0 * z;
+                let mut mx = if matches!(status, Cell::Off(..)) { room.center().x - row_w * 0.5 } else { room.right() - row_w - 4.0 * z };
+                let my = room.bottom() - s - 3.0 * z;
+                for kind in kinds {
+                    let at = Rect::from_min_size(Pos2::new(mx, my), Vec2::splat(s));
+                    mark_icon(&p, at, kind, AMBER);
+                    let words: Vec<&str> = r.marks.iter().filter(|m| m.kind == kind).map(|m| m.text.as_str()).collect();
+                    ui.interact(at.expand(2.0 * z), egui::Id::new(("match-mark", i, r.n, kind as u8)), Sense::hover()).on_hover_text(words.join("\n"));
+                    mx += s + 3.0 * z;
+                }
+            }
+
+            // The Stretch cell: the row's speed against its group's reference, split at zero like
+            // Status (slower on the left), green near 0, red toward 1000 ppm.
+            let st_r = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(cell_r.right() + STRETCH_W * z, bottom));
+            let fit_text = |p: &egui::Painter, t: &str, w: f32, size: f32| {
+                let mut size = size;
+                while size > 7.0 && p.layout_no_wrap(t.to_string(), mono(size), TEXT).size().x > w - 4.0 * z {
+                    size -= 0.5;
+                }
+                size
+            };
+            match stretch(&v, k) {
+                Stretch::Reference(real) => {
+                    let t = match real {
+                        Some(ppm) => format!("speed from its\nwired end\n{ppm:+.1} ppm"),
+                        None => "reference".to_string(),
+                    };
+                    let size = t.lines().map(|l| fit_text(&p, l, st_r.width(), 11.0)).fold(11.0, f32::min);
+                    p.text(st_r.center(), Align2::CENTER_CENTER, t, mono(size), fade(DIM));
+                }
+                Stretch::Speed(ppm, _, wired) => {
+                    let mid = st_r.center().x;
+                    let full = if ppm < 0.0 { Rect::from_min_max(st_r.min, Pos2::new(mid, st_r.bottom())) } else { Rect::from_min_max(Pos2::new(mid, st_r.top()), st_r.max) };
+                    let w = (full.width() * speed_fill(ppm)).max(2.0 * z);
+                    let fill = if ppm < 0.0 { Rect::from_min_max(Pos2::new(mid - w, full.top()), Pos2::new(mid, full.bottom())) } else { Rect::from_min_max(Pos2::new(mid, full.top()), Pos2::new(mid + w, full.bottom())) };
+                    p.rect_filled(fill, 0.0, fade(speed_color(ppm)));
+                    let ink = if speed_fill(ppm) >= 0.95 { INK } else { TEXT };
+                    let t = format!("{}\nppm", ppm_text(ppm));
+                    let size = t.lines().map(|l| fit_text(&p, l, full.width(), 12.0)).fold(12.0, f32::min);
+                    p.text(full.center(), Align2::CENTER_CENTER, t, mono(size), fade(ink));
+                    p.line_segment([Pos2::new(mid, st_r.top()), Pos2::new(mid, st_r.bottom())], Stroke::new(1.0, GRID));
+                    // A wired end, against the measured one: in the empty half.
+                    if let Some(off) = wired {
+                        let empty = if ppm < 0.0 { Rect::from_min_max(Pos2::new(mid, st_r.top()), st_r.max) } else { Rect::from_min_max(st_r.min, Pos2::new(mid, st_r.bottom())) };
+                        let t = format!("wired\nend\n{}", ms_text(off));
+                        let size = t.lines().map(|l| fit_text(&p, l, empty.width(), 10.0)).fold(10.0, f32::min);
+                        p.text(empty.center(), Align2::CENTER_CENTER, t, mono(size), fade(TEXT));
+                    }
+                }
+                Stretch::Empty => {}
+            }
+            if !matches!(stretch(&v, k), Stretch::Empty) {
+                ui.interact(st_r, egui::Id::new(("match-stretch", i, r.n)), Sense::hover()).on_hover_text(row_hover(&v, r));
+            }
 
             // The output.
             // The outputs: audio start time over audio end time, blue when they give a time, each
             // marked in its upper left: an anchor when the group is anchored, ? when it is placed by
             // metadata or by hand.
-            let out_col = Rect::from_min_max(Pos2::new(cell_r.right() + z, inner), Pos2::new(edge_r, bottom));
+            let out_col = Rect::from_min_max(Pos2::new(st_r.right() + z, inner), Pos2::new(edge_r, bottom));
             wide.rect_filled(Rect::from_min_size(out_col.min, Vec2::new(out_col.width(), strip_h)), 0.0, fade(STRIP));
             p.text(out_col.min + Vec2::new(8.0 * z, strip_h * 0.5), Align2::LEFT_CENTER, shorten(&r.name, 15), mono(11.5), fade(TEXT));
             let mark = app.output_mark(i, &v, k);
             let fields_top = inner + strip_h;
             let fh = (out_col.bottom() - fields_top) * 0.5;
+            // A row audio did not link passes its wired end straight through.
+            let passes = r.end_wired && !v.linked(r);
             for (f, text) in ["audio start time", "audio end time"].into_iter().enumerate() {
                 let fr = Rect::from_min_max(Pos2::new(out_col.left(), fields_top + f as f32 * fh), Pos2::new(out_col.right(), fields_top + (f as f32 + 1.0) * fh));
                 // The end passes a wired end straight through, whatever the start does.
-                let gives = if f == 1 && r.end_wired { r.end_in.is_some() } else { mark.is_some() };
+                let gives = if f == 1 && passes { r.end_in.is_some() } else { mark.is_some() };
                 wide.rect_filled(fr, 0.0, fade(if gives { TIME_OUT } else { OFF }));
                 if f == 1 {
                     wide.rect_filled(Rect::from_min_max(fr.min, Pos2::new(edge_r, fr.top() + z)), 0.0, SEAM);
@@ -1647,7 +2040,7 @@ impl crate::look::NodeLook for Look {
                     p.text(Pos2::new(body.right() - 12.0 * z, fr.center().y), Align2::RIGHT_CENTER, text, font(10.5), if gives { INK } else { DIM });
                 }
                 let s = (18.0 * z).min(fh - 2.0 * z);
-                match mark.filter(|_| gives && s >= 6.0 * z && !(f == 1 && r.end_wired)) {
+                match mark.filter(|_| gives && s >= 6.0 * z && !(f == 1 && passes)) {
                     Some(true) => anchor_icon(&p, Rect::from_min_size(fr.min + Vec2::new(3.0 * z, 1.0 * z), Vec2::splat(s)), INK),
                     Some(false) => {
                         let at = fr.min + Vec2::new(5.0 * z, -1.0 * z);
@@ -1687,8 +2080,11 @@ impl crate::look::NodeLook for Look {
 
         // The foot: what the node is doing.
         let status_text = app.nodes[i].state.lock().unwrap().status.clone();
-        let text = if status_text.is_empty() { "not run".to_string() } else { status_text };
-        p.text(Pos2::new(body.left() + 8.0 * z, rows_bottom + 24.0 * z), Align2::LEFT_CENTER, shorten(&text, 70), font(11.5), DIM);
+        let mut text = if status_text.is_empty() { "not run".to_string() } else { status_text };
+        if let Some(l) = v.leftover {
+            text += &format!(" · fitted per group: median leftover {:.1} ms", l * 1000.0);
+        }
+        p.text(Pos2::new(body.left() + 8.0 * z, rows_bottom + 24.0 * z), Align2::LEFT_CENTER, shorten(&text, 120), font(11.5), DIM);
 
         // The track: the wheel zooms around the pointer, a drag on an unanchored group's amber bar
         // moves the group, any other drag pans, a double-click fits everything.
@@ -1820,6 +2216,64 @@ mod tests {
         assert_eq!(order_of(&Kind::AudioMatch { rows: vec![("order by group".into(), "true".into())] }), Order::GroupMetaStart);
         assert_eq!(order_of(&Kind::AudioMatch { rows: vec![("order".into(), "start-group".into())] }), Order::StartGroup);
         assert_eq!(order_of(&Kind::AudioMatch { rows: Vec::new() }), Order::Wired);
+    }
+
+    /// b's clock runs 250 ppm slow against a's: links every 5 minutes over 40 minutes.
+    fn slow_links() -> Vec<Link> {
+        (0..9)
+            .map(|k| {
+                let t_a = 20.0 + 300.0 * k as f64;
+                Link { a: "a".into(), t_a, b: "b".into(), t_b: (t_a - 20.0) * (1.0 - 250e-6), error_s: 0.005, from: String::new(), enabled: true }
+            })
+            .collect()
+    }
+
+    /// A phone measured at -250 ppm over a 2,400 s file ends 0.6 s after start + length, whichever
+    /// clock id sorts first.
+    #[test]
+    fn a_slow_clock_ends_late() {
+        for (a, b) in [("a", "b"), ("zz", "b")] {
+            let links: Vec<Link> = slow_links().into_iter().map(|l| Link { a: a.into(), b: b.into(), ..l }).collect();
+            let fits = fit_groups(&links, &[a.to_string()].into());
+            let (fa, fb) = (fits.clocks[a], fits.clocks[b]);
+            assert!((fa.at(1234.0) - 1234.0).abs() < 1e-9, "the reference keeps its own time");
+            let (p, e) = speed_ppm(&fb, 1.0);
+            assert!((p + 250.0).abs() < 1.0 && e < 5.0, "{p} ± {e}");
+            let (s0, s1) = place(&fb, 2400.0, 1000.0, 1.0);
+            assert!((s0 - 1020.0).abs() < 1e-3, "b starts 20 s into a: {s0}");
+            assert!((s1 - s0 - 2400.0 - 0.6).abs() < 0.01, "ends {} s after start + length", s1 - s0 - 2400.0);
+            assert!(fits.leftover.iter().all(|d| d.abs() < 1e-3), "{:?}", fits.leftover);
+        }
+    }
+
+    /// An anchor end wired 0.4 s past start + length: the anchor's clock runs slow against real
+    /// time, and every row's end moves by that same speed.
+    #[test]
+    fn an_anchor_end_scales_every_row() {
+        let fits = fit_groups(&slow_links(), &["a".to_string()].into());
+        let (fa, fb) = (fits.clocks["a"], fits.clocks["b"]);
+        let (len_a, len_b, at) = (3000.0, 2400.0, 5000.0);
+        let k = (len_a + 0.4) / len_a;
+        assert_eq!(place(&fa, len_a, at, k).1, at + len_a + 0.4, "the anchor ends at its wired end");
+        let (plain, real) = (place(&fb, len_b, at, 1.0), place(&fb, len_b, at, k));
+        let grew = |x: (f64, f64)| x.1 - x.0;
+        assert!((grew(real) / grew(plain) - k).abs() < 1e-12, "b's length grows by the anchor's speed");
+        assert!((real.0 - at - 20.0 * k).abs() < 1e-3, "and its start moves with the anchor's seconds");
+        let (pa, _) = speed_ppm(&fa, k);
+        let (pb, _) = speed_ppm(&fb, k);
+        assert!((pa + 133.3).abs() < 0.1 && (pb - pa + 250.0).abs() < 1.0, "real speeds {pa} {pb}");
+    }
+
+    #[test]
+    fn speeds_fill_on_a_log_scale() {
+        assert!((speed_fill(30.0) - 0.5).abs() < 0.02);
+        assert_eq!(speed_fill(-5000.0), 1.0);
+        let (green, red) = (speed_color(0.0), speed_color(1000.0));
+        assert!(green.g() > green.r() && red.r() > 2 * red.g(), "{green:?} {red:?}");
+        assert_eq!(ms_text(0.0472), "+47 ms");
+        assert_eq!(ms_text(-0.0001), "0 ms");
+        assert_eq!((ppm_text(-0.2), ppm_text(-23.4)), ("0".to_string(), "-23".to_string()));
+        assert_eq!(ms_text(-1.3), "-1.30 s");
     }
 
     #[test]

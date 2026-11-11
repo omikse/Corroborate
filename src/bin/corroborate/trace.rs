@@ -48,7 +48,7 @@ impl App {
             Kind::Time { .. } => self.time_did(i),
             Kind::AudioMatch { .. } => {
                 let n = out.strip_prefix("end ").or(out.strip_prefix("synced ")).and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
-                if out.starts_with("end ") && self.graph.feeder(i, &format!("end in {n}")).is_some() {
+                if out.starts_with("end ") && self.end_passes(i, n) {
                     return "passed its wired end time straight through".into();
                 }
                 let own = match v {
@@ -78,10 +78,8 @@ impl App {
                     (_, Some(n)) => (true, n.parse::<usize>().ok()?),
                     _ => return None,
                 };
-                if end {
-                    if let Some(f) = self.graph.feeder(i, &format!("end in {n}")) {
-                        return Some(f);
-                    }
+                if end && self.end_passes(i, n) {
+                    return self.graph.feeder(i, &format!("end in {n}"));
                 }
                 // Anchored: the anchor row's time; unanchored: the row's own.
                 let v = self.match_view(i);
@@ -91,6 +89,12 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Audio match row `n`'s wired end goes out unchanged: audio did not link the row.
+    fn end_passes(&self, i: NodeId, n: usize) -> bool {
+        let v = self.match_view(i);
+        self.graph.feeder(i, &format!("end in {n}")).is_some() && !v.rows.get(n.wrapping_sub(1)).is_some_and(|r| v.linked(r))
     }
 
     /// The trace as hover text: a numbered line per node, oldest first.

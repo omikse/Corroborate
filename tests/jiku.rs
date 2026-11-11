@@ -361,6 +361,60 @@ fn jiku_gt_090912_sync_from_audio() {
             println!("  devices {devs}: solved {:+.0} ppm, truth {:+.0} ppm", sv * 1e6, tr * 1e6);
         }
     }
+    // Audio match fits each group itself (`clock::fit_against`) and reads it in the seconds of its
+    // reference recording (the anchor's; here each group's longest), which counts as running true.
+    // In those seconds it puts every start where the global solve does; in real seconds the two
+    // differ by the reference's own speed, which audio cannot measure (the global solve's prior
+    // makes the group's average clock run true). That speed is most of either's error against the
+    // truth, whose reference phones ran up to 266 ppm fast (the lab's Galaxy S II). The anchor's
+    // wired end (from ENF, say) gives the reference's real speed.
+    {
+        let mut refs: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for r in &recs {
+            let c = alone.get(&r.name);
+            if c.kind == clock::Kind::None {
+                continue;
+            }
+            let e = refs.entry(c.group.clone()).or_insert_with(|| r.name.clone());
+            if recs[idx(e)].len_s() < r.len_s() {
+                *e = r.name.clone();
+            }
+        }
+        let (own, _) = clock::fit_against(&ls, &refs.values().cloned().collect());
+        let anchors: Vec<clock::Anchor> = refs.values().map(|r| clock::Anchor { clock: r.clone(), t: 0.0, utc: 0.0, error_s: 1.0, from: "test".into(), enabled: true }).collect();
+        let global = clock::solve(&anchors, &ls);
+        let (mut e_own, mut e_global, mut apart, mut e_ref, mut e_ref_global) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for r in &recs {
+            let c = alone.get(&r.name);
+            let Some(rf) = refs.get(&c.group).filter(|rf| **rf != r.name) else { continue };
+            let rr = &recs[idx(rf)];
+            // In real seconds from the reference's start, and in the reference's own seconds.
+            let truth = conv.to_event(r, 0.0) - conv.to_event(rr, 0.0);
+            let truth_ref = conv.from_event(rr, conv.to_event(r, 0.0));
+            let (gr, gf) = (global.get(&r.name), global.get(rf));
+            let (o, g, g_ref) = (own[&r.name].at(0.0), gr.at(0.0) - gf.at(0.0), gf.back(gr.at(0.0)));
+            e_own.push((o - truth).abs());
+            e_global.push((g - truth).abs());
+            apart.push((o - g_ref).abs());
+            e_ref.push((o - truth_ref).abs());
+            e_ref_global.push((g_ref - truth_ref).abs());
+        }
+        let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * 1e3;
+        println!(
+            "starts of {} recordings from their group's reference, in its seconds: per-group fit off the truth by median {:.1} ms, 95% {:.1} ms, global solve {:.1} ms, {:.1} ms; the two apart by at most {:.3} ms. In real seconds: per-group fit {:.1} ms, {:.1} ms; global solve {:.1} ms, {:.1} ms",
+            e_own.len(),
+            ms(&mut e_ref, 0.5),
+            ms(&mut e_ref, 0.95),
+            ms(&mut e_ref_global, 0.5),
+            ms(&mut e_ref_global, 0.95),
+            ms(&mut apart, 1.0),
+            ms(&mut e_own, 0.5),
+            ms(&mut e_own, 0.95),
+            ms(&mut e_global, 0.5),
+            ms(&mut e_global, 0.95)
+        );
+        assert!(pct(&mut apart, 1.0) < 0.001, "in the reference's seconds the per-group fit puts every start where the global solve does");
+    }
     // Each pair's own drift (a line through its links, `audio_match::drift`) against the truth.
     let mut dd = Vec::new();
     let mut outside = 0;

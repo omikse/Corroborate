@@ -274,9 +274,10 @@ fn not_comparable_and_the_result_file() {
 
 /// Audio match: two files that heard one event (b starts 20.5 s into it, a at its start; b's
 /// microphone hears an echo and its own noise) wired into an Audio match node give links naming
-/// both clocks, and the clock solve puts b's 10 s at a's 30.5 s, in one group. A third file, a
-/// quieter copy of a, is called the same recording as a (and b is not); a and its copy's links
-/// span 45 s, enough for their drift (none).
+/// both clocks, and the node's own fit puts b's 10 s at a's 30.5 s, in one group. A third file, a
+/// quieter copy of a, is marked the same recording as a (and b is not); a and its copy's links
+/// span 45 s, enough for their drift (none). The anchor's end wired 0.4 s past start + length
+/// moves every end by the anchor's real speed. PNGs audio_match_stretch and audio_match_marks.
 #[test]
 fn audio_match_links_two_recordings() {
     let ev = corroborate::synth::notes(90.0, 8000, 11);
@@ -407,6 +408,35 @@ fn audio_match_links_two_recordings() {
     assert!(d.app().nodes[m].kind.rows().iter().any(|(k, v)| k == "order" && v == "group-off"), "the order is kept");
     assert_eq!(d.app().match_ui.slots[&m][..3], [0, 2, 1], "the anchor, then 2 s off, then 2.5 s off");
     d.shot("audio_match_by_how_far_off");
+    // The Stretch column: the anchor is the reference; the others' speeds against it, near 0.
+    use crate::audio_match_node::{stretch, Stretch};
+    assert_eq!(stretch(&view, 0), Stretch::Reference(None));
+    for k in [1, 2] {
+        let Stretch::Speed(ppm, _, None) = stretch(&view, k) else { panic!("row {}: {:?}", k + 1, stretch(&view, k)) };
+        assert!(ppm.abs() < 300.0, "row {}: {ppm} ppm", k + 1);
+    }
+    let Ok(Data::Time { source, .. }) = d.app().value_from(m, "end 2") else { panic!("no end out of row 2") };
+    assert!(source.contains("measured speed") && source.contains("fitted on"), "{source}");
+    d.shot("audio_match_stretch");
+    // The anchor's end wired 0.4 s past start + length: its clock runs slow against real time, so
+    // every row's seconds are longer, and the anchor's Stretch cell says its speed came from there.
+    let (len_a, (s2, e2)) = {
+        let v = d.app().match_view(m);
+        (v.rows[0].len, (v.rows[1].start.unwrap(), v.rows[1].end.unwrap()))
+    };
+    let end_a = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), timebase::fmt_utc(1000.0 + len_a + 0.4)), ("error_s".into(), "0.1".into())] }, Pos2::new(30.0, 1100.0));
+    d.app().wire(end_a, "value", m, "end in 1");
+    d.frames(3);
+    let view = d.app().match_view(m);
+    let k = (len_a + 0.4) / len_a;
+    let Stretch::Reference(Some(real)) = stretch(&view, 0) else { panic!("{:?}", stretch(&view, 0)) };
+    assert!((real - (1.0 / k - 1.0) * 1e6).abs() < 1.0, "the anchor runs {real} ppm against real time");
+    let (s2k, e2k) = (view.rows[1].start.unwrap(), view.rows[1].end.unwrap());
+    assert!(((s2k - 1000.0) - k * (s2 - 1000.0)).abs() < 1e-6 && ((e2k - s2k) - k * (e2 - s2)).abs() < 1e-6, "row 2 moves by the same speed: {s2} {e2} -> {s2k} {e2k}");
+    let Ok(Data::Time { utc: Some(end1), .. }) = d.app().value_from(m, "end 1") else { panic!("no end out of row 1") };
+    assert!((end1 - (1000.0 + len_a + 0.4)).abs() < 1e-6, "the anchor's end is its wired end: {end1}");
+    d.shot("audio_match_anchor_end");
+    d.app().graph.disconnect(m, "end in 1");
     d.app().graph.disconnect(m, "time 2");
     d.app().graph.disconnect(m, "time 3");
     d.app().toggle_anchor(m, 0);
@@ -417,28 +447,44 @@ fn audio_match_links_two_recordings() {
     assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
-    let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") else { panic!("no quality: {st}") };
-    assert!(json.contains("\"level\":\"good\""), "{json}");
-    app.update_clocks();
+    let found = app.nodes[m].state.lock().unwrap().found.clone().expect("what the match found");
+    assert!(found.quality.contains("\"level\":\"good\""), "{}", found.quality);
     let (ua, ub, uc) = (uid(app, a), uid(app, b), uid(app, c));
-    let ab: Vec<_> = app.ev.links.iter().filter(|l| (l.a == ua && l.b == ub) || (l.a == ub && l.b == ua)).collect();
+    let ab: Vec<_> = found.links.iter().filter(|l| (l.a == ua && l.b == ub) || (l.a == ub && l.b == ua)).collect();
     assert!(ab.len() >= 2, "links between a and b: {} ({st})", ab.len());
-    let Ok(Data::Events(same)) = app.value_from(m, "same recording") else { panic!("no same recording output: {st}") };
-    let mut on: Vec<&str> = same.iter().map(|e| e.clock.as_str()).collect();
+    let mut on: Vec<&str> = found.same.iter().map(|e| e.clock.as_str()).collect();
     on.sort();
     let mut want = vec![ua.as_str(), uc.as_str()];
     want.sort();
-    assert_eq!(on, want, "a and its copy are one recording, b is not: {same:?}");
-    assert!(same.iter().all(|e| e.t_end - e.t_start > 40.0), "{same:?}");
-    let Ok(Data::Json(drift)) = app.value_from(m, "clock drift") else { panic!("no drift: {st}") };
-    assert_eq!(drift.matches("\"ppm\"").count(), 1, "only a and its copy span 30 s of links: {drift}");
-    assert!(matches!(app.value_from(m, "speed change"), Ok(Data::Events(v)) if v.is_empty()));
-    assert!(matches!(app.value_from(m, "gaps"), Ok(Data::Events(v)) if v.is_empty()), "no gaps");
-    let (ca, cb) = (app.ev.clocks.get(&ua), app.ev.clocks.get(&ub));
-    assert_eq!((ca.kind, ca.group.clone()), (Ck::Relative, cb.group.clone()), "one group");
-    let on_a = ca.back(cb.at(10.0));
+    assert_eq!(on, want, "a and its copy are one recording, b is not: {:?}", found.same);
+    assert!(found.same.iter().all(|e| e.t_end - e.t_start > 40.0), "{:?}", found.same);
+    assert_eq!(found.drift.matches("\"ppm\"").count(), 1, "only a and its copy span 30 s of links: {}", found.drift);
+    assert!(found.speed.is_empty() && found.gaps.is_empty(), "no speed change, no gaps");
+    // Same recording is a mark in the Status cells of a and its copy, with the words on hover.
+    let view = app.match_view(m);
+    let marks = |k: usize| view.rows[k].marks.iter().map(|x| x.kind).collect::<Vec<_>>();
+    use crate::audio_match_node::MarkKind;
+    assert_eq!((marks(0), marks(1), marks(2)), (vec![MarkKind::Same], vec![], vec![MarkKind::Same]));
+    assert!(view.rows[0].marks[0].text.contains("same recording as"), "{:?}", view.rows[0].marks);
+    assert!(app.value_from(m, "gaps").is_err() && app.value_from(m, "quality").is_err(), "the outputs went");
+    assert!(view.leftover.is_some_and(|l| l < 0.05), "{:?}", view.leftover);
+    // The node's own fit: b's 10 s is a's 30.5 s.
+    let fits = crate::audio_match_node::fit_groups(&found.links, &[ua.clone()].into());
+    let on_a = fits.clocks[&ub].at(10.0);
     assert!((on_a - 30.5).abs() < 0.002, "b's 10 s is a's {on_a}");
+    let json = crate::audio_match_node::json(app, m);
+    assert!(json.contains("\"same_recording\":[") && json.contains("\"leftover_s\""), "{json}");
     app.stop_all();
+    d.frames(2);
+    d.shot("audio_match_marks");
+    // A project wiring an output that went: the wire is dropped, and the message says so.
+    let mut text = d.app().project_text();
+    let id = format!("id={}", uid(d.app(), m));
+    let mi = text.lines().filter(|l| l.starts_with("node|")).position(|l| l.split('|').any(|f| f == id)).expect("the node's line");
+    text.push_str(&format!("wire|{mi}|gaps|{mi}|audio 9\n"));
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    assert!(back.msg.contains("1 wire dropped"), "{}", back.msg);
 }
 
 /// A row's audio and time, and the wire out of its yellow output, survive save and load by name;
@@ -751,7 +797,7 @@ fn make_jiku_project() {
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
     println!("{st} ({:.0} s)", t0.elapsed().as_secs_f64());
-    if let Ok(Data::Custom { json, .. }) = app.value_from(m, "quality") {
+    if let Some(json) = app.nodes[m].state.lock().unwrap().found.as_ref().map(|f| f.quality.clone()) {
         let e = json.find("\"errors\"").unwrap_or(0);
         println!("{}", &json[e..json.len().min(e + 3000)]);
     }
@@ -1151,8 +1197,23 @@ fn audio_match_timeline() {
     }
     assert!(d.app().ev.clocks.contradictions.is_empty(), "{:?}", d.app().ev.clocks.contradictions.len());
     for (k, x) in v.rows.iter().enumerate().filter(|(_, r)| r.wired) {
-        println!("{:28} {:?}", x.name, cell(&v, k).0);
+        println!("{:28} {:?} {:?}", x.name, cell(&v, k).0, crate::audio_match_node::stretch(&v, k));
     }
+    // The node's own fit of its group against the global clock solve: each row's start, in the
+    // anchor's seconds. (In real seconds they differ by the anchor's own speed: the node counts
+    // the anchor's clock as running true, the global solve the group's average.)
+    let a = v.groups.iter().find_map(|g| g.anchor).expect("anchored");
+    let meta_a = v.rows[a].meta.unwrap();
+    let ga = d.app().ev.clocks.get(v.rows[a].clock.as_deref().unwrap());
+    let mut worst = 0.0f64;
+    for r in v.rows.iter().filter(|r| r.wired) {
+        let gr = d.app().ev.clocks.get(r.clock.as_deref().unwrap());
+        let (own, global) = (r.start.unwrap() - meta_a, ga.back(gr.at(0.0)));
+        println!("{:28} {:?} own fit {own:+.4} s, global {global:+.4} s from the anchor's start, in its seconds: {:+.3} ms", r.name, crate::audio_match_node::stretch(&v, v.rows.iter().position(|x| x.n == r.n).unwrap()), (own - global) * 1000.0);
+        worst = worst.max((own - global).abs());
+    }
+    println!("per-group fit against the global solve: worst {:.3} ms, median leftover {:.2} ms", worst * 1000.0, v.leftover.unwrap_or(f64::NAN) * 1000.0);
+    assert!(worst < 0.001, "the per-group fit agrees with the global solve to within 1 ms: {:.3} ms", worst * 1000.0);
     d.shot("am_5_anchored");
 
     // The track: wheel zooms it and not the canvas, a drag pans it.

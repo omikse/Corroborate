@@ -205,9 +205,62 @@ pub fn solve(anchors: &[Anchor], links: &[Link]) -> Clocks {
     solve_devices(anchors, links, &BTreeMap::new())
 }
 
+/// As `solve`, without each piece of evidence's share of the error (`breakdown` stays empty and
+/// `speed_share` 0): one fit instead of one per piece of evidence, for a node that fits its own
+/// links. A relative group's reference clock (the first by id) has offset 0 and speed 0, so every
+/// other clock's fit is against it.
+pub fn fit(anchors: &[Anchor], links: &[Link]) -> Clocks {
+    solve_inner(anchors, links, &BTreeMap::new(), false)
+}
+
+/// Each group of linked clocks fitted from `links` and read in the seconds of its reference clock
+/// (the one in `refs` it holds, else its first by id): moment t on a clock is `at(t)` on its
+/// reference, whose own fit is t itself, so the reference counts as running true. Every clock's
+/// speed has the same prior (±`RATE_PRIOR` against real time, as in `solve`), so the reference is
+/// not favoured: holding it still instead, and pulling the others toward its speed, placed Jiku
+/// GT_090912's starts 21 ms off the truth (median, 168 ms for 95 %) against 4 ms (25 ms). The
+/// errors are each clock's against its reference, from a fit with the reference held still. Also
+/// each link's leftover: how far apart its two moments land, seconds (NaN off the fit).
+pub fn fit_against(links: &[Link], refs: &BTreeSet<ClockId>) -> (BTreeMap<ClockId, Fit>, Vec<f64>) {
+    // The reference held still: the solve measures a relative group against its first clock by
+    // id, so the reference is named to sort first. This gives the groups and the errors.
+    let name = |c: &str| if refs.contains(c) { format!("0{c}") } else { format!("1{c}") };
+    let renamed: Vec<Link> = links.iter().map(|l| Link { a: name(&l.a), b: name(&l.b), ..l.clone() }).collect();
+    let held = fit(&[], &renamed);
+    let ref_of: BTreeMap<ClockId, ClockId> = held.clocks.iter().map(|(k, c)| (k[1..].to_string(), c.group[1..].to_string())).collect();
+    // Every clock alike, each group anchored on its reference (where does not matter: it is read
+    // back in the reference's seconds). This gives the values.
+    let roots: BTreeSet<&ClockId> = ref_of.values().collect();
+    let anchors: Vec<Anchor> = roots.iter().map(|c| Anchor { clock: (*c).clone(), t: 0.0, utc: 0.0, error_s: 1.0, from: String::new(), enabled: true }).collect();
+    let alike = fit(&anchors, links);
+    let mut out = BTreeMap::new();
+    for (c, f) in &ref_of {
+        let (gc, gf) = (alike.get(c).fit, alike.get(f).fit);
+        let err = held.get(&name(c)).fit;
+        if !gc.offset.is_finite() || !gf.offset.is_finite() {
+            continue;
+        }
+        let at = gf.back(gc.at(gc.center));
+        let fit = if c == f { ZERO } else { Fit { offset: at - gc.center, rate: (1.0 + gc.rate) / (1.0 + gf.rate) - 1.0, center: gc.center, var_offset: err.var_offset, var_rate: err.var_rate, cov: err.cov } };
+        out.insert(c.clone(), fit);
+    }
+    let leftover = links
+        .iter()
+        .map(|l| match (out.get(&l.a), out.get(&l.b)) {
+            (Some(a), Some(b)) if ref_of.get(&l.a) == ref_of.get(&l.b) => a.at(l.t_a) - b.at(l.t_b),
+            _ => f64::NAN,
+        })
+        .collect();
+    (out, leftover)
+}
+
 /// As `solve`, but clocks with the same `device` run at one speed (each keeps its own offset).
 /// The speed is shared within a group of linked clocks.
 pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>) -> Clocks {
+    solve_inner(anchors, links, device, true)
+}
+
+fn solve_inner(anchors: &[Anchor], links: &[Link], device: &BTreeMap<ClockId, String>, shares: bool) -> Clocks {
     let err = |e: f64| if e.is_finite() { e.max(MIN_ERROR_S) } else { MIN_ERROR_S };
     let mut names: BTreeSet<&str> = BTreeSet::new();
     names.extend(anchors.iter().map(|a| a.clock.as_str()));
@@ -277,8 +330,8 @@ pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<Clock
         let (kind, group) = if ga.is_empty() { (Kind::Relative, ids[members[0]].to_string()) } else { (Kind::Absolute, UTC.to_string()) };
 
         // Each piece of evidence's share: move it by its error and see how far each clock moves.
-        let mut shares: Vec<Vec<(Ev, f64)>> = vec![Vec::new(); m];
-        for k in 0..ga.len() + gl.len() {
+        let mut parts: Vec<Vec<(Ev, f64)>> = vec![Vec::new(); m];
+        for k in (0..ga.len() + gl.len()).filter(|_| shares) {
             let (mut pa, mut pl) = (ga.clone(), gl.clone());
             let ev = if k < ga.len() {
                 pa[k].3 += pa[k].4;
@@ -291,13 +344,13 @@ pub fn solve_devices(anchors: &[Anchor], links: &[Link], device: &BTreeMap<Clock
             for (c, f) in offsets(m, &pa, &pl, &rate_of).into_iter().enumerate() {
                 let at = base[c].center;
                 let d = f.at(at) - base[c].at(at);
-                shares[c].push((ev, d * d));
+                parts[c].push((ev, d * d));
             }
         }
-        for (c, mut br) in shares.into_iter().enumerate() {
+        for (c, mut br) in parts.into_iter().enumerate() {
             br.retain(|(_, v)| *v > 1e-18);
             br.sort_by(|x, y| y.1.total_cmp(&x.1));
-            let speed_share = (base[c].var_offset - br.iter().map(|x| x.1).sum::<f64>()).max(0.0);
+            let speed_share = if shares { (base[c].var_offset - br.iter().map(|x| x.1).sum::<f64>()).max(0.0) } else { 0.0 };
             out.clocks.insert(ids[members[c]].into(), ClockInfo::from_fit(kind, group.clone(), base[c], br, speed_share));
         }
 
@@ -524,6 +577,18 @@ mod tests {
         // Without rates the hour's 1 s slide would contradict the links.
         let fixed = |l: &Link| (l.t_a - 20.0 - l.t_b).abs();
         assert!(fixed(&l[6]) > 1.0);
+    }
+
+    /// `fit` is `solve` without the breakdown: the same fits, measured against the first clock.
+    #[test]
+    fn fit_is_solve_without_the_breakdown() {
+        let l = [link("a", 1.0, "b", 0.0, 0.5), link("b", 4.0, "c", 15.0, 1.5), link("a", 300.0, "c", 312.1, 1.0)];
+        let (full, quick) = (solve(&[], &l), fit(&[], &l));
+        for id in ["a", "b", "c"] {
+            assert_eq!(full.get(id).fit, quick.get(id).fit, "{id}");
+            assert!(quick.get(id).breakdown.is_empty());
+        }
+        assert_eq!((quick.get("a").offset, quick.get("a").rate), (0.0, 0.0), "a is the reference");
     }
 
     #[test]
