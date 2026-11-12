@@ -6,7 +6,7 @@
 
 use corroborate::core::{NodeSpec, Port, PortKind, Role};
 use corroborate::module_manifest::{self as mm, Manifest};
-use corroborate::modules::{audio_match, combine_locations, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, time, timeline, value};
+use corroborate::modules::{audio_match, combine_locations, cut_detector, enf, grid_frequencies, invert_location, map, planes, plugin, result_record, sourcer, time, timeline, value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,9 @@ pub enum Kind {
     /// Links between the clocks of the wired recordings, from the sounds they share, and each
     /// recording's better time. `rows`: which recording holds each group's anchor, how it is drawn.
     AudioMatch { rows: Vec<(String, String)> },
+    /// Where a recording is cut, and its pieces. `rows`: thresholds, switched cuts, hand cuts and
+    /// how many pieces there were (`modules::cut_detector`).
+    CutDetector { rows: Vec<(String, String)> },
     /// Recordings drawn where the times wired in say they were. `rows`: how it is drawn.
     Timeline { rows: Vec<(String, String)> },
     /// A time corrected in the open, row by row. `rows`: see `modules::time`.
@@ -74,6 +77,7 @@ impl Kind {
             "value" => Kind::Value { ty: "location".into(), rows: value::defaults("location") },
             "planes" => Kind::Planes,
             "audio-match" => Kind::AudioMatch { rows: Vec::new() },
+            "cut-detector" => Kind::CutDetector { rows: Vec::new() },
             "time" => Kind::Time { rows: time::defaults() },
             "timeline" => Kind::Timeline { rows: Vec::new() },
             "enf" => Kind::Enf { grid: String::new() },
@@ -93,6 +97,7 @@ impl Kind {
             Kind::Value { .. } => label(value::manifest()),
             Kind::Planes => label(planes::manifest()),
             Kind::AudioMatch { .. } => label(audio_match::manifest()),
+            Kind::CutDetector { .. } => label(cut_detector::manifest()),
             Kind::Time { .. } => label(time::manifest()),
             Kind::Timeline { .. } => label(timeline::manifest()),
             Kind::Enf { .. } => label(enf::manifest()),
@@ -116,6 +121,7 @@ impl Kind {
             Kind::ResultRecord { .. } => result_record::manifest().many_rows(),
             Kind::CombineLocations { .. } => combine_locations::manifest().many_rows(),
             Kind::AudioMatch { .. } => audio_match::manifest().many_rows(),
+            Kind::CutDetector { .. } => cut_detector::manifest().many_rows(),
             Kind::Timeline { .. } => timeline::manifest().many_rows(),
             Kind::Map => map::manifest().many_rows(),
             Kind::Module { m, .. } => m.many_rows(),
@@ -129,6 +135,7 @@ impl Kind {
             Kind::Value { ty, .. } => value::spec(ty),
             Kind::Planes => planes::spec(),
             Kind::AudioMatch { .. } => audio_match::spec(),
+            Kind::CutDetector { rows } => cut_detector::spec(rows),
             Kind::Time { rows } => time::spec(rows),
             Kind::Timeline { .. } => timeline::spec(),
             Kind::Enf { .. } => enf::spec(),
@@ -160,7 +167,7 @@ impl Kind {
             Kind::Missing { param, .. } => param.clone(),
             Kind::Group { def, .. } => def.clone(),
             Kind::Value { ty, .. } => ty.clone(),
-            Kind::Planes | Kind::AudioMatch { .. } | Kind::Time { .. } | Kind::Timeline { .. } | Kind::Map | Kind::InvertLocation | Kind::Module { .. } | Kind::GroupInput | Kind::GroupOutput => String::new(),
+            Kind::Planes | Kind::AudioMatch { .. } | Kind::CutDetector { .. } | Kind::Time { .. } | Kind::Timeline { .. } | Kind::Map | Kind::InvertLocation | Kind::Module { .. } | Kind::GroupInput | Kind::GroupOutput => String::new(),
         }
     }
 
@@ -201,7 +208,7 @@ impl Kind {
     /// Lines a project file keeps under the node: a Value's fields, a module's settings.
     pub fn rows(&self) -> &[(String, String)] {
         match self {
-            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Time { rows } | Kind::Timeline { rows } => rows,
+            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::CutDetector { rows } | Kind::Time { rows } | Kind::Timeline { rows } => rows,
             _ => &[],
         }
     }
@@ -242,7 +249,7 @@ impl Kind {
     pub fn add_row(&mut self, k: String, v: String) {
         match self {
             Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Timeline { rows } => rows.push((k, v)),
-            Kind::Time { rows } => match rows.iter_mut().find(|(q, _)| *q == k) {
+            Kind::Time { rows } | Kind::CutDetector { rows } => match rows.iter_mut().find(|(q, _)| *q == k) {
                 Some((_, x)) => *x = v,
                 None => rows.push((k, v)),
             },

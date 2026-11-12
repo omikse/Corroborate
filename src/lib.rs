@@ -16,6 +16,7 @@ pub mod area;
 pub mod audio_match;
 pub mod clock;
 pub mod core;
+pub mod cuts;
 pub mod data;
 pub mod ingest;
 pub mod locate;

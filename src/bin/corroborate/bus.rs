@@ -175,6 +175,10 @@ impl App {
                 drop(s);
                 self.time_out(from)
             }
+            (_, Kind::CutDetector { .. }) => {
+                drop(s);
+                self.cut_value(from, out)
+            }
             (PortKind::Time, Kind::AudioMatch { .. }) => {
                 drop(s);
                 self.synced_time(from, out)

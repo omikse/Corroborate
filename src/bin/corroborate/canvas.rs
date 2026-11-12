@@ -344,6 +344,10 @@ impl App {
                 let inputs = self.nodes[i].kind.spec().inputs;
                 self.graph.set_inputs_keep(i, inputs);
             }
+            if matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
+                let outputs = self.nodes[i].kind.spec().outputs;
+                self.graph.set_outputs(i, outputs);
+            }
         }
         self.sync_many_ports();
         for (a, o, b, inp) in &s.wires {

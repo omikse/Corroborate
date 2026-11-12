@@ -42,6 +42,7 @@ pub fn of(kind: &Kind) -> &'static dyn NodeLook {
         Kind::Value { .. } => &value_node::Look,
         Kind::Planes => &planes_node::Look,
         Kind::AudioMatch { .. } => &audio_match_node::Look,
+        Kind::CutDetector { .. } => &cut_detector_node::Look,
         Kind::Time { .. } => &time_node::Look,
         Kind::Timeline { .. } => &timeline_node::Look,
         Kind::Enf { .. } => &enf_node::Look,

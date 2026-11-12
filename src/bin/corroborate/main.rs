@@ -33,6 +33,8 @@ mod cleanup_lab;
 mod recordings_tests;
 #[cfg(test)]
 mod groups_tests;
+#[cfg(test)]
+mod cut_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
@@ -54,6 +56,8 @@ mod types_menu;
 // Each node's workbench code lives in its own module folder (src/modules/<node>/node.rs).
 #[path = "../../modules/Audio match/node.rs"]
 mod audio_match_node;
+#[path = "../../modules/Cut detector/node.rs"]
+mod cut_detector_node;
 #[path = "../../modules/Combine locations/node.rs"]
 mod combine_locations_node;
 #[path = "../../modules/ENF (power hum)/node.rs"]
@@ -288,6 +292,8 @@ struct App {
     next_uid: u64,
     /// Audio match nodes' timelines: axes moved by hand, where the tracks are.
     match_ui: audio_match_node::MatchUi,
+    /// Cut detector nodes: their views, filmstrips and the threshold being dragged.
+    cut_ui: cut_detector_node::CutUi,
     /// What each file source says about itself (time, length), read once, before any Run.
     facts: sourcer_node::Facts,
     /// The project's recordings (recordings.rs), and relative paths read but not resolved yet.
@@ -343,6 +349,7 @@ impl App {
             canvas_origin: Pos2::ZERO,
             canvas_rect: Rect::NOTHING,
             match_ui: Default::default(),
+            cut_ui: Default::default(),
             facts: Default::default(),
             programs: HashMap::new(),
             bus_sent: Instant::now(),
@@ -587,6 +594,11 @@ impl App {
                 let inputs = self.nodes[i].kind.spec().inputs;
                 self.graph.set_inputs_keep(i, inputs);
             }
+            // A cut detector's piece outputs follow its saved number of pieces.
+            if matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
+                let outputs = self.nodes[i].kind.spec().outputs;
+                self.graph.set_outputs(i, outputs);
+            }
         }
         // Saved before Audio match's rows had a time each (before 2026-11-10): no longer read.
         let old_file = keep_ids && !text.lines().any(|l| l.starts_with("format|"));
@@ -753,6 +765,13 @@ impl App {
                 audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
             }
         }
+        // Cut detectors read their recording's file themselves.
+        for i in 0..self.nodes.len() {
+            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
+                let job = self.cut_job(i, &before);
+                cut_detector_node::start(self.nodes[i].state.clone(), job, stop.clone());
+            }
+        }
         self.run_sig = Some(self.run_signature());
         if started == 0 {
             return;
@@ -789,6 +808,7 @@ impl App {
                 }
             }
         }
+        s.push_str(&self.cut_signature());
         s
     }
 
@@ -869,6 +889,10 @@ impl App {
                 Kind::Time { .. } => {
                     drop(s);
                     time_node::json(self, i)
+                }
+                Kind::CutDetector { .. } => {
+                    drop(s);
+                    cut_detector_node::json(self, i)
                 }
                 Kind::Enf { .. } => enf_node::json(&s),
                 Kind::GridFrequencies { path } => grid_frequencies_node::json(path),
@@ -996,6 +1020,7 @@ impl App {
     fn graph_view(&mut self, ui: &mut egui::Ui) {
         self.area_cache.borrow_mut().clear();
         self.match_ui.cache.borrow_mut().clear();
+        self.cut_ui.cache.borrow_mut().clear();
         self.refresh_looks();
         let (area, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(area);
@@ -1686,6 +1711,7 @@ impl App {
             self.graph_view(ui);
         });
         self.sync_groups();
+        self.sync_cut_ports();
         let ctx = ui.ctx().clone();
         self.ask_file_facts(&ctx);
         self.ask_ui(&ctx);

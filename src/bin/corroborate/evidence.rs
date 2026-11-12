@@ -37,8 +37,16 @@ impl App {
         if depth > 8 {
             return None;
         }
+        // A cut detector is on its recording's clock (wired as video or audio).
+        if matches!(n.kind, Kind::CutDetector { .. }) {
+            return self.clock_at(self.cut_source(i).ok()?, depth + 1);
+        }
         let audio = self.graph.nodes()[i].spec.inputs.iter().find(|p| p.kind == PortKind::Audio)?;
-        let (f, _) = self.graph.feeder(i, audio.name)?;
+        let (f, o) = self.graph.feeder(i, audio.name)?;
+        // A piece of a cut recording is a clock of its own.
+        if let Some(c) = self.piece_clock(f, o) {
+            return Some(c);
+        }
         self.clock_at(f, depth + 1)
     }
 

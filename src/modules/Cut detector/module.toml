@@ -1,0 +1,42 @@
+id = "cut-detector"
+label = "Cut detector"
+category = "Detectors"
+order = 4
+role = "detector"
+
+# The recording to split: its audio, its video, or both (from one source). The node reads the
+# file itself, every frame (one extra ffmpeg pass).
+[[input]]
+name = "audio"
+kind = "audio"
+
+[[input]]
+name = "video"
+kind = "video"
+
+# When the recording starts: each piece's time is this plus where the piece sits in the file.
+[[input]]
+name = "time"
+kind = "time"
+
+# Other recordings of the same event: where this one's lag against each jumps is a lane of its
+# own. Moments from any node that confirm cuts: each a single time with its error; an event
+# confirms a cut a lane found within that error, and on its own is only a mark. They grow as rows.
+[[input]]
+name = "compare with"
+kind = "audio"
+many = true
+
+[[input]]
+name = "events"
+kind = "event"
+many = true
+
+# The cuts that are on, each with the cues behind it. The pieces follow as rows of outputs
+# ("audio 1", "video 1", "time 1", "length 1", …), one row per piece, made by the node.
+[[output]]
+name = "cuts"
+kind = "event"
+
+[look]
+status = false

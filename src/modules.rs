@@ -8,6 +8,8 @@
 // Folders are named by each module's label; the Rust module is its id in snake_case.
 #[path = "modules/Audio match/mod.rs"]
 pub mod audio_match;
+#[path = "modules/Cut detector/mod.rs"]
+pub mod cut_detector;
 #[path = "modules/Combine locations/mod.rs"]
 pub mod combine_locations;
 #[path = "modules/ENF (power hum)/mod.rs"]
@@ -49,6 +51,7 @@ pub fn builtin() -> Vec<&'static crate::module_manifest::Manifest> {
         planes::manifest(),
         enf::manifest(),
         audio_match::manifest(),
+        cut_detector::manifest(),
         grid_frequencies::manifest(),
         plugin::manifest(),
         result_record::manifest(),

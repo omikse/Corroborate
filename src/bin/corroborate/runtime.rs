@@ -38,6 +38,8 @@ pub struct NodeState {
     pub matching: Vec<crate::audio_match_node::Stage>,
     /// Audio match: what the match found, its links among it, once it has ended.
     pub found: Option<std::sync::Arc<crate::audio_match_node::Found>>,
+    /// Cut detector: what its run found in the recording.
+    pub cut: Option<std::sync::Arc<crate::cut_detector_node::Scan>>,
     /// What a program sent on each of its outputs (the data bus), and a count of the changes.
     pub outbox: Vec<(&'static str, corroborate::data::Data)>,
     pub outbox_rev: u64,
