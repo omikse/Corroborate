@@ -196,6 +196,33 @@ pub struct CutUi {
     pub cache: RefCell<HashMap<NodeId, Rc<CutView>>>,
     strips: HashMap<NodeId, (u64, TextureHandle)>,
     drag: Option<(NodeId, usize, f32)>,
+    /// Audio match nodes fed pieces, waiting for their Cut detectors' runs (`sync_cut_ports`
+    /// starts them), and each Cut detector's pieces as last seen (a change starts them again).
+    pub pending: std::collections::HashSet<NodeId>,
+    sigs: HashMap<NodeId, String>,
+}
+
+/// A piece fed to another node: the source of the recording, where it sits in the file, its
+/// clock, a stable key for the rows of the node it feeds, its name, and the phone id it suggests
+/// (the file's: every piece is from the same device).
+pub struct Fed {
+    pub src: NodeId,
+    pub piece: Piece,
+    pub clock: String,
+    pub uid: String,
+    pub name: String,
+    pub phone: String,
+}
+
+/// Where a node downstream put a piece: its start and length, on real time (`real`) or on its
+/// group's own clock, and which node.
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub n: usize,
+    pub at: f64,
+    pub len: f64,
+    pub real: bool,
+    pub by: String,
 }
 
 /// One frame's text: 83.25 s as 1:23.25.
@@ -208,7 +235,7 @@ pub fn clock_text(t: f64) -> String {
 /// The lanes a run will make, before it has: so the node keeps its size. `compare`: the keys and
 /// names of the recordings wired into `compare with`.
 fn planned_lanes(video: bool, audio: bool, compare: &[(String, String)]) -> Vec<Lane> {
-    let empty = |key: &str, name: &str, role: Role, thr: f32| Lane { key: key.into(), name: name.into(), role, unit: String::new(), curve: Vec::new(), peaks: Vec::new(), thr: Some(thr), note: "not read yet: the graph reads it when it runs".into() };
+    let empty = |key: &str, name: &str, role: Role, thr: f32| Lane { key: key.into(), name: name.into(), role, unit: String::new(), curve: Vec::new(), peaks: Vec::new(), thr: Some(thr), alone: key != "noise", note: "not read yet: the graph reads it when it runs".into() };
     let mut v = Vec::new();
     if video {
         v.push(empty("picture", "picture", Role::Picture, cuts::PICTURE_THR));
@@ -281,6 +308,48 @@ impl App {
             .collect()
     }
 
+    /// The piece on output `out` ("audio 2", "video 2") of node `f`, when `f` is a Cut detector.
+    pub(crate) fn piece_feed(&self, f: NodeId, out: &str) -> Option<Fed> {
+        if !matches!(self.nodes[f].kind, Kind::CutDetector { .. }) {
+            return None;
+        }
+        let (base, n) = cd::piece_of_port(out)?;
+        if base != "audio" && base != "video" {
+            return None;
+        }
+        let v = self.cut_view(f);
+        let piece = *v.pieces.get(n - 1)?;
+        let src = v.src?;
+        let file = rec_name(self, src);
+        Some(Fed { src, piece, clock: self.piece_clock(f, out)?, uid: format!("{}.{n}", self.nodes[f].uid), name: format!("{file} · piece {n}"), phone: format!("{file} (cut)") })
+    }
+
+    /// Whether Audio match node `i` takes a piece of a cut recording.
+    pub(crate) fn fed_by_pieces(&self, i: NodeId) -> bool {
+        self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.kind == PortKind::Audio).any(|p| self.graph.feeder(i, p.name).is_some_and(|(f, _)| matches!(self.nodes[f].kind, Kind::CutDetector { .. })))
+    }
+
+    /// Where the Audio match nodes fed node `i`'s pieces put them.
+    pub(crate) fn placed(&self, i: NodeId) -> Vec<Placed> {
+        let mut out = Vec::new();
+        for (t, inp) in self.graph.wires().iter().filter(|w| w.from == i).map(|w| (w.to, self.graph.nodes()[w.to].spec.inputs[w.to_port].name)).collect::<Vec<_>>() {
+            if !matches!(self.nodes[t].kind, Kind::AudioMatch { .. }) {
+                continue;
+            }
+            let Some((_, out_name)) = self.graph.feeder(t, inp) else { continue };
+            let Some((_, n)) = cd::piece_of_port(out_name) else { continue };
+            let Some(k) = inp.strip_prefix("audio ").and_then(|k| k.parse::<usize>().ok()) else { continue };
+            let mv = self.match_view(t);
+            if let Some(r) = mv.rows.iter().find(|r| r.n == k) {
+                if let Some(at) = r.start {
+                    out.push(Placed { n, at, len: r.len, real: mv.real, by: self.node_name(t) });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.at.total_cmp(&b.at));
+        out
+    }
+
     /// What run signature the cut detectors add: what is wired into each.
     pub(crate) fn cut_signature(&self) -> String {
         let mut s = String::new();
@@ -332,7 +401,7 @@ impl App {
         // One lane per wired events input, named by what feeds it.
         for p in self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.name.starts_with("events ")) {
             let Some((f, o)) = self.graph.feeder(i, p.name) else { continue };
-            let mut lane = Lane { key: p.name.to_string(), name: format!("{} › {o}", self.node_name(f)), role: Role::Events, unit: String::new(), curve: Vec::new(), peaks: Vec::new(), thr: None, note: String::new() };
+            let mut lane = Lane { key: p.name.to_string(), name: format!("{} › {o}", self.node_name(f)), role: Role::Events, unit: String::new(), curve: Vec::new(), peaks: Vec::new(), thr: None, alone: false, note: String::new() };
             match self.value_from(f, o) {
                 Ok(Data::Events(evs)) => {
                     for e in evs {
@@ -430,6 +499,54 @@ impl App {
             if self.graph.nodes()[i].spec.outputs.len() != cd::outputs(n).len() {
                 self.graph.set_outputs(i, cd::outputs(n));
             }
+        }
+        self.start_piece_matches();
+    }
+
+    /// Starts the Audio match nodes fed pieces once their Cut detectors have read their
+    /// recordings, and again when the pieces change (a cut switched, a threshold dragged).
+    fn start_piece_matches(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let mut start: Vec<NodeId> = Vec::new();
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].hidden || !matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
+                continue;
+            }
+            let v = self.cut_view(i);
+            if v.scan.is_none() || v.len <= 0.0 {
+                continue;
+            }
+            let sig: String = v.pieces.iter().map(|p| format!("{:.3}-{:.3};", p.a0, p.a1)).collect();
+            if self.cut_ui.sigs.get(&i) != Some(&sig) {
+                self.cut_ui.sigs.insert(i, sig);
+                start.extend(self.graph.wires().iter().filter(|w| w.from == i && matches!(self.nodes[w.to].kind, Kind::AudioMatch { .. })).map(|w| w.to));
+            }
+        }
+        let ready: Vec<NodeId> = self
+            .cut_ui
+            .pending
+            .iter()
+            .copied()
+            .filter(|&am| self.graph.wires().iter().filter(|w| w.to == am && matches!(self.nodes[w.from].kind, Kind::CutDetector { .. })).all(|w| self.nodes[w.from].state.lock().unwrap().cut.is_some()))
+            .collect();
+        start.extend(ready);
+        start.sort_unstable();
+        start.dedup();
+        if start.is_empty() {
+            return;
+        }
+        // The sources' audio of this run, whichever it is.
+        let before: HashMap<NodeId, u64> = (0..self.nodes.len()).filter(|&i| self.nodes[i].kind.is_source()).map(|i| (i, 0)).collect();
+        let stop = self.stop.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        for am in start {
+            if self.nodes[am].hidden {
+                continue;
+            }
+            self.cut_ui.pending.remove(&am);
+            let (files, other) = self.audio_match_inputs(am, &before);
+            crate::audio_match_node::start(self.nodes[am].state.clone(), files, other, stop.clone());
         }
     }
 
@@ -554,6 +671,7 @@ const RULER_H: f32 = 16.0;
 const LABEL_W: f32 = 132.0;
 const TABLE_HEAD: f32 = 18.0;
 const TABLE_ROW: f32 = 17.0;
+const PLACED_H: f32 = 44.0;
 const TRACK: Color32 = Color32::from_rgb(29, 32, 37);
 const SEAM: Color32 = Color32::from_rgb(16, 18, 21);
 const RED: Color32 = Color32::from_rgb(224, 82, 79);
@@ -602,8 +720,9 @@ impl crate::look::NodeLook for Look {
         let v = app.cut_view(i);
         let g = layout(v.lanes.len());
         let rows = v.pieces.len().max(1);
+        let strip = if app.placed(i).is_empty() { 0.0 } else { PLACED_H };
         // Tall enough for its own parts and for a port row per output.
-        Vec2::new(NODE_W, (HEAD + 4.0 + g.table + TABLE_HEAD + rows as f32 * TABLE_ROW + 30.0).max(standard.y))
+        Vec2::new(NODE_W, (HEAD + 4.0 + g.table + TABLE_HEAD + rows as f32 * TABLE_ROW + strip + 30.0).max(standard.y))
     }
 
     fn body(&self, app: &mut App, ui: &mut egui::Ui, i: NodeId) {
@@ -864,6 +983,42 @@ impl crate::look::NodeLook for Look {
                 Err(e) => e,
             };
             p.text(Pos2::new(time_x, ty(row)), Align2::LEFT_CENTER, t, font(10.5), DIM);
+        }
+
+        // Where the nodes downstream put the pieces: in their true order, gaps hatched.
+        let placed = app.placed(i);
+        if !placed.is_empty() {
+            let top = g.table + TABLE_HEAD + v.pieces.len().max(1) as f32 * TABLE_ROW + 6.0;
+            label("placed", top, PLACED_H - 10.0, DIM);
+            let r = full(top, PLACED_H - 10.0);
+            p.rect_filled(r, 0.0, TRACK);
+            let lo = placed.iter().map(|q| q.at).fold(f64::MAX, f64::min);
+            let hi = placed.iter().map(|q| q.at + q.len).fold(f64::MIN, f64::max);
+            let span = (hi - lo).max(1e-3);
+            let px = |t: f64| r.left() + ((t - lo) / span) as f32 * r.width();
+            for (k, q) in placed.iter().enumerate() {
+                let bar = Rect::from_min_max(Pos2::new(px(q.at), r.top() + 3.0 * z), Pos2::new(px(q.at + q.len).max(px(q.at) + 2.0), r.bottom() - 3.0 * z));
+                p.rect_filled(bar, 2.0 * z, alpha(SOUND, 0.55));
+                p.text(bar.center(), Align2::CENTER_CENTER, q.n.to_string(), font(11.0), TEXT);
+                if let Some(next) = placed.get(k + 1) {
+                    let gap = next.at - (q.at + q.len);
+                    if gap > 0.1 {
+                        let g = Rect::from_min_max(Pos2::new(bar.right(), bar.top()), Pos2::new(px(next.at), bar.bottom()));
+                        let mut x = g.left();
+                        while x < g.right() {
+                            p.line_segment([Pos2::new(x, g.bottom()), Pos2::new((x + g.height()).min(g.right()), g.top())], Stroke::new(z, alpha(DIM, 0.5)));
+                            x += 5.0 * z;
+                        }
+                        if g.width() > 40.0 * z {
+                            p.text(g.center(), Align2::CENTER_CENTER, format!("{gap:.1} s"), font(9.5), DIM);
+                        }
+                    }
+                }
+            }
+            let order: Vec<String> = placed.iter().map(|q| q.n.to_string()).collect();
+            let in_order = placed.windows(2).all(|w| w[0].n < w[1].n);
+            let words = format!("{} by {}: {}{}", if placed[0].real { "real time" } else { "on the group's clock" }, placed[0].by, order.join(" "), if in_order { " (the file's order)" } else { " (true order: not the file's)" });
+            p.text(Pos2::new(r.right(), r.bottom() + 2.0 * z), Align2::RIGHT_TOP, words, font(10.0), if in_order { DIM } else { RED });
         }
     }
 }

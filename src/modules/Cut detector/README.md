@@ -30,6 +30,10 @@ Outputs:
   piece is on the file's own clock (its moments are the file's); every later piece is a clock of
   its own (`<file clock>~n`).
 
+Pieces go on as recordings: into Audio match (a row of its own, the file's pieces sharing one
+phone id, so one clock speed) and into a Timeline. Other nodes that read a source's audio as it
+decodes (ENF, Planes, plugins) do not take pieces yet.
+
 How many pieces there are is saved with the project (row `pieces`), so wires from piece outputs
 stay while a project opens, before anything has been read. When cuts are switched off, the
 outputs of pieces that are gone go with their wires.
@@ -53,7 +57,9 @@ Each lane is a row under the filmstrip and the waveform, on the recording's own 
   a mark where the mean of the next second differs from the second before. Default threshold
   15 dB: on a 16 min phone recording of a crowd (Jiku) the level stepped by more than 12 dB 13
   times, by more than 15 dB 5 times.
-- **background noise** (when `audio` is wired): the noise level under the sound for each second,
+- **background noise** (when `audio` is wired; it does not cut on its own: a mark over its
+  threshold makes a cut only with another lane's cue within a second, and alone shows as a cut
+  that is off, "background noise alone", for a person to switch on): the noise level under the sound for each second,
   every quarter second (Pan, Zhang, Lyu, ICASSP 2012: band-pass channels of a natural sound have
   about the same kurtosis, and noise lowers each channel's kurtosis by its share of the channel's
   variance; a line through the 16 channels gives the noise variance). A mark where the median of
@@ -96,6 +102,10 @@ the strongest among equals.
   nearest frame, marked "hand"). Every switch goes into the result file.
 - The pieces table: where each piece's picture and sound sit in the file, its length, the cues
   behind the cut before it, and its time out.
+- The placed strip, once pieces go into an Audio match: each piece where it was placed (on real
+  time when its group is anchored, else on the group's clock), in that order, the time between
+  them hatched with its length. Under it the order in words, red when it is not the file's: the
+  true order of a shuffled recording.
 
 Rows saved with the project: `pieces`, `thr <lane>` (a threshold you set), `cut <seconds>` (`on`,
 `off` or `hand`). A switch belongs to the cut whose picture or sound time is within 0.25 s.
@@ -122,6 +132,11 @@ error, whether the lanes put it on, the switch, the cues in words) and the piece
 - `cargo test --profile fast --bin corroborate cut_tests::a_jump_cut_is_found_by_comparing`: a
   made sound with 25 to 28 s taken out, compared with the original in the node: one cut, at
   25.002 s, two pieces.
+- `cargo test --profile fast --bin corroborate cut_tests::shuffled_pieces_go_back_in_order`: the
+  made sound cut at 20 and 40 s and joined as 2 1 3: the joins at 20.03 and 39.99 s, the three
+  pieces placed by an Audio match at +20.00, +0.03 and +40.01 s into the original, as one phone,
+  and the placed strip reads 2 1 3. A join at the other recording's very start is placed by the
+  second either side of it (windows there can only vote one way).
 - `cargo test --profile fast --test jiku_cuts -- --ignored --nocapture` (needs the Jiku data, see
   tests/jiku.rs), on real phone recordings of one event:
   - a recording with 3 s cut out at 40 s, compared with another phone: the cut at 39.92 s (80 ms
@@ -132,6 +147,12 @@ error, whether the lanes put it on, the switch, the cues in words) and the piece
     44.81, 90.89 and 134.23 s (true 45, 90 and 135; errors stated 1.4, 1.0 and 1.5 s). Each
     piece, matched on its own against the other phones, lands within 9 to 14 ms of where the
     ground truth puts it, and their true order comes back (2 4 1 3).
+  - `cargo test --profile fast --bin corroborate cut_tests::jiku -- --ignored --nocapture`: the
+    same shuffled recording in the workbench: a Cut detector comparing it with the 3 phones, its
+    four pieces wired into an Audio match with them. The three joins are on (the background noise
+    adds two marks of its own, off), and each piece lands 14 to 22 ms from the ground truth
+    against the first phone (on that phone's clock), all four as one phone; the placed strip reads
+    2 4 1 3.
   The joins are placed only to about a second: the place in the sound where one lag gives way to
   the other is as sharp as the sound there (a quiet start of a piece blurs it). A picture cue,
   where there is video, places it to the frame.
@@ -141,9 +162,11 @@ package installed.
 
 ## Status
 
-Stages 1 and 2 of the plan are built: picture and timestamps, hand cuts, pieces as rows; sound
-level, background noise, `compare with` and the events input. Audio match taking pieces and the
-placed strip follow (stage 3).
+Stages 1 to 3 of the plan are built: picture and timestamps, hand cuts, pieces as rows; sound
+level, background noise, `compare with` and the events input; pieces into Audio match as one
+device, and the placed strip. Left for later (stage 4): TransNet V2 for fades and dissolves (only
+if the pure-Rust `tract` runs it), the codec frame grid, vPDQ for compilations of other people's
+videos, and live stream outages.
 
 Files: `module.toml` (ports), `mod.rs` (ports from the rows, the rows' keys), `node.rs` (the run,
 the outputs, the canvas), the method in `src/cuts.rs`.

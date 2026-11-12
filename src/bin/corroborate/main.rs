@@ -761,6 +761,15 @@ impl App {
         // Audio match nodes read their files themselves, all at once.
         for i in 0..self.nodes.len() {
             if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch { .. }) {
+                // Pieces of a cut recording are known once its Cut detector has read it.
+                if self.fed_by_pieces(i) {
+                    let mut s = self.nodes[i].state.lock().unwrap();
+                    s.reset();
+                    s.status = "waiting for the Cut detector's pieces…".into();
+                    drop(s);
+                    self.cut_ui.pending.insert(i);
+                    continue;
+                }
                 let (files, other) = self.audio_match_inputs(i, &before);
                 audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
             }

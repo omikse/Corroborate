@@ -4,7 +4,9 @@ Receives and displays; it never works out when anything happened. The time it is
 it draws. Add it by hand, like the Map.
 
 Each row takes a recording's standard audio or video output, the time it starts and, if known, the
-time it ends (an Audio match row's audio start time and audio end time, say). The recording is a bar
+time it ends (an Audio match row's audio start time and audio end time, say). A piece of a cut
+recording (a Cut detector's `audio n` or `video n`) is a recording of its own: its name, its length,
+its clock. The recording is a bar
 from its start to its end (to start + its media's length when no end is wired), with its name, and
 margins from each time's error: the start's on the left, the end's on the right. A row with no time
 is greyed and has no bar.

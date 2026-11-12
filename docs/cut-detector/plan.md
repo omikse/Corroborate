@@ -1,6 +1,8 @@
 # Cut detector
 
-Status: researched and planned on 2026-11-12. Nothing is built yet.
+Status: researched and planned on 2026-11-12. Stages 1 to 3 built the same night: the node, its
+README with what was measured (`src/modules/Cut detector/README.md`) and the method
+(`src/cuts.rs`). Stage 4 is left for later.
 Mockup: [mockup.html](mockup.html)
 
 ## The question it answers

@@ -165,3 +165,148 @@ fn a_jump_cut_is_found_by_comparing() {
     assert!((v.pieces[1].a0 - 25.0).abs() <= 0.1);
     d.shot("cut_detector_compare");
 }
+
+/// Stage 3: the original's 60 s cut into three and joined as 2 1 3 (a shuffled copy). The Cut
+/// detector, comparing the copy with the original, finds the two joins; its three pieces go into an
+/// Audio match with the original, which places each where it was (20, 0 and 40 s into the
+/// original), as one phone; the placed strip reads their true order back.
+#[test]
+fn shuffled_pieces_go_back_in_order() {
+    let (orig, _) = jump_cut_pair();
+    let shuffled = out_dir().join("cut_shuffled.wav");
+    if !shuffled.exists() {
+        let ok = corroborate::no_window(&mut std::process::Command::new("ffmpeg"))
+            .args(["-v", "error", "-y", "-i", orig.to_str().unwrap(), "-filter_complex"])
+            .arg("[0:a]atrim=20:40,asetpts=PTS-STARTPTS[a];[0:a]atrim=0:20,asetpts=PTS-STARTPTS[b];[0:a]atrim=40:60,asetpts=PTS-STARTPTS[c];[a][b][c]concat=n=3:v=0:a=1[o]")
+            .args(["-map", "[o]"])
+            .arg(&shuffled)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok);
+    }
+    let mut d = Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: shuffled.to_string_lossy().into_owned() }, Pos2::new(20.0, 40.0));
+    let o = app.add(Kind::Sourcer { input: orig.to_string_lossy().into_owned() }, Pos2::new(20.0, 500.0));
+    // Three pieces expected: their outputs are there before the run (as in a saved project).
+    let c = app.add(Kind::CutDetector { rows: vec![("pieces".into(), "3".into())] }, Pos2::new(300.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(1400.0, 40.0));
+    app.wire(s, "audio", c, "audio");
+    app.wire_many(o, "audio", c);
+    app.wire_many(o, "audio", m);
+    for n in 1..=3 {
+        app.wire_many(c, &format!("audio {n}"), m);
+    }
+    app.run();
+    assert!(d.wait_until(300.0, |a| a.nodes[m].state.lock().unwrap().found.is_some()), "matched: {}", d.app().nodes[m].state.lock().unwrap().status);
+    d.frames(3);
+    let app = d.app();
+    let v = app.cut_view(c);
+    let on: Vec<f64> = v.cuts.iter().filter(|x| x.on()).map(|x| x.t_snd).collect();
+    println!("cuts {on:?}");
+    for l in &v.lanes {
+        println!("{}: {:?}", l.name, l.peaks.iter().map(|p| (p.t, p.value, p.error_s, p.note.clone())).collect::<Vec<_>>());
+    }
+    assert_eq!(on.len(), 2, "{on:?}");
+    assert!((on[0] - 20.0).abs() <= 0.1 && (on[1] - 40.0).abs() <= 0.1, "{on:?}");
+    let mv = app.match_view(m);
+    for r in &mv.rows {
+        println!("row {}: {} start {:?} phone {:?} group {}", r.n, r.name, r.start, r.phone, r.group);
+    }
+    let start = |n: usize| mv.rows.iter().find(|r| r.n == n).and_then(|r| r.start).unwrap_or(f64::NAN);
+    let o0 = start(1);
+    for (row, want) in [(2, 20.0), (3, 0.0), (4, 40.0)] {
+        let got = start(row) - o0;
+        assert!((got - want).abs() <= 0.1, "row {row} at {got:.3}, want {want}");
+    }
+    let phones: Vec<&str> = mv.rows.iter().filter(|r| r.name.contains("piece")).map(|r| r.phone.as_str()).collect();
+    assert!(phones.len() == 3 && phones.iter().all(|p| *p == phones[0] && !p.is_empty()), "{phones:?}");
+    let placed: Vec<usize> = app.placed(c).iter().map(|p| p.n).collect();
+    assert_eq!(placed, [2, 1, 3]);
+    d.shot("cut_detector_placed");
+}
+
+/// The plan's stage 3 test on the Jiku Mobile Video Dataset (GT_090912; fetch it first:
+/// `python tools/jiku.py GT_090912`): phone 4's recording 1347196751640, 190 to 370 s, cut into
+/// four pieces of 45 s and joined as 3 1 4 2, read by a Cut detector comparing it with the three
+/// phones that heard all of it; its four pieces wired into an Audio match with those phones. Each
+/// piece must land where the ground truth says it was (against the first phone), and the placed
+/// strip must read their true order.
+///     cargo test --profile fast --bin corroborate cut_tests::jiku -- --ignored --nocapture
+#[test]
+#[ignore]
+fn jiku_shuffled_pieces_land_in_audio_match() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("data").join("jiku").join("GT_090912");
+    let xml = std::fs::read_to_string(dir.join("GT_090912.xml")).expect("fetch the Jiku data first");
+    let truth = |name: &str| -> (f64, f64) {
+        let l = xml.lines().find(|l| l.contains(&format!("name=\"{name}\""))).unwrap();
+        let attr = |k: &str| l.split(&format!("{k}=\"")).nth(1).unwrap().split('"').next().unwrap().to_string();
+        let f: Vec<f64> = attr("offset").split(':').map(|x| x.parse().unwrap()).collect();
+        (f[0] * 86400.0 + f[1] * 3600.0 + f[2] * 60.0 + f[3], attr("speed").parse().unwrap())
+    };
+    let ours = "GT_090912_4_1347196751640";
+    let phones = ["GT_090912_2_1347196671407", "GT_090912_3_1347196795193", "GT_090912_0_1347196688274"];
+    let (lo, piece, order) = (190.0, 45.0, [2usize, 0, 3, 1]);
+    let joined = out_dir().join("jiku_shuffled.wav");
+    if !joined.exists() {
+        let (mut child, rx) = corroborate::ingest::spawn_ffmpeg(dir.join(format!("{ours}.m4a")).to_str().unwrap(), 16000).unwrap();
+        let audio: Vec<f32> = rx.into_iter().flatten().collect();
+        let _ = child.wait();
+        let mut w = hound::WavWriter::create(&joined, hound::WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int }).unwrap();
+        for &k in &order {
+            let (a, b) = (((lo + k as f64 * piece) * 16000.0) as usize, ((lo + (k + 1) as f64 * piece) * 16000.0) as usize);
+            for &v in &audio[a..b] {
+                w.write_sample((v.clamp(-1.0, 1.0) * 32767.0) as i16).unwrap();
+            }
+        }
+        w.finalize().unwrap();
+    }
+    let mut d = Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: joined.to_string_lossy().into_owned() }, Pos2::new(20.0, 40.0));
+    let c = app.add(Kind::CutDetector { rows: vec![("pieces".into(), "4".into())] }, Pos2::new(300.0, 40.0));
+    let m = app.add(Kind::AudioMatch { rows: Vec::new() }, Pos2::new(1400.0, 40.0));
+    app.wire(s, "audio", c, "audio");
+    let mut ph = Vec::new();
+    for (k, p) in phones.iter().enumerate() {
+        let n = app.add(Kind::Sourcer { input: dir.join(format!("{p}.m4a")).to_string_lossy().into_owned() }, Pos2::new(20.0, 500.0 + 300.0 * k as f32));
+        app.wire_many(n, "audio", c);
+        app.wire_many(n, "audio", m);
+        ph.push(n);
+    }
+    for n in 1..=4 {
+        app.wire_many(c, &format!("audio {n}"), m);
+    }
+    app.run();
+    assert!(d.wait_until(900.0, |a| a.nodes[m].state.lock().unwrap().found.is_some()), "matched: {}", d.app().nodes[m].state.lock().unwrap().status);
+    d.frames(3);
+    let app = d.app();
+    let v = app.cut_view(c);
+    let on: Vec<(f64, f64)> = v.cuts.iter().filter(|x| x.on()).map(|x| (x.t_snd, x.error_s)).collect();
+    println!("cuts (time, error) {on:?}; true 45, 90, 135");
+    assert_eq!(on.len(), 3);
+    for (&(t, e), want) in on.iter().zip([45.0, 90.0, 135.0]) {
+        assert!((t - want).abs() <= (3.0 * e).max(0.1), "{t} ± {e}, true {want}");
+    }
+    let mv = app.match_view(m);
+    let row_of = |name: &str| mv.rows.iter().find(|r| r.name.contains(name)).unwrap();
+    let (o_ours, sp) = truth(ours);
+    let (o_ref, sp_ref) = truth(phones[0]);
+    let reference = row_of(phones[0]).start.unwrap();
+    for (k, p) in v.pieces.iter().enumerate() {
+        let r = row_of(&format!("piece {}", p.n));
+        let join = [0.0, 45.0, 90.0, 135.0][k];
+        // Where the piece found starts in the recording: its true start, moved as far as its
+        // join was found off.
+        let true_start = lo + order[k] as f64 * piece + (p.a0 - join);
+        // On the reference phone's clock (Audio match's times are clock times; the ground truth's
+        // timeline runs 266 ppm apart from these phones').
+        let want = (o_ours + true_start * sp - o_ref) / sp_ref;
+        let got = r.start.unwrap() - reference;
+        println!("piece {}: {:.3} s after {} (truth {:.3}), off {:.1} ms; phone {:?}", p.n, got, phones[0], want, (got - want) * 1e3, r.phone);
+        assert!((got - want).abs() <= 0.05, "piece {} off by {:.3} s", p.n, got - want);
+    }
+    let placed: Vec<usize> = app.placed(c).iter().map(|p| p.n).collect();
+    assert_eq!(placed, [2, 4, 1, 3]);
+    d.shot("cut_detector_jiku");
+}

@@ -91,6 +91,9 @@ pub struct Lane {
     pub peaks: Vec<Peak>,
     /// Its default threshold; None for an events lane (marks only).
     pub thr: Option<f32>,
+    /// Its marks make cuts on their own. A lane that does not (the background noise) only adds to
+    /// another lane's cue at the same moment; alone its marks show, off, for a person to switch.
+    pub alone: bool,
     /// What the lane could not do, or how it was made.
     pub note: String,
 }
@@ -338,7 +341,7 @@ pub fn picture_lane(p: &PictureScan) -> Lane {
     if freeze > 0.0 || black > 0.0 {
         note.push_str(&format!("; frozen {freeze:.1} s, black {black:.1} s"));
     }
-    Lane { key: "picture".into(), name: "picture".into(), role: Role::Picture, unit: "scene change".into(), curve: p.times.iter().copied().zip(p.score.iter().copied()).collect(), peaks, thr: Some(PICTURE_THR), note }
+    Lane { key: "picture".into(), name: "picture".into(), role: Role::Picture, unit: "scene change".into(), curve: p.times.iter().copied().zip(p.score.iter().copied()).collect(), peaks, thr: Some(PICTURE_THR), alone: true, note }
 }
 
 /// What ffprobe's video packets say.
@@ -407,7 +410,7 @@ pub fn packets_lane(p: &Packets) -> Lane {
         Some(g) => format!("{} keyframes, every {g:.2} s as a rule; {} off it; {} jumps in packet times", p.keyframes.len(), p.off_rhythm.len(), p.gaps.len()),
         None => format!("{} keyframes with no regular rhythm (no cues from them); {} jumps in packet times", p.keyframes.len(), p.gaps.len()),
     };
-    Lane { key: "keyframes".into(), name: "keyframes and gaps".into(), role: Role::Picture, unit: "mark".into(), curve: Vec::new(), peaks, thr: Some(0.5), note }
+    Lane { key: "keyframes".into(), name: "keyframes and gaps".into(), role: Role::Picture, unit: "mark".into(), curve: Vec::new(), peaks, thr: Some(0.5), alone: true, note }
 }
 
 // ---------------------------------------------------------------- sound
@@ -453,11 +456,11 @@ fn steps(db: &[f32], step: f64, side: f64) -> Vec<(f64, f32)> {
 }
 
 /// A lane from a curve of steps: its peaks over `SOUND_FLOOR`.
-fn step_lane(key: &str, name: &str, unit: &str, curve: Vec<(f64, f32)>, thr: f32, err: f64, note: String, what: &str) -> Lane {
+fn step_lane(key: &str, name: &str, unit: &str, curve: Vec<(f64, f32)>, thr: f32, alone: bool, err: f64, note: String, what: &str) -> Lane {
     let times: Vec<f64> = curve.iter().map(|c| c.0).collect();
     let vals: Vec<f32> = curve.iter().map(|c| c.1).collect();
     let peaks = peaks_of(&times, &vals, SOUND_FLOOR).into_iter().map(|k| Peak { t: times[k], value: vals[k], error_s: err, note: format!("{what} steps by {:.1} {unit}", vals[k]), lasting: None }).collect();
-    Lane { key: key.into(), name: name.into(), role: Role::Sound, unit: unit.into(), curve, peaks, thr: Some(thr), note }
+    Lane { key: key.into(), name: name.into(), role: Role::Sound, unit: unit.into(), curve, peaks, thr: Some(thr), alone, note }
 }
 
 /// The sound level lane: loudness (RMS, root mean square, in dB) every 50 ms, and where its
@@ -466,7 +469,7 @@ pub fn level_lane(audio: &[f32]) -> Lane {
     let n = (LEVEL_STEP_S * SOUND_SR) as usize;
     let db: Vec<f32> = audio.chunks(n).map(|c| (10.0 * ((c.iter().map(|&x| (x * x) as f64).sum::<f64>() / c.len() as f64).max(1e-12)).log10()) as f32).collect();
     let note = format!("loudness every {:.0} ms; a mark where the mean of the next {LEVEL_SIDE_S:.0} s differs from the second before", LEVEL_STEP_S * 1e3);
-    step_lane("level", "sound level", "dB", steps(&db, LEVEL_STEP_S, LEVEL_SIDE_S), LEVEL_THR, LEVEL_STEP_S, note, "the level")
+    step_lane("level", "sound level", "dB", steps(&db, LEVEL_STEP_S, LEVEL_SIDE_S), LEVEL_THR, true, LEVEL_STEP_S, note, "the level")
 }
 
 /// The background noise of one window (Pan, Zhang, Lyu, ICASSP 2012): band-pass channels of a
@@ -562,7 +565,7 @@ pub fn noise_lane(audio: &[f32]) -> Lane {
         })
         .collect();
     let note = format!("background noise level of each second (Pan, Zhang, Lyu 2012: kurtosis of 16 band-pass channels); a mark where the {NOISE_SIDE_S:.0} s after differ from the {NOISE_SIDE_S:.0} s before (medians)");
-    step_lane("noise", "background noise", "dB", curve, NOISE_THR, NOISE_STEP_S, note, "the background noise")
+    step_lane("noise", "background noise", "dB", curve, NOISE_THR, false, NOISE_STEP_S, note, "the background noise")
 }
 
 /// How well `ours` (a window of this recording) lines up with `theirs` at `lag` seconds (their
@@ -630,6 +633,32 @@ fn switch_over(votes: &[(f64, f64)]) -> Option<(f64, f64)> {
     Some((at(first), at(last)))
 }
 
+/// The split near `c` (within a second) where the second of `ours` before it fits `theirs` at lag
+/// `lx` and the second after it at `ly` best (the sum of the two peak-to-sidelobe ratios, every
+/// 10 ms). With the split, half the width of the splits within one of the best: its error.
+fn boundary(planner: &mut realfft::RealFftPlanner<f32>, ours: &[f32], theirs: &[f32], c: f64, lx: f64, ly: f64) -> Option<(f64, f64)> {
+    const W: f64 = 1.0;
+    const SLACK: f64 = 0.03;
+    let sr = SOUND_SR;
+    let n = (W * sr) as usize;
+    let win = |t: f64| -> Option<&[f32]> { (t >= 0.0).then(|| ours.get((t * sr).round() as usize..(t * sr).round() as usize + n)).flatten() };
+    let mut scores = Vec::new();
+    let mut s = c - 1.0;
+    while s <= c + 1.0 {
+        let before = win(s - W).map_or(0.0, |o| fits(planner, o, theirs, s - W, lx, SLACK));
+        let after = win(s).map_or(0.0, |o| fits(planner, o, theirs, s, ly, SLACK));
+        scores.push((s, before + after));
+        s += 0.01;
+    }
+    let best = scores.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if best.1 < 2.0 * VOTE {
+        return None;
+    }
+    let good: Vec<f64> = scores.iter().filter(|x| x.1 >= best.1 - 1.0).map(|x| x.0).collect();
+    let (lo, hi) = (good.iter().copied().fold(f64::MAX, f64::min), good.iter().copied().fold(f64::MIN, f64::max));
+    Some((best.0, ((hi - lo) / 2.0).max(0.01)))
+}
+
 /// The loudness of `x` (RMS, dB).
 fn level_db(x: &[f32]) -> f64 {
     10.0 * (x.iter().map(|&v| (v * v) as f64).sum::<f64>() / x.len().max(1) as f64).max(1e-12).log10()
@@ -688,6 +717,15 @@ pub fn compare_lane(key: &str, name: &str, ours: &crate::audio_match::Clip, thei
         let mut mark = |t: f64, e: f64, note: String| peaks.push(Peak { t, value: d.abs() as f32, error_s: e, note, lasting: None });
         if b - a <= 2.0 {
             let (t, e) = fine(&mut planner, (a + b) / 2.0).unwrap_or(((a + b) / 2.0, ((b - a) / 2.0).max(0.25)));
+            // Near the other recording's start or end, windows over the moment can vote one way
+            // only: there the moment is where the second before fits the old lag and the second
+            // after the new one. Moving the mark widens its error by half the move.
+            let theirs_len = theirs.audio.len() as f64 / sr;
+            let near_edge = [lx, ly].iter().any(|lag| t + lag - 2.5 < 0.0 || t + lag + 2.5 > theirs_len);
+            let (t, e) = match near_edge.then(|| boundary(&mut planner, &ours.audio, &theirs.audio, t, lx, ly)).flatten() {
+                Some((bt, be)) => (bt, be.max((bt - t).abs() / 2.0)),
+                None => (t, e),
+            };
             mark(t, e, format!("{jump}: this recording {what}"));
             continue;
         }
@@ -705,7 +743,7 @@ pub fn compare_lane(key: &str, name: &str, ours: &crate::audio_match::Clip, thei
         }
     }
     let note = format!("{} links with {name} ({chunks} chunks of 15 s tried, every 7.5 s); a mark where the lag jumps", hits.len());
-    Lane { key: key.into(), name: format!("compare: {name}"), role: Role::Sound, unit: "s".into(), curve: Vec::new(), peaks, thr: Some(crate::audio_match::GAP_MIN_S as f32), note }
+    Lane { key: key.into(), name: format!("compare: {name}"), role: Role::Sound, unit: "s".into(), curve: Vec::new(), peaks, thr: Some(crate::audio_match::GAP_MIN_S as f32), alone: true, note }
 }
 
 /// A person's choice about one cut, saved with the project.
@@ -864,8 +902,16 @@ pub fn find_cuts(lanes: &[Lane], thr: &[Option<f32>], switches: &[(f64, Switch)]
             let (lo, hi) = (cl.first().unwrap().t - JOIN_S, cl.last().unwrap().t + JOIN_S);
             // Every lane's marks round it, passing or not: what agrees, and by how much.
             let cues = all.iter().filter(|c| c.t >= lo && c.t <= hi).cloned().collect();
-            let auto = !real.is_empty();
-            let why = if auto { String::new() } else { "a flash: the picture comes back".to_string() };
+            // A lane that does not cut alone needs another lane's cue with it.
+            let lanes_in: std::collections::BTreeSet<usize> = real.iter().map(|c| c.lane).collect();
+            let auto = real.iter().any(|c| lanes[c.lane].alone) || lanes_in.len() >= 2;
+            let why = if auto {
+                String::new()
+            } else if real.is_empty() {
+                "a flash: the picture comes back".to_string()
+            } else {
+                format!("{} alone: shown, not cut (switch it on to cut)", lanes[real[0].lane].name)
+            };
             Cut { t_pic, t_snd, cues, confirms: Vec::new(), auto, switch: None, why, error_s }
         })
         .collect();
@@ -938,6 +984,7 @@ mod tests {
             curve: Vec::new(),
             peaks: peaks.iter().map(|&(t, value)| Peak { t, value, error_s: 0.02, note: String::new(), lasting: None }).collect(),
             thr,
+            alone: true,
             note: String::new(),
         }
     }
@@ -1027,6 +1074,19 @@ mod tests {
         let on: Vec<(f64, bool)> = cuts.iter().map(|c| (c.t_pic, c.on())).collect();
         assert_eq!(on, [(10.0, false), (20.0, true), (30.0, true)]);
         assert!(cuts[2].hand());
+    }
+
+    #[test]
+    fn a_lane_that_does_not_cut_alone_needs_another() {
+        let mut noise = lane("noise", Role::Sound, Some(15.0), &[(10.0, 20.0), (30.0, 20.0)]);
+        noise.alone = false;
+        let lanes = [lane("picture", Role::Picture, Some(10.0), &[(10.2, 30.0)]), noise];
+        let cuts = find_cuts(&lanes, &[None, None], &[], 0.04);
+        let on: Vec<(f64, bool)> = cuts.iter().map(|c| (c.t_pic, c.on())).collect();
+        assert_eq!(on, [(10.2, true), (30.0, false)]);
+        assert!(cuts[1].why.contains("alone"), "{}", cuts[1].why);
+        // The picture sets the picture time, the noise the sound time.
+        assert_eq!(cuts[0].t_snd, 10.0);
     }
 
     #[test]

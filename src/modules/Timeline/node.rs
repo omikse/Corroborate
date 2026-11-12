@@ -62,7 +62,13 @@ impl App {
             .map(|(k, ports)| {
                 let mut r = Row { n: k + 1, ..Default::default() };
                 if let [media, time, end] = ports {
-                    if let Some((f, _)) = self.graph.feeder(i, media.name) {
+                    if let Some(pf) = self.graph.feeder(i, media.name).and_then(|(f, o)| self.piece_feed(f, o)) {
+                        // A piece of a cut recording.
+                        r.wired = true;
+                        r.name = pf.name.clone();
+                        r.len = pf.piece.len();
+                        r.clock = Some(pf.clock.clone());
+                    } else if let Some((f, _)) = self.graph.feeder(i, media.name) {
                         r.wired = true;
                         let path = self.source_file(f);
                         r.name = match path.as_deref() {

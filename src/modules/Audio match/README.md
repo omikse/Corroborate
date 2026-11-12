@@ -6,6 +6,12 @@ audio end time (optional); they grow as they are wired, and dropping a SOURCER's
 draws its time wire). Each row gives a better audio start time and audio end time (`synced N` and
 `end N`).
 
+A row's audio may be a piece of a cut recording (a Cut detector's `audio n`): it is a recording of
+its own, from its piece of the file, on its own clock, named `<file> · piece n`. Its phone id starts
+as `<file> (cut)`, the same for every piece of the file (they come from one device, so they share
+one drift); typing another replaces it. A node fed pieces waits for its Cut detectors to read their
+recordings, and runs again whenever their pieces change (a cut switched, a threshold dragged).
+
 It finds where recordings of one event hear the same sound, and links their clocks: moment `t_a` on
 one recording is moment `t_b` on another; every pair is matched. Recordings linked by audio are a
 synced group, drawn with a coloured border and its number; only this node shows them, and audio

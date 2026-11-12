@@ -53,6 +53,20 @@ pub struct Wired {
     pub clock: String,
     pub path: String,
     pub source: Option<(Shared, u64)>,
+    /// A piece of the file (from a Cut detector): its audio from and to, seconds in the file.
+    pub range: Option<(f64, f64)>,
+}
+
+/// The part of `audio` (at the match's rate) a piece covers, or all of it.
+fn piece_of(audio: Vec<f32>, range: Option<(f64, f64)>) -> Vec<f32> {
+    match range {
+        Some((a, b)) => {
+            let sr = audio_match::SR as f64;
+            let (i, j) = (((a * sr) as usize).min(audio.len()), ((b * sr) as usize).min(audio.len()));
+            audio[i..j.max(i)].to_vec()
+        }
+        None => audio,
+    }
 }
 
 static RUNS: AtomicU64 = AtomicU64::new(1);
@@ -492,7 +506,26 @@ impl App {
         for (k, ports) in spec.inputs.chunks(PER_ROW).enumerate() {
             let mut r = Row { n: k + 1, ..Default::default() };
             let (Some(audio), Some(time)) = (ports.first(), ports.get(1)) else { continue };
-            if let Some((f, _)) = self.graph.feeder(i, audio.name) {
+            if let Some(pf) = self.graph.feeder(i, audio.name).and_then(|(f, o)| self.piece_feed(f, o)) {
+                // A piece of a cut recording: a recording of its own, on its own clock, of the
+                // same device as the file's other pieces (one phone id, so one clock speed).
+                r.name = pf.name.clone();
+                r.phone = kept(&self.nodes[i].kind, &phone_key(&pf.uid)).unwrap_or_default().trim().to_string();
+                if r.phone.is_empty() {
+                    r.phone = pf.phone.clone();
+                }
+                r.speed_ref = kept(&self.nodes[i].kind, &speed_ref_key(&pf.uid)).is_some();
+                r.phone_hint = phone_hint(&self.nodes[pf.src].state.lock().unwrap().source.meta);
+                r.uid = Some(pf.uid.clone());
+                r.clock = Some(pf.clock.clone());
+                r.file = self.source_file(pf.src).is_some();
+                r.len = pf.piece.len();
+                if r.file {
+                    r.stage = stages.get(file_k).cloned();
+                    file_k += 1;
+                }
+                r.wired = true;
+            } else if let Some((f, _)) = self.graph.feeder(i, audio.name) {
                 let path = self.source_file(f);
                 r.name = row_name(&self.nodes[f].label, path.as_deref());
                 let uid = self.nodes[f].uid.clone();
@@ -501,7 +534,7 @@ impl App {
                 r.phone_hint = phone_hint(&self.nodes[f].state.lock().unwrap().source.meta);
                 r.uid = Some(uid);
                 r.clock = self.clock_of(f);
-                r.file = path.is_some();
+                r.file = path.is_some() && !matches!(self.nodes[f].kind, Kind::CutDetector { .. });
                 r.len = self.source_length(f).unwrap_or_else(|| self.nodes[f].state.lock().unwrap().audio_s);
                 if r.file {
                     r.stage = stages.get(file_k).cloned();
@@ -899,15 +932,23 @@ impl App {
     pub(crate) fn audio_match_inputs(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> (Vec<Wired>, Vec<String>) {
         let (mut files, mut other) = (Vec::new(), Vec::new());
         for p in self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.kind == PortKind::Audio) {
-            let Some((f, _)) = self.graph.feeder(i, p.name) else { continue };
+            let Some((f, o)) = self.graph.feeder(i, p.name) else { continue };
             let label = self.nodes[f].label.clone();
             match &self.nodes[f].kind {
                 Kind::Sourcer { input } => match sourcer_node::input(input) {
                     Some(runtime::Input::File(path)) => {
                         let source = before.get(&f).map(|&r| (self.nodes[f].state.clone(), r));
-                        files.push(Wired { label, clock: self.clock_of(f).unwrap_or_default(), path, source })
+                        files.push(Wired { label, clock: self.clock_of(f).unwrap_or_default(), path, source, range: None })
                     }
                     _ => other.push(label),
+                },
+                // A piece of a cut recording: its file, from where to where.
+                Kind::CutDetector { .. } => match self.piece_feed(f, o).and_then(|pf| Some((self.source_file(pf.src)?, pf))) {
+                    Some((path, pf)) => {
+                        let source = Some((self.nodes[pf.src].state.clone(), before.get(&pf.src).copied().unwrap_or(0)));
+                        files.push(Wired { label: pf.name, clock: pf.clock, path, source, range: Some((pf.piece.a0, pf.piece.a1)) })
+                    }
+                    None => other.push(format!("{label} › {o}")),
                 },
                 _ => other.push(label),
             }
@@ -989,6 +1030,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                                 _ if stop2.load(Ordering::Relaxed) => Err("stopped".to_string()),
                                 _ => decode(&w.path, &stop2),
                             };
+                            let audio = audio.map(|a| piece_of(a, w.range)).and_then(|a| if a.is_empty() { Err("the piece has no sound".to_string()) } else { Ok(a) });
                             if audio.is_ok() {
                                 stage(Stage::Fingerprinting);
                             }

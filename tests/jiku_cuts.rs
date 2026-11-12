@@ -107,7 +107,7 @@ fn a_jump_cut_is_found_against_another_phone() {
     let lane = cuts::compare_lane("compare 1", &theirs.name, &Clip::new(cut.clone()), &Clip::new(theirs.audio.clone()));
     println!("{}", lane.note);
     for p in &lane.peaks {
-        println!("  {:.2} s: {:.2} s, {}", p.t, p.value, p.note);
+        println!("  {:.2} s ± {:.3}: {:.2} s, {}", p.t, p.error_s, p.value, p.note);
     }
     let level = cuts::level_lane(&cut);
     let noise = cuts::noise_lane(&cut);
