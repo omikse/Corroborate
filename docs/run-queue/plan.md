@@ -2,7 +2,7 @@
 
 Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions); nothing
 built. The mockup: [mockup.html](mockup.html) (open it in a
-browser; it runs a made-up project so every state can be seen).
+browser; it runs two made-up projects, Simple and Difficult, so every state can be seen).
 
 ## The question it answers
 
@@ -96,8 +96,8 @@ States, each with its own colour, on the node and in the queue list:
 | working | a step, with percent and a bar (or a moving block when how far is not known) |
 | done | worked out in this session |
 | kept | loaded from the kept results, not worked out again |
-| failed | why, in words; what needs it fails with "needs X, which failed" |
-| cancelled | stopped before it ended |
+| failed | why, in words; what needs it fails at once with "needs X, which failed", even while it still waits for something else |
+| cancelled | stopped before it ended; what needs it is cancelled at once, "needs X, which was cancelled" |
 | live | a live source and what reads it, streaming until Stop |
 
 ### Running
@@ -171,6 +171,10 @@ download is never treated as live (22f9f14).
    a change marks stale, Auto queues the stale ones. The ad hoc waits in Audio match and the Cut
    detector go. Test: ▶ on an Audio match fed pieces runs the SOURCERs, then the Cut detector, then
    the match, and nothing else; a change to one SOURCER redoes only its row and what follows.
+   Then the mockup's Difficult project built for real in a headless test: three downloads for
+   two download turns, two Cut detectors sharing a recording, an Audio match needing seven jobs,
+   an ENF on a grid log, a plugin that is never kept, a Cut detector with nothing wired, a live
+   microphone; a failed download and a cancel spread to what needs them and no further.
 3. **Keeping results.** Keys and `cache\`, the Cut detector's scan and the SOURCER's decoded audio
    first, then Audio match and ENF; the kept state; Run again; Forget. Test: open the 44 minute
    project again, the Cut detector is there with no read; change the file, it reads again.
