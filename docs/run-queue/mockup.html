@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Run Queue</title>
+<style>
+:root{
+  --canvas:#16181c; --node:#2a2d33; --head:#23262b; --box:#1b1e23; --boxline:#3a3f47; --seam:#101215;
+  --text:#d8dbe0; --dim:#8a9099; --faint:#565c66; --grey:#4a4f58;
+  --notrun:#565c66; --stale:#e0a458; --queued:#8a9099; --working:#e0c85a; --done:#8cdc6e;
+  --kept:#6cc0a8; --failed:#e0524f; --cancelled:#9a7a7a; --live:#ff5a5a;
+  --audio:#e0a458; --video:#e0c85a; --time:#7aa7e0; --event:#e07a6a;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,monospace; --sans:"Inter",system-ui,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--text);font:13px/1.45 var(--sans);padding:24px 16px 48px}
+main{max-width:1010px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+h1{font-size:18px;margin:0;font-weight:600}
+h2{font-size:14px;margin:0 0 6px;font-weight:600}
+p{margin:0;color:var(--dim);max-width:780px}
+code{font:12px var(--mono);color:var(--text)}
+button{font:12px var(--sans);color:var(--text);background:#33373e;border:1px solid var(--boxline);border-radius:3px;padding:3px 9px;cursor:pointer}
+button:hover{background:#3c414a}
+button:disabled{opacity:.4;cursor:default}
+button.lit{border-color:#5fb3a1;color:#a8e0d2}
+
+/* top bar */
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;background:var(--head);border:1px solid var(--boxline);border-radius:4px;padding:6px 8px}
+.bar .sep{width:1px;height:18px;background:var(--boxline);margin:0 4px}
+.bar .proj{color:var(--dim);font-size:12px;margin-right:4px}
+.switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer;user-select:none}
+.switch i{width:26px;height:14px;border-radius:7px;background:#3a3f47;position:relative;display:inline-block}
+.switch i::after{content:"";position:absolute;left:2px;top:2px;width:10px;height:10px;border-radius:50%;background:var(--dim);transition:left .15s}
+.switch.on i{background:#2f5a50}
+.switch.on i::after{left:14px;background:#a8e0d2}
+#qbtn b{font-weight:400;color:var(--dim);margin-left:4px}
+
+/* canvas */
+.stage{overflow-x:auto}
+#canvas{position:relative;width:980px;height:540px;background:
+  radial-gradient(circle,#2a2e35 1px,transparent 1px) 0 0/22px 22px,var(--canvas);border:1px solid var(--seam);border-radius:4px}
+#wires{position:absolute;inset:0;pointer-events:none}
+.node{position:absolute;width:280px;background:var(--node);border:1px solid var(--boxline);border-radius:4px;box-shadow:0 2px 8px #0006}
+.node .title{height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;background:var(--head);border-radius:4px 4px 0 0;font-size:12.5px}
+.node .title .kind{margin-left:auto;color:var(--faint);font-size:10.5px}
+.state{position:relative;height:22px;display:flex;align-items:center;gap:7px;padding:0 6px 0 8px;border-bottom:1px solid var(--seam);background:#24272d;font-size:11.5px;cursor:default}
+.state .dot{width:8px;height:8px;border-radius:50%;flex:none}
+.state .txt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+.state .txt b{font-weight:500;color:var(--text)}
+.state .fill{position:absolute;left:0;bottom:-1px;height:2px;background:var(--working)}
+.state .fill.unknown{width:30%!important;animation:slide 1.2s linear infinite}
+@keyframes slide{from{left:-30%}to{left:100%}}
+.title .run{padding:0;width:20px;height:18px;font-size:10px;line-height:16px;margin-right:-4px;color:var(--done);border-color:#3f5a3a;background:#26302a}
+.title .run.busy{color:var(--failed);border-color:#5a3a3a;background:#302626}
+.dot.pulse{animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.body{padding:6px 10px 8px;font-size:11.5px;color:var(--dim);display:flex;flex-direction:column;gap:5px}
+.body .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.body .mono{font-family:var(--mono);font-size:11px;color:var(--text)}
+.body select,.body input[type=range]{font:11px var(--sans);background:#1f2227;color:var(--text);border:1px solid var(--boxline);border-radius:3px}
+.body input[type=range]{width:110px;accent-color:var(--working)}
+.ports{position:absolute;top:30px;font:10px var(--mono);color:var(--faint)}
+.pin{position:absolute;width:9px;height:9px;border-radius:50%;border:1.5px solid}
+.valnode .state{display:none}
+
+/* tip */
+#tip{position:fixed;pointer-events:none;background:#0f1114;border:1px solid var(--boxline);border-radius:3px;padding:7px 9px;font:11.5px/1.5 var(--mono);color:var(--text);display:none;z-index:9;max-width:380px;white-space:pre-wrap}
+
+/* queue */
+#queue{background:var(--node);border:1px solid var(--boxline);border-radius:4px}
+#queue .qhead{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--head);border-bottom:1px solid var(--seam);border-radius:4px 4px 0 0;font-size:12.5px}
+#queue .qhead span{color:var(--dim);font-size:11.5px}
+#queue .qhead button{margin-left:auto}
+table{border-collapse:collapse;width:100%;font-size:12px;table-layout:fixed}
+th{font:10px var(--mono);color:var(--faint);text-align:left;font-weight:400;padding:6px 8px 4px;text-transform:uppercase;letter-spacing:.04em}
+td{padding:4px 8px;height:28px;border-top:1px solid #30343a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td.m{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--dim)}
+.chip{display:inline-flex;align-items:center;gap:5px;font:10.5px var(--mono);padding:1px 6px;border-radius:2px;background:#33373e}
+.chip i{width:7px;height:7px;border-radius:50%;display:inline-block}
+.pbar{height:4px;background:#1b1e23;border-radius:2px;overflow:hidden;position:relative}
+.pbar div{height:100%;background:var(--working)}
+.pbar div.unknown{width:30%!important;position:absolute;animation:slide 1.2s linear infinite}
+.qfoot{display:flex;align-items:center;gap:10px;padding:7px 10px;border-top:1px solid var(--seam);font-size:11.5px;color:var(--dim)}
+.qfoot button{margin-left:auto}
+.empty{padding:10px;color:var(--faint);font-size:12px}
+
+/* legend */
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11.5px;color:var(--dim)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.try{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.try b{font-weight:500;color:var(--dim);font-size:12px;margin-right:4px}
+ul{margin:4px 0 0;padding-left:18px;color:var(--dim)}
+li{margin:2px 0}
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Running, the queue, and kept results</h1>
+    <p>A made-up project, run by a pretend queue (seconds here stand for minutes). Each node that does work has a
+      ▶ in its top right corner to run it and everything it needs, and a state bar under its title. The queue lists every job in the order
+      asked. What is worked out is kept in <code>cache\</code>, so it is not worked out twice. Plan:
+      <code>docs/run-queue/plan.md</code>.</p>
+  </div>
+
+  <div class="bar">
+    <span class="proj">mytest ▾</span>
+    <div class="sep"></div>
+    <button id="runall" title="run every job that is not up to date">▶ Run</button>
+    <button id="stop" title="cancel every job, queued or working; what is done stays kept">■ Stop</button>
+    <button id="again" title="run everything again without the kept results">↻ Run again</button>
+    <span class="switch on" id="auto" title="a change marks what it touches stale; with Auto on, those run again at once">
+      <i></i>Auto</span>
+    <div class="sep"></div>
+    <button id="qbtn" title="every job of this session, in the order asked">Queue<b id="qcount"></b></button>
+  </div>
+
+  <div class="stage"><div id="canvas"><svg id="wires" width="980" height="540"></svg></div></div>
+
+  <div class="legend" id="legend"></div>
+
+  <div class="try">
+    <b>Try</b>
+    <button id="reopen" title="close and open the project: kept results load at once, nothing runs">Open the project again</button>
+    <button id="failnext" title="the next download fails (the network went away)">Make the next download fail</button>
+    <button id="forget" title="forget every kept result">Forget all kept</button>
+  </div>
+
+  <div id="queue">
+    <div class="qhead">Queue <span id="qsum"></span><button id="clearq">Clear finished</button></div>
+    <table>
+      <colgroup><col style="width:34px"><col style="width:170px"><col style="width:96px"><col style="width:150px"><col style="width:110px"><col><col style="width:64px"><col style="width:40px"></colgroup>
+      <thead><tr><th>#</th><th>node</th><th>state</th><th>step</th><th>how far</th><th>waits for · why</th><th>took</th><th></th></tr></thead>
+      <tbody id="qrows"></tbody>
+    </table>
+    <div class="empty" id="qempty">Nothing asked yet: press ▶ on a node, or Run.</div>
+    <div class="qfoot"><span id="keptsum"></span><button id="forget2">Forget all kept</button></div>
+  </div>
+
+  <div>
+    <h2>What to look at</h2>
+    <ul>
+      <li>▶ on the Audio match queues the link's SOURCER, the file's SOURCER, then the Cut detector, then the match.
+        Each waits for what it needs and says what that is. The Timeline after it is not a job.</li>
+      <li>The link downloads with a turn of its own (2 at once), then waits for a turn to decode, shared with every
+        heavy job (2 here, half the cores in the program).</li>
+      <li>The Cut detector's threshold only changes what is shown: nothing runs again. Its picture scale changes
+        what it works out: it turns stale, and so does the Audio match after it. With Auto on they run again, the
+        SOURCERs stay kept.</li>
+      <li>Replace the file in the second SOURCER: its key changes, and everything that reads it is stale.</li>
+      <li>Open the project again: whatever is kept loads at once (teal), nothing decodes.</li>
+      <li>Play on the link's SOURCER with no sound yet: Play queues its decode and waits for it.</li>
+      <li>The microphone is live: Run starts it and the ENF node reading it, both pulse until Stop. A live result
+        is never kept.</li>
+    </ul>
+  </div>
+</main>
+<div id="tip"></div>
+<script>
+// ---------- the made-up project
+const STATES = {
+  notrun:   {name:"not run",   col:"var(--notrun)"},
+  stale:    {name:"stale",     col:"var(--stale)"},
+  queued:   {name:"queued",    col:"var(--queued)"},
+  working:  {name:"working",   col:"var(--working)"},
+  done:     {name:"done",      col:"var(--done)"},
+  kept:     {name:"kept",      col:"var(--kept)"},
+  failed:   {name:"failed",    col:"var(--failed)"},
+  cancelled:{name:"cancelled", col:"var(--cancelled)"},
+  live:     {name:"live",      col:"var(--live)"},
+};
+const TURNS = {download:2, heavy:2};
+// Nodes. Jobs have steps (name, seconds, kind of turn), needs, a method version, settings that
+// change what they work out, and the size of what they keep.
+const N = {
+  s1: {title:"SOURCER", kind:"source", x:20, y:18, job:true, label:"youtube 5wypCQp11wo",
+       steps:[["download",6,"download"],["decode",3,"heavy"]], needs:[], ver:1, set:0, mb:85, outs:["audio","video"]},
+  s2: {title:"SOURCER", kind:"source", x:20, y:200, job:true, label:"phone 2.mp4",
+       steps:[["decode",3,"heavy"]], needs:[], ver:1, set:0, mb:20, outs:["audio"]},
+  cd: {title:"Cut detector", kind:"detector", x:345, y:18, job:true,
+       steps:[["every frame",6,"heavy"],["keyframes",1,"heavy"],["sound",2,"heavy"],["level and noise",1,"heavy"],["compare: phone 2",3,"heavy"]],
+       needs:["s1","s2"], ver:3, set:0, mb:10, outs:["cuts","audio 1","audio 2"]},
+  am: {title:"Audio match", kind:"detector", x:680, y:120, job:true,
+       steps:[["fingerprints",3,"heavy"],["match",2,"heavy"]], needs:["cd","s2"], ver:2, set:0, mb:0.4, outs:["time 1"]},
+  tl: {title:"Timeline", kind:"view", x:680, y:372, job:false},
+  mic:{title:"SOURCER", kind:"source · live", x:20, y:392, job:true, live:true, label:"microphone (USB)", steps:[["listening",0,"live"]], needs:[], ver:1, set:0, mb:0},
+  enf:{title:"ENF (power hum)", kind:"detector · live", x:345, y:392, job:true, live:true, steps:[["hum track",0,"live"]], needs:["mic"], ver:1, set:0, mb:0},
+};
+const WIRES = [["s1","cd","video"],["s1","cd","audio"],["s2","cd","audio"],["s2","am","audio"],["cd","am","audio"],["am","tl","time"],["mic","enf","audio"]];
+const COL = {audio:"var(--audio)", video:"var(--video)", time:"var(--time)"};
+
+// ---------- the pretend queue
+const cache = {};          // job -> key kept on disk
+const S = {};              // job -> {state, step, frac, why, took, t0, turn, lastKey}
+const asked = [];          // queue rows, in the order asked: {id, n}
+let auto = true, failNext = false, playing = null, playAt = 0, wantPlay = null;
+let rowNo = 0;
+for (const id in N) if (N[id].job) S[id] = {state:"notrun", step:0, frac:0, why:"", took:null, t0:0, turn:null};
+
+const key = id => { const n = N[id]; return id + "/v" + n.ver + "/s" + n.set + "[" + n.needs.map(key).join(",") + "]"; };
+const upToDate = id => !N[id].live && cache[id] === key(id) && (S[id].state === "done" || S[id].state === "kept");
+const inUse = kind => Object.values(S).filter(s => s.state === "working" && s.turn === kind).length;
+
+function enqueue(id) {
+  const s = S[id];
+  if (["queued","working","live"].includes(s.state) || upToDate(id)) return;
+  if (cache[id] === key(id)) { s.state = "kept"; s.why = "loaded from cache\\"; return; }
+  s.state = "queued"; s.step = 0; s.frac = 0; s.why = ""; s.took = null; s.turn = null;
+  asked.push({id, n: ++rowNo});
+}
+// A node and every job it needs that is not up to date, needs first.
+function runWithNeeds(id) {
+  for (const d of N[id].needs) runWithNeeds(d);
+  if (N[id].live) { if (S[id].state !== "live") { S[id].state = "live"; asked.push({id, n: ++rowNo}); } return; }
+  enqueue(id);
+}
+function runAll() { for (const id in S) runWithNeeds(id); }
+function cancel(id) {
+  const s = S[id];
+  if (["queued","working","live"].includes(s.state)) { s.state = "cancelled"; s.turn = null; s.why = "cancelled"; }
+}
+function stopAll() { for (const id in S) cancel(id); wantPlay = null; }
+// After a change: what it touches is stale; with Auto on, those run again.
+function changed(id) {
+  const touched = new Set([id]);
+  let grew = true;
+  while (grew) { grew = false; for (const j in N) if (N[j].job && !touched.has(j) && N[j].needs.some(d => touched.has(d))) { touched.add(j); grew = true; } }
+  for (const j of touched) {
+    const s = S[j];
+    if (N[j].live) continue;
+    if (s.state === "working" || s.state === "queued") { s.state = "cancelled"; s.turn = null; }
+    if (cache[j] !== key(j) && s.state !== "notrun") s.state = "stale";
+  }
+  if (auto) for (const j of touched) if (S[j].state === "stale") runWithNeeds(j);
+}
+function whatItWaitsFor(id) {
+  for (const d of N[id].needs) {
+    const s = S[d];
+    if (s.state === "failed") return {fail: `needs ${name(d)}, which failed`};
+    if (!upToDate(d) && !N[d].live) {
+      const st = N[d].steps[s.step];
+      const how = s.state === "working" ? ` (${st[0]} ${Math.round(s.frac * 100)}%)` : s.state === "queued" ? " (queued)" : ` (${STATES[s.state].name})`;
+      return {wait: `${name(d)}${how}`};
+    }
+  }
+  return null;
+}
+function tick(dt) {
+  // Start what can start, in the order asked.
+  for (const r of asked) {
+    const id = r.id, s = S[id];
+    if (s.state !== "queued") continue;
+    const w = whatItWaitsFor(id);
+    if (w && w.fail) { s.state = "failed"; s.why = w.fail; continue; }
+    if (w) { s.why = "for " + w.wait; continue; }
+    const kind = N[id].steps[s.step][2];
+    if (inUse(kind) >= TURNS[kind]) { s.why = `for a turn to ${kind === "download" ? "download" : "decode or work"} (${inUse(kind)} of ${TURNS[kind]} in use)`; continue; }
+    s.state = "working"; s.turn = kind; s.why = ""; if (!s.t0) s.t0 = performance.now();
+  }
+  // Move what works on.
+  for (const id in S) {
+    const s = S[id];
+    if (s.state !== "working") continue;
+    const st = N[id].steps[s.step];
+    s.frac += dt / st[1];
+    if (st[2] === "download" && failNext && s.frac > 0.4) { failNext = false; s.state = "failed"; s.turn = null; s.why = "yt-dlp: unable to download video data: HTTP Error 403"; continue; }
+    if (s.frac < 1) continue;
+    s.step++; s.frac = 0;
+    if (s.step >= N[id].steps.length) {
+      s.state = "done"; s.turn = null; s.step = N[id].steps.length - 1; s.frac = 1;
+      s.took = (performance.now() - s.t0) / 1000; s.t0 = 0; cache[id] = key(id);
+    } else if (N[id].steps[s.step][2] !== s.turn) {
+      s.state = "queued"; s.turn = null;   // the next step needs another kind of turn
+    }
+  }
+  if (wantPlay && upToDate(wantPlay)) { playing = wantPlay; playAt = 0; wantPlay = null; }
+  if (playing) playAt += dt;
+}
+const name = id => N[id].label ? `${N[id].title} '${N[id].label}'` : N[id].title;
+
+// ---------- drawing
+const canvas = document.getElementById("canvas"), svg = document.getElementById("wires"), tip = document.getElementById("tip");
+const el = {};
+function nodeHtml(id) {
+  const n = N[id];
+  let body = "";
+  if (id === "s1") body = `<div class="row"><span class="mono">https://youtube.com/watch?v=5wypCQp11wo</span></div>
+     <div class="row"><button data-play="s1">Play</button><span id="play-s1"></span></div>`;
+  if (id === "s2") body = `<div class="row"><span class="mono" id="s2file">phone 2.mp4</span></div>
+     <div class="row"><button data-act="replace">Replace the file</button><span>changes its key</span></div>`;
+  if (id === "cd") body = `<div class="row">threshold (shown only) <input type="range" min="5" max="40" value="10" data-act="thr"><span class="mono" id="thrv">10</span></div>
+     <div class="row">picture scale (worked out) <select data-act="scale"><option>320 px</option><option>640 px</option></select></div>`;
+  if (id === "am") body = `<div class="row">window <select data-act="win"><option>15 s links</option><option>10 s links</option></select></div>
+     <div class="row" id="amres">no links yet</div>`;
+  if (id === "tl") body = `<div class="row">a view: worked out when read, not a job</div><div class="row" id="tlres">no times yet</div>`;
+  if (id === "mic") body = `<div class="row"><span class="mono">microphone (USB)</span></div>`;
+  if (id === "enf") body = `<div class="row" id="enfres">no hum yet</div>`;
+  return `<div class="title">${n.title}<span class="kind">${n.kind}</span>${n.job ? `<button class="run" data-run="${id}"></button>` : ""}</div>
+    ${n.job ? `<div class="state" data-state="${id}"><span class="dot"></span><span class="txt"></span><span class="fill"></span></div>` : ""}
+    <div class="body">${body}</div>`;
+}
+for (const id in N) {
+  const d = document.createElement("div");
+  d.className = "node" + (N[id].job ? "" : " valnode");
+  d.style.left = N[id].x + "px"; d.style.top = N[id].y + "px";
+  d.innerHTML = nodeHtml(id);
+  canvas.appendChild(d); el[id] = d;
+}
+function port(id, side, k) {
+  const d = el[id], r = {x: N[id].x, y: N[id].y, w: d.offsetWidth};
+  return {x: side === "out" ? r.x + r.w : r.x, y: r.y + 40 + k * 14};
+}
+function drawWires() {
+  let h = "";
+  const outs = {}, ins = {};
+  for (const [a, b, kind] of WIRES) {
+    const ka = outs[a] = (outs[a] ?? -1) + 1, kb = ins[b] = (ins[b] ?? -1) + 1;
+    const p = port(a, "out", ka), q = port(b, "in", kb);
+    const live = N[a].live && S[a].state === "live";
+    const c = COL[kind], dx = Math.max(40, (q.x - p.x) / 2);
+    h += `<path d="M${p.x},${p.y} C${p.x + dx},${p.y} ${q.x - dx},${q.y} ${q.x},${q.y}" fill="none" stroke="${c}" stroke-width="${live ? 3 : 2}" opacity="${live ? 1 : .75}">${live ? `<animate attributeName="opacity" values="1;.35;1" dur="1s" repeatCount="indefinite"/>` : ""}</path>`;
+    h += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--node)" stroke="${c}" stroke-width="1.5"/><circle cx="${q.x}" cy="${q.y}" r="4" fill="var(--node)" stroke="${c}" stroke-width="1.5"/>`;
+  }
+  svg.innerHTML = h;
+}
+function stateText(id) {
+  const s = S[id], n = N[id], st = n.steps[s.step];
+  switch (s.state) {
+    case "notrun": return "not run";
+    case "stale": return "<b>stale</b> · changed since it ran";
+    case "queued": return `<b>queued</b> · waits ${s.why || "…"}`;
+    case "working": return `<b>${st[0]}</b> ${Math.round(s.frac * 100)}%${n.steps.length > 1 ? ` · step ${s.step + 1} of ${n.steps.length}` : ""}`;
+    case "done": return `<b>done</b> in ${s.took.toFixed(1)} s`;
+    case "kept": return `<b>kept</b> · loaded from cache\\, ${n.mb} MB`;
+    case "failed": return `<b>failed</b> · ${s.why}`;
+    case "cancelled": return "cancelled";
+    case "live": return `<b>live</b> · ${st[0]}`;
+  }
+}
+function drawNodes() {
+  for (const id in S) {
+    const s = S[id], bar = el[id].querySelector(".state");
+    const dot = bar.querySelector(".dot"), fill = bar.querySelector(".fill"), btn = el[id].querySelector(".run");
+    dot.style.background = STATES[s.state].col;
+    dot.className = "dot" + (s.state === "live" || s.state === "queued" ? " pulse" : "");
+    bar.querySelector(".txt").innerHTML = stateText(id);
+    const busy = ["queued","working","live"].includes(s.state);
+    btn.textContent = busy ? "■" : "▶";
+    btn.classList.toggle("busy", busy);
+    btn.title = busy ? "cancel" : N[id].needs.length ? "run this and what it needs" : "run this";
+    fill.style.display = s.state === "working" ? "block" : "none";
+    fill.style.width = (s.frac * 100) + "%";
+    fill.className = "fill" + (s.state === "working" && N[id].steps[s.step][1] === 0 ? " unknown" : "");
+  }
+  const ps = document.getElementById("play-s1");
+  if (wantPlay) { const s = S.s1, st = N.s1.steps[s.step]; ps.textContent = `waits for the sound: ${s.state === "working" ? `${st[0]} ${Math.round(s.frac * 100)}%` : STATES[s.state].name}`; ps.style.color = "var(--working)"; }
+  else if (playing) { ps.textContent = `playing 0:${String(Math.floor(playAt) % 60).padStart(2, "0")}`; ps.style.color = "var(--done)"; }
+  else { ps.textContent = ""; }
+  document.querySelector('[data-play="s1"]').textContent = playing || wantPlay ? "Pause" : "Play";
+  const ok = id => upToDate(id);
+  document.getElementById("amres").textContent = ok("am") ? "5 recordings linked, 1 group" : "no links yet";
+  document.getElementById("tlres").textContent = ok("am") ? "5 rows on real time" : "no times yet";
+  document.getElementById("enfres").textContent = S.enf.state === "live" ? "50.012 Hz · following" : "no hum yet";
+}
+function drawQueue() {
+  const rows = document.getElementById("qrows");
+  let h = "";
+  for (const r of asked) {
+    const s = S[r.id], n = N[r.id], st = n.steps[s.step];
+    const pct = s.state === "working" ? (st[1] === 0 ? `<div class="pbar"><div class="unknown"></div></div>` : `<div class="pbar"><div style="width:${s.frac * 100}%"></div></div>`)
+      : s.state === "done" || s.state === "kept" ? `<div class="pbar"><div style="width:100%;background:${STATES[s.state].col}"></div></div>` : "";
+    const why = s.state === "queued" ? "waits " + s.why : s.state === "failed" ? s.why : s.state === "kept" ? "loaded from cache\\" : s.state === "live" ? "until Stop; never kept" : "";
+    h += `<tr><td class="m">${r.n}</td><td>${name(r.id)}</td>
+      <td><span class="chip"><i style="background:${STATES[s.state].col}"></i>${STATES[s.state].name}</span></td>
+      <td>${s.state === "working" || s.state === "live" ? st[0] : s.state === "queued" ? n.steps[s.step][0] : ""}</td>
+      <td>${pct}</td><td style="color:var(--dim)" title="${why}">${why}</td>
+      <td class="m">${s.took != null && s.state === "done" ? s.took.toFixed(1) + " s" : ""}</td>
+      <td>${["queued","working","live"].includes(s.state) ? `<button data-cancel="${r.id}" title="cancel">×</button>` : ""}</td></tr>`;
+  }
+  rows.innerHTML = h;
+  document.getElementById("qempty").style.display = asked.length ? "none" : "block";
+  const count = st => Object.values(S).filter(s => s.state === st).length;
+  const sum = `${count("working")} working · ${count("queued")} queued${count("live") ? ` · ${count("live")} live` : ""}`;
+  document.getElementById("qsum").textContent = sum;
+  document.getElementById("qcount").textContent = sum;
+  const kept = Object.keys(cache).filter(id => cache[id] === key(id) || cache[id]);
+  const mb = kept.reduce((a, id) => a + N[id].mb, 0);
+  document.getElementById("keptsum").textContent = kept.length ? `Kept in cache\\: ${kept.length} result${kept.length === 1 ? "" : "s"}, ${mb.toFixed(1)} MB` : "Nothing kept yet.";
+}
+const legend = document.getElementById("legend");
+legend.innerHTML = Object.values(STATES).map(s => `<span><i style="background:${s.col}"></i>${s.name}</span>`).join("");
+
+// ---------- clicks
+document.addEventListener("click", e => {
+  const t = e.target;
+  if (t.dataset.run) { const id = t.dataset.run; ["queued","working","live"].includes(S[id].state) ? cancel(id) : runWithNeeds(id); }
+  if (t.dataset.cancel) cancel(t.dataset.cancel);
+  if (t.dataset.play) {
+    if (playing || wantPlay) { playing = null; wantPlay = null; }
+    else if (upToDate("s1")) { playing = "s1"; playAt = 0; }
+    else { wantPlay = "s1"; runWithNeeds("s1"); }
+  }
+  if (t.dataset.act === "replace") {
+    N.s2.set++; document.getElementById("s2file").textContent = `phone 2 (take ${N.s2.set + 1}).mp4`; changed("s2");
+  }
+  if (t.id === "runall") runAll();
+  if (t.id === "stop") stopAll();
+  if (t.id === "again") { for (const id in cache) delete cache[id]; for (const id in S) if (!N[id].live) { cancel(id); S[id].state = "stale"; } runAll(); }
+  if (t.id === "auto" || t.closest("#auto")) { auto = !auto; document.getElementById("auto").classList.toggle("on", auto); }
+  if (t.id === "reopen") {
+    stopAll(); asked.length = 0; playing = null;
+    for (const id in S) { const s = S[id]; s.step = 0; s.frac = 0; s.took = null; s.t0 = 0; s.turn = null;
+      s.state = !N[id].live && cache[id] === key(id) ? "kept" : cache[id] ? "stale" : "notrun"; if (s.state === "kept") s.step = N[id].steps.length - 1; }
+  }
+  if (t.id === "failnext") { failNext = true; t.textContent = "The next download will fail"; setTimeout(() => t.textContent = "Make the next download fail", 4000); }
+  if (t.id === "forget" || t.id === "forget2") { for (const id in cache) delete cache[id]; for (const id in S) if (S[id].state === "kept" || S[id].state === "done") S[id].state = "stale"; }
+  if (t.id === "clearq") { for (let k = asked.length - 1; k >= 0; k--) if (!["queued","working","live"].includes(S[asked[k].id].state)) asked.splice(k, 1); }
+});
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.dataset.act === "scale") { N.cd.set = t.selectedIndex; changed("cd"); }
+  if (t.dataset.act === "win") { N.am.set = t.selectedIndex; changed("am"); }
+});
+document.addEventListener("input", e => { if (e.target.dataset.act === "thr") document.getElementById("thrv").textContent = e.target.value; });
+document.addEventListener("mousemove", e => {
+  const bar = e.target.closest && e.target.closest(".state");
+  if (!bar || e.target.tagName === "BUTTON") { tip.style.display = "none"; return; }
+  const id = bar.dataset.state, s = S[id], n = N[id];
+  const lines = [name(id), `state: ${STATES[s.state].name}`];
+  if (s.state === "queued") lines.push(`waits ${s.why}`);
+  if (s.state === "failed") lines.push(s.why);
+  lines.push(`steps: ${n.steps.map(x => x[0]).join(", ")}`);
+  if (n.needs.length) lines.push(`needs: ${n.needs.map(name).join(", ")}`);
+  if (!n.live) lines.push(`key: ${key(id)}`, cache[id] ? `kept: ${cache[id] === key(id) ? "this key" : "an older key (stale)"}, ${n.mb} MB` : "kept: nothing");
+  else lines.push("live: never kept");
+  tip.textContent = lines.join("\n");
+  tip.style.display = "block"; tip.style.left = Math.min(e.clientX + 14, innerWidth - 400) + "px"; tip.style.top = (e.clientY + 14) + "px";
+});
+
+// ---------- go
+drawWires();
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  tick(dt); drawNodes(); drawQueue(); drawWires();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
