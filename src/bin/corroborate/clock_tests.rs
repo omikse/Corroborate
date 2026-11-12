@@ -454,7 +454,7 @@ fn audio_match_links_two_recordings() {
     d.app().graph.disconnect(m, "time 1");
     d.app().sync_many_ports();
     d.frames(2);
-    assert_eq!(d.app().audio_match_inputs(m, &Default::default()).0.len(), 3, "the time input is not a recording");
+    assert_eq!(d.app().audio_match_inputs(m).0.len(), 3, "the time input is not a recording");
     let app = d.app();
     let st = app.nodes[m].state.lock().unwrap().status.clone();
     let found = app.nodes[m].state.lock().unwrap().found.clone().expect("what the match found");

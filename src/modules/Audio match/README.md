@@ -9,8 +9,9 @@ draws its time wire). Each row gives a better audio start time and audio end tim
 A row's audio may be a piece of a cut recording (a Cut detector's `audio n`): it is a recording of
 its own, from its piece of the file, on its own clock, named `<file> · piece n`. Its phone id starts
 as `<file> (cut)`, the same for every piece of the file (they come from one device, so they share
-one drift); typing another replaces it. A node fed pieces waits for its Cut detectors to read their
-recordings, and runs again whenever their pieces change (a cut switched, a threshold dragged).
+one drift); typing another replaces it. A node fed pieces needs its Cut detectors (the queue runs them first),
+and turns stale whenever their pieces change (a cut switched, a threshold dragged): with Auto on it
+runs again.
 
 It finds where recordings of one event hear the same sound, and links their clocks: moment `t_a` on
 one recording is moment `t_b` on another; every pair is matched. Recordings linked by audio are a
@@ -121,11 +122,14 @@ and the findings on the Jiku Mobile Video Dataset (50 phones at one event: 95 % 
 truth's spanning-tree edges found, none wrong, moments within 16 ms for 95 %) are in the library
 module `src/audio_match.rs`; the real-data test is `tests/jiku.rs` (`tools/jiku.py` fetches it).
 
-Its state is on the dot before its name and in the queue list: queued while its recordings
-decode (fed pieces: while its Cut detectors read, and failed or cancelled at once when one of them
-fails or is cancelled), then working through two steps, decode and fingerprint (with how many of
-the recordings are done) and match; done with how long it took, or failed when fewer than two
-recordings could be read.
+Its state is on the dot before its name and in the queue list. It needs the SOURCERs of its files
+and the Cut detectors whose pieces it takes: queued while they run ("for 'phone 3' (decode 34%)"),
+failed or cancelled at once when one of them fails or is cancelled ("needs 'Cut detector', which
+failed"), then working through two steps, decode and fingerprint (each recording's sound is its
+SOURCER's, already decoded; with how many of the recordings are done) and match; done with how
+long it took, or failed when fewer than two recordings could be read. Stale when a recording, its
+clock or a piece changed; ▶ in its top right corner runs it and whatever of its needs is not up to
+date. A change to one SOURCER runs only that SOURCER again, then the match.
 
 Limits now: files only (a stream or microphone wired in is named in the status and left out);
 each file is decoded again here, and all are matched once their decoding is done, not while

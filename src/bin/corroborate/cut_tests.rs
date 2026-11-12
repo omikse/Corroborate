@@ -173,7 +173,8 @@ fn the_player_plays_a_cut() {
 }
 
 /// A YouTube link in the SOURCER: the detector reads the copy the SOURCER downloaded into the
-/// project's recordings\ (listed in its downloads.txt), and waits for one while there is none.
+/// project's recordings\ (listed in its downloads.txt); with none, it cannot start (the queue runs
+/// the SOURCER first).
 /// A copy left in recordings\ next to the program is copied into the project first.
 #[test]
 fn a_downloaded_video_is_read() {
@@ -190,13 +191,14 @@ fn a_downloaded_video_is_read() {
     let s = app.add(Kind::Sourcer { input: url.into() }, Pos2::new(20.0, 40.0));
     let c = app.add(Kind::CutDetector { rows: Vec::new() }, Pos2::new(300.0, 40.0));
     app.wire(s, "video", c, "video");
-    let job = app.cut_job(c, &HashMap::new()).unwrap();
-    assert!(job.url.is_some() && job.path.is_empty(), "no copy yet: the run waits for the SOURCER's");
+    assert_eq!(app.needs(c), vec![s], "it needs its SOURCER's download");
+    let e = app.cut_job(c).err().unwrap_or_default();
+    assert!(e.contains("kept no copy"), "no copy yet: {e}");
     // The copy listed by its name in the project's list.
     std::fs::copy(&clip, rec.join("youtube cuttest0001.mp4")).unwrap();
     std::fs::write(rec.join("downloads.txt"), format!("{url}\tyoutube cuttest0001.mp4\n")).unwrap();
-    let job = app.cut_job(c, &HashMap::new()).unwrap();
-    assert!(job.url.is_none() && recordings::key(Path::new(&job.path)) == recordings::key(&rec.join("youtube cuttest0001.mp4")), "{}", job.path);
+    let job = app.cut_job(c).unwrap();
+    assert!(recordings::key(Path::new(&job.path)) == recordings::key(&rec.join("youtube cuttest0001.mp4")), "{}", job.path);
     // One in recordings\ next to the program only: copied into the project.
     let other = "https://youtu.be/cuttest0002";
     let shared = corroborate::home().join("recordings");

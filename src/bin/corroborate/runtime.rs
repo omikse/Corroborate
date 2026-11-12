@@ -123,7 +123,8 @@ pub fn start(job: Job) {
         s.status = "starting".into();
         s.progress = if k == 0 { Progress::new(if web { vec![DOWNLOAD, DECODE] } else { vec![DECODE] }) } else { Progress::new([READ]) };
         s.progress.waits = match k {
-            0 if web || live => None,
+            0 if live => None,
+            0 if web => Some(crate::jobs::download_waits()),
             0 => Some(crate::jobs::turn_waits()),
             _ => Some(format!("for '{}'", job.label)),
         };
@@ -173,6 +174,18 @@ fn run(job: Job, run_id: u64) {
         Input::File(p) => p.clone(),
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
+            // Only so many download at once (the network).
+            let _turn = if web {
+                set_status("waiting for a turn to download…");
+                let w = crate::jobs::download_waits();
+                each(&|k, s| s.progress.waits = Some(if k == 0 { w.clone() } else { format!("for '{}' ({w})", job.label) }));
+                match ingest::DOWNLOADS.take(&job.stop) {
+                    Some(t) => Some(t),
+                    None => return finish(&job, run_id, Ok(0.0)),
+                }
+            } else {
+                None
+            };
             set_status("yt-dlp: checking the link, downloading the audio if it is not live…");
             if web {
                 source_step(DOWNLOAD, StepState::Working, -1.0);

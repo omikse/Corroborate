@@ -33,20 +33,14 @@ pub struct Scan {
     pub notes: Vec<String>,
 }
 
-/// What a run reads: the recording's file, whether its picture is wired, and its source's state
-/// with the run it was on before this one (the source's decoded audio is this run's once its run
-/// differs and is done).
+/// What a run reads: the recording's file, whether its picture and sound are wired, and its
+/// SOURCER's state (its decoded sound, once that run is done: the queue starts the detector after
+/// it).
 pub struct Job {
-    /// The source node's name (what the run waits for, in words).
-    pub name: String,
     pub path: String,
-    /// A video from the web whose copy its SOURCER is still downloading into `downloads`: the
-    /// run waits for it (`path` is then empty).
-    pub url: Option<String>,
-    pub downloads: std::path::PathBuf,
     pub video: bool,
     pub audio: bool,
-    pub source: Option<(Shared, u64)>,
+    pub source: Option<Shared>,
     /// The recordings wired into `compare with`.
     pub compare: Vec<Other>,
 }
@@ -57,56 +51,24 @@ pub struct Other {
     pub key: String,
     pub name: String,
     pub path: String,
-    pub url: Option<String>,
-    pub source: Option<(Shared, u64)>,
+    pub source: Option<Shared>,
 }
 
 pub use crate::jobs::{Progress, StepState};
 
 /// The steps of a run, by name.
-const DOWNLOAD: &str = "download";
 const FRAMES: &str = "every frame";
 const KEYFRAMES: &str = "keyframes";
 const SOUND_STEP: &str = "sound";
 const LEVELS: &str = "level and noise";
 
-/// The file of a video from the web once its SOURCER has a copy in `dir`: waits while the
-/// SOURCER's run downloads it.
-/// `waiting` is told what it waits for ("for 'phone 3' (download 34%)").
-fn wait_copy(url: &str, dir: &std::path::Path, source: &Option<(Shared, u64)>, name: &str, stop: &AtomicBool, waiting: &dyn Fn(String)) -> Result<String, String> {
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return Err("stopped".into());
-        }
-        let ended = source.as_ref().map(|(st, before)| {
-            let s = st.lock().unwrap();
-            waiting(crate::jobs::waits_for(name, &s));
-            (s.run_id != *before && s.live, s.run_id != *before && s.done && !s.running, s.status.clone())
-        });
-        if let Some(p) = sourcer_node::listed(url, dir) {
-            return Ok(p);
-        }
-        match ended {
-            None => return Err("run the graph: its SOURCER downloads the video".into()),
-            Some((true, _, _)) => return Err("a live stream: the detector reads recordings and downloaded videos".into()),
-            Some((_, true, status)) => return Err(format!("its SOURCER kept no copy of it ({status})")),
-            _ => {}
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+/// A recording's sound at the audio match's rate: its source's decoded audio when that run is
+/// done, else its file decoded here.
+fn sound_of(path: &str, source: &Option<Shared>, stop: &AtomicBool) -> Result<Vec<f32>, String> {
+    match source.as_ref().and_then(crate::audio_match_node::from_source) {
+        Some(a) => Ok(a),
+        None => crate::audio_match_node::decode(path, stop),
     }
-}
-
-/// A recording's sound at the audio match's rate: its source's decoded audio once that run is
-/// done, else its file decoded here. None: stopped.
-fn sound_of(path: &str, source: &Option<(Shared, u64)>, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Result<Vec<f32>, String>> {
-    let audio = source.as_ref().and_then(|(st, before)| crate::audio_match_node::from_source(st, *before, stop, report));
-    if stop.load(Ordering::Relaxed) {
-        return None;
-    }
-    Some(match audio {
-        Some(a) if !a.is_empty() => Ok(a),
-        _ => crate::audio_match_node::decode(path, stop),
-    })
 }
 
 /// Reads the recording on a thread of its own, writing into `state` (unless `stop` is set first,
@@ -129,9 +91,6 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
     };
     {
         let mut names: Vec<String> = Vec::new();
-        if job.url.is_some() {
-            names.push(DOWNLOAD.into());
-        }
         if job.video {
             names.extend([FRAMES.into(), KEYFRAMES.into()]);
         }
@@ -146,10 +105,8 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
         s.running = true;
         s.status = "waiting for its turn to decode…".into();
         s.progress = Progress::new(names);
-        // First it waits for the download, or for a turn to decode the picture.
-        if job.url.is_some() {
-            s.progress.waits = Some(format!("for '{}'", job.name));
-        } else if job.video {
+        // First it waits for a turn to decode the picture.
+        if job.video {
             s.progress.waits = Some(crate::jobs::turn_waits());
         }
     }
@@ -184,23 +141,7 @@ fn work(state: &Shared, run: u64, job: &Job, stop: &Arc<AtomicBool>) {
                 s.progress.finish(if failed { crate::jobs::End::Failed(summary.clone()) } else { crate::jobs::End::Done });
             })
         };
-        let path = match &job.url {
-            None => job.path.clone(),
-            Some(url) => {
-                set(&|s| s.status = "waiting for the SOURCER to download the video…".into());
-                match wait_copy(url, &job.downloads, &job.source, &job.name, stop, &|w| waits(w)) {
-                    Ok(p) => {
-                        step(DOWNLOAD, StepState::Done, 1.0, &p);
-                        p
-                    }
-                    Err(e) if e == "stopped" => return,
-                    Err(e) => {
-                        step(DOWNLOAD, StepState::Failed, 0.0, &e);
-                        return end(e, true);
-                    }
-                }
-            }
-        };
+        let path = job.path.clone();
         // How long the recording is, for how far each step has got.
         let total = corroborate::timebase::file_facts(&path).len.filter(|l| *l > 0.0);
         let part = |secs: f64| total.map_or(-1.0, |l| (secs / l).clamp(0.0, 1.0) as f32);
@@ -248,14 +189,12 @@ fn work(state: &Shared, run: u64, job: &Job, stop: &Arc<AtomicBool>) {
             }
         }
         if job.audio || !job.compare.is_empty() {
-            set(&|s| s.status = "waiting for the sound…".into());
+            set(&|s| s.status = "reading the sound…".into());
             step(SOUND_STEP, StepState::Working, -1.0, "");
-            let Some(sound) = sound_of(&path, &job.source, &stop, &|secs| {
-                set(&|s| s.status = format!("waiting for the source's sound: {secs:.0} s decoded…"));
-                step(SOUND_STEP, StepState::Working, if secs > 0.0 { part(secs) } else { -1.0 }, "");
-            }) else {
+            let sound = sound_of(&path, &job.source, stop);
+            if stop.load(Ordering::Relaxed) {
                 return;
-            };
+            }
             match sound {
                 Ok(a) => {
                     step(SOUND_STEP, StepState::Done, 1.0, "");
@@ -276,25 +215,16 @@ fn work(state: &Shared, run: u64, job: &Job, stop: &Arc<AtomicBool>) {
                             let name = format!("compare: {}", o.name);
                             step(&name, StepState::Working, -1.0, "");
                             set(&|s| s.status = format!("comparing with {}…", o.name));
-                            let theirs = match &o.url {
-                                None => o.path.clone(),
-                                Some(u) => match wait_copy(u, &job.downloads, &o.source, &o.name, stop, &|_| {}) {
-                                    Ok(p) => p,
-                                    Err(e) if e == "stopped" => return,
-                                    Err(e) => {
-                                        step(&name, StepState::Failed, 0.0, &e);
-                                        scan.notes.push(format!("{}: {e}", o.name));
-                                        continue;
-                                    }
-                                },
-                            };
-                            match sound_of(&theirs, &o.source, &stop, &|_| {}) {
-                                None => return,
-                                Some(Ok(theirs)) => {
+                            let theirs = sound_of(&o.path, &o.source, stop);
+                            if stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            match theirs {
+                                Ok(theirs) => {
                                     scan.lanes.push(cuts::compare_lane(&o.key, &o.name, &ours, &corroborate::audio_match::Clip::new(theirs)));
                                     step(&name, StepState::Done, 1.0, "");
                                 }
-                                Some(Err(e)) => {
+                                Err(e) => {
                                     step(&name, StepState::Failed, 0.0, &e);
                                     scan.notes.push(format!("{}: {e}", o.name));
                                 }
@@ -315,9 +245,11 @@ fn work(state: &Shared, run: u64, job: &Job, stop: &Arc<AtomicBool>) {
             scan.frame_s = 1.0 / 30.0;
         }
         let summary = if scan.notes.is_empty() { format!("{} lanes read", scan.lanes.len()) } else { scan.notes.join("; ") };
-        end(summary, scan.lanes.is_empty());
+        // The scan before the end: what needs it starts once it has ended.
+        let failed = scan.lanes.is_empty();
         let scan = Arc::new(scan);
         set(&|s| s.cut = Some(scan.clone()));
+        end(summary, failed);
     }
 }
 
@@ -348,10 +280,6 @@ pub struct CutUi {
     pub cache: RefCell<HashMap<NodeId, Rc<CutView>>>,
     strips: HashMap<NodeId, Strip>,
     drag: Option<(NodeId, usize, f32)>,
-    /// Audio match nodes fed pieces, waiting for their Cut detectors' runs (`sync_cut_ports`
-    /// starts them), and each Cut detector's pieces as last seen (a change starts them again).
-    pub pending: std::collections::HashSet<NodeId>,
-    sigs: HashMap<NodeId, String>,
     players: HashMap<NodeId, Player>,
     /// The cut each node's player is on (its place among the node's cuts).
     focus: HashMap<NodeId, usize>,
@@ -502,32 +430,29 @@ impl App {
     }
 
     /// What a run of cut detector `i` reads.
-    pub(crate) fn cut_job(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> Result<Job, String> {
+    pub(crate) fn cut_job(&self, i: NodeId) -> Result<Job, String> {
         let src = self.cut_source(i)?;
         let downloads = self.downloads_dir();
-        let (path, url) = self.rec_path(src, &downloads)?;
+        let path = self.rec_path(src, &downloads)?;
         let video = self.graph.feeder(i, "video").is_some();
         let audio = self.graph.feeder(i, "audio").is_some();
-        let source = before.get(&src).map(|&r| (self.nodes[src].state.clone(), r));
+        let source = Some(self.nodes[src].state.clone());
         let mut compare = Vec::new();
         for (key, f) in self.cut_compared(i) {
-            if let Ok((p, url)) = self.rec_path(f, &downloads) {
-                compare.push(Other { key, name: rec_name(self, f), path: p, url, source: before.get(&f).map(|&r| (self.nodes[f].state.clone(), r)) });
+            if let Ok(p) = self.rec_path(f, &downloads) {
+                compare.push(Other { key, name: rec_name(self, f), path: p, source: Some(self.nodes[f].state.clone()) });
             }
         }
-        Ok(Job { name: self.node_name(src), path, url, downloads, video, audio, source, compare })
+        Ok(Job { path, video, audio, source, compare })
     }
 
-    /// The file SOURCER `f` reads: a file, or the copy of a video from the web in `dir` (with
-    /// the link while there is no copy yet: the run waits for the SOURCER's download).
-    fn rec_path(&self, f: NodeId, dir: &std::path::Path) -> Result<(String, Option<String>), String> {
+    /// The file SOURCER `f` reads: a file, or the copy of a video from the web in `dir` (its
+    /// SOURCER downloads it first: the queue runs it before).
+    fn rec_path(&self, f: NodeId, dir: &std::path::Path) -> Result<String, String> {
         let Kind::Sourcer { input } = &self.nodes[f].kind else { return Err("wire a SOURCER's audio or video into it".into()) };
         match sourcer_node::input(input) {
-            Some(runtime::Input::File(p)) => Ok((p, None)),
-            Some(runtime::Input::Url(u)) => Ok(match sourcer_node::listed(&u, dir) {
-                Some(p) => (p, None),
-                None => (String::new(), Some(u)),
-            }),
+            Some(runtime::Input::File(p)) => Ok(p),
+            Some(runtime::Input::Url(u)) => sourcer_node::listed(&u, dir).ok_or_else(|| format!("'{}' kept no copy of the video", self.node_name(f))),
             Some(runtime::Input::Mic(_)) => Err("a microphone is not read: record it to a file first".into()),
             None => Err("its SOURCER has nothing to open".into()),
         }
@@ -563,11 +488,6 @@ impl App {
         Some(Fed { src, piece, clock: self.piece_clock(f, out)?, uid: format!("{}.{n}", self.nodes[f].uid), name: format!("{file} · piece {n}"), phone: format!("{file} (cut)") })
     }
 
-    /// Whether Audio match node `i` takes a piece of a cut recording.
-    pub(crate) fn fed_by_pieces(&self, i: NodeId) -> bool {
-        self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.kind == PortKind::Audio).any(|p| self.graph.feeder(i, p.name).is_some_and(|(f, _)| matches!(self.nodes[f].kind, Kind::CutDetector { .. })))
-    }
-
     /// Where the Audio match nodes fed node `i`'s pieces put them.
     pub(crate) fn placed(&self, i: NodeId) -> Vec<Placed> {
         let mut out = Vec::new();
@@ -587,24 +507,6 @@ impl App {
         }
         out.sort_by(|a, b| a.at.total_cmp(&b.at));
         out
-    }
-
-    /// What run signature the cut detectors add: what is wired into each.
-    pub(crate) fn cut_signature(&self) -> String {
-        let mut s = String::new();
-        for (i, n) in self.nodes.iter().enumerate() {
-            if n.hidden || !matches!(n.kind, Kind::CutDetector { .. }) {
-                continue;
-            }
-            for p in &self.graph.nodes()[i].spec.inputs {
-                if matches!(p.kind, PortKind::Audio | PortKind::Video) {
-                    if let Some((f, o)) = self.graph.feeder(i, p.name) {
-                        s.push_str(&format!("cut{i}:{}<{f}.{o};", p.name));
-                    }
-                }
-            }
-        }
-        s
     }
 
     pub(crate) fn cut_view(&self, i: NodeId) -> Rc<CutView> {
@@ -739,7 +641,6 @@ impl App {
                 self.graph.set_outputs(i, cd::outputs(n));
             }
         }
-        self.start_piece_matches();
         self.cut_play_tick();
     }
 
@@ -804,53 +705,6 @@ impl App {
     #[cfg(test)]
     pub(crate) fn cut_player_times(&self, i: NodeId) -> Vec<f64> {
         self.cut_ui.players.get(&i).map_or(Vec::new(), |p| p.frames.lock().unwrap().got.iter().map(|f| f.0).collect())
-    }
-
-    /// Starts the Audio match nodes fed pieces once their Cut detectors have read their
-    /// recordings, and again when the pieces change (a cut switched, a threshold dragged).
-    fn start_piece_matches(&mut self) {
-        if self.stopped {
-            return;
-        }
-        let mut start: Vec<NodeId> = Vec::new();
-        for i in 0..self.nodes.len() {
-            if self.nodes[i].hidden || !matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
-                continue;
-            }
-            let v = self.cut_view(i);
-            if v.scan.is_none() || v.len <= 0.0 {
-                continue;
-            }
-            let sig: String = v.pieces.iter().map(|p| format!("{:.3}-{:.3};", p.a0, p.a1)).collect();
-            if self.cut_ui.sigs.get(&i) != Some(&sig) {
-                self.cut_ui.sigs.insert(i, sig);
-                start.extend(self.graph.wires().iter().filter(|w| w.from == i && matches!(self.nodes[w.to].kind, Kind::AudioMatch { .. })).map(|w| w.to));
-            }
-        }
-        let ready: Vec<NodeId> = self
-            .cut_ui
-            .pending
-            .iter()
-            .copied()
-            .filter(|&am| self.graph.wires().iter().filter(|w| w.to == am && matches!(self.nodes[w.from].kind, Kind::CutDetector { .. })).all(|w| self.nodes[w.from].state.lock().unwrap().cut.is_some()))
-            .collect();
-        start.extend(ready);
-        start.sort_unstable();
-        start.dedup();
-        if start.is_empty() {
-            return;
-        }
-        // The sources' audio of this run, whichever it is.
-        let before: HashMap<NodeId, u64> = (0..self.nodes.len()).filter(|&i| self.nodes[i].kind.is_source()).map(|i| (i, 0)).collect();
-        let stop = self.stop.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        for am in start {
-            if self.nodes[am].hidden {
-                continue;
-            }
-            self.cut_ui.pending.remove(&am);
-            let (files, other) = self.audio_match_inputs(am, &before);
-            crate::audio_match_node::start(self.nodes[am].state.clone(), files, other, stop.clone());
-        }
     }
 
     fn cut_rows(&mut self, i: NodeId) -> Option<&mut Vec<(String, String)>> {

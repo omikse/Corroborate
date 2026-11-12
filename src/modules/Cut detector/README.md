@@ -13,8 +13,8 @@ can drag, and any cut can be switched on or off, or put in by hand.
 Inputs:
 - `audio` and `video` (either or both, from one source): the recording to split. The node reads
   the file itself (one extra ffmpeg pass over every frame): a file, or a video from the web (a
-  YouTube link) once its SOURCER has downloaded it into the project's `recordings\` (the run waits
-  for that download). A live stream or a microphone is named in the status and not read.
+  YouTube link) once its SOURCER has downloaded it into the project's `recordings\` (the queue
+  runs the SOURCER first: the detector needs it, and the SOURCERs it compares with). A live stream or a microphone is named in the status and not read.
 - `time` (optional): when the recording starts, usually the SOURCER's time.
 - `compare with n` and `events n` grow as rows: other recordings of the same event (files, each
   read like this one), and moments from any node that confirm cuts (see Lanes).
@@ -92,13 +92,15 @@ the strongest among equals.
 
 ## On the canvas
 
-- The top line: the run's steps (the SOURCER's download when it has one to wait for, every frame,
-  keyframes, sound, level and noise, each compare), each with a dot: grey waiting, yellow working
+- The top line: the run's steps (every frame, keyframes, sound, level and noise, each compare), each with a dot: grey waiting, yellow working
   (with how far, in percent and a bar, or a moving block when that is not known), green done, red
   failed (hover for why). Once all are done: how long it took, how many cuts are on, how many
-  pieces. The state dot before its name says the same in one dot: queued while it waits for the
-  SOURCER's download ("for 'phone 3' (download 34%)") or a turn to decode, working, done, failed
-  (nothing wired, nothing read), cancelled by Stop.
+  pieces. The state dot before its name says the same in one dot: queued while it waits for its
+  SOURCER ("for 'phone 3' (download 34%)") or a turn to decode, working, done, failed (nothing
+  wired, nothing read; or "needs 'phone 3', which failed"), cancelled (■, Stop), stale when what
+  it read changed. ▶ in its top right corner runs it and its SOURCERs when they are not up to
+  date. Its thresholds and switches only change what is shown: they do not make it stale (the
+  Audio match taking its pieces turns stale when the pieces change).
 - The filmstrip (a picture a second; a long recording's pictures go into one texture in rows, as
   a texture has a largest side), the waveform (the source's), then the lanes: a lane's curve,
   its marks (strong when over the threshold) and its threshold as a dashed line. Drag the
@@ -143,8 +145,9 @@ error, whether the lanes put it on, the switch, the cues in words) and the piece
   pieces, their times and lengths, a cut switched off, a hand cut, saved and opened again with its
   outputs and wires. The player: a cut plays from 2 s before to 2 s after and pauses there, the
   pictures it reads are on the run's times (the cut's frame among them), every step of the run
-  ends done. A YouTube link: the copy in the project's `recordings\` is read, the run waits while
-  there is none, a copy next to the program is copied into the project. A filmstrip of 44 minutes
+  ends done. A YouTube link: the copy in the project's `recordings\` is read, the detector needs
+  its SOURCER (with no copy it cannot start), a copy next to the program is copied into the
+  project. A filmstrip of 44 minutes
   (2645 pictures) fits a texture in rows (in one row it is 127 000 pixels wide, which the graphics
   card refuses: the program crashed on such a video once its run ended).
 - `cargo test --profile fast --bin corroborate cut_tests::a_long_video -- --ignored --nocapture`:

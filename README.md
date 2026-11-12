@@ -34,18 +34,30 @@ In the workbench: right-click (or **+ Add node**) to add nodes, drag from a dot 
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
 Every node that does work (SOURCER, Cut detector, Audio match, ENF, Planes, plugins) has a state
-dot before its name: grey not run, a turning grey ring while queued (waiting for another node or a
-turn to decode), a turning yellow ring while working, green done, red failed, brown cancelled, a
-pulsing red dot while live. Hover it for the step and percent, what it waits for, how long it took
-or why it failed. After Stop, what had not ended shows cancelled at once. (docs/run-queue/plan.md,
-stage 1: running one node, a queue that starts things, and kept results come next.)
+dot before its name: grey not run, orange stale (it ran on something that has changed since), a
+turning grey ring while queued (waiting for another node or a turn), a turning yellow ring while
+working, green done, red failed, brown cancelled, a pulsing red dot while live. Hover it for the
+step and percent, what it waits for, how long it took or why it failed. **▶** in its title bar's
+top right corner runs it and every node it needs that is not up to date (nothing after it); while
+it is queued or working it is a **■**, which cancels it (also on its right-click menu: Run, Cancel).
+
+One queue for the project (docs/run-queue/plan.md, stage 2): a node starts once what it needs is
+done and a turn of its kind is free, in the order asked. A Cut detector needs the SOURCERs it reads;
+an Audio match needs the SOURCERs of its files and the Cut detectors whose pieces it takes; ENF,
+Planes and plugins read a SOURCER's sound as it decodes, so they run with it (asking for one runs
+its SOURCER again: results are not kept between runs yet, stage 3). A node that fails or is
+cancelled ends what needs it at once ("needs 'phone 3', which failed"), and nothing else. Turns:
+2 downloads and half the processor cores' worth of decoding and heavy work at once, set in
+`settings\run.txt`.
 
 The top bar: the project menu (its button is the project's name, with • while it has unsaved
-changes); **▶ Run**, **■ Stop** and **↻ Restart**, always there, Run lit while running and showing
-how many nodes run (Run while running does nothing; Restart starts again); **Queue**, with counts
+changes); **▶ Run** (every node that is not up to date; lit while anything runs), **■ Stop**
+(cancel everything queued or working), **↻ Run again** (everything anew, even what is up to date)
+and **Auto** (on by default: a change makes what it touches stale and runs it again half a second
+after the last change; a project opens stopped, and Auto waits for Run); **Queue**, with counts
 ("2 working · 1 queued", after a run "5 done · 1 failed"), which opens the list of every node that
-does work, in the order they started: its state, step and percent (with a bar), what it waits for,
-how long it took or why it failed; **+ Add node**, which
+does work, in the order asked: its state, step and percent (with a bar), what it waits for, how
+long it took or why it failed, and ▶ or ■ to run or cancel it; **+ Add node**, which
 also has **Live device** (this computer's microphones and capture cards, asked of ffmpeg when it
 opens) and **Value of a type**; **Types**, every data type that travels on wires; **Arrange**; and a warning when recordings are missing or changed,
 which opens their list. Messages are at the bottom of the canvas, over the line of keys.
@@ -145,7 +157,7 @@ One JSON form per kind (`src/data.rs`) is what programs send and receive and wha
 record stores, so a module made by someone else feeds Map, Combine, Invert or the record like a
 built-in one. Settings are the only way the canvas changes processing: each value is checked
 against the module.toml before it is used, every change is written to the result file with its
-time, and the graph restarts half a second after the last change.
+time, and what it touches runs again half a second after the last change (Auto).
 
 **Adding a module:** drop its folder into `app\modules\`. The workbench reads module folders every
 second: the module appears in Add node under its category. A folder with a program

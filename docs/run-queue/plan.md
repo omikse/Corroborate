@@ -1,7 +1,7 @@
 # Running, the queue, and keeping results
 
-Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions). Stage 1
-(show it) is built; stages 2 to 4 are not. The mockup: [mockup.html](mockup.html) (open it in a
+Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions). Stages 1
+(show it) and 2 (the queue) are built; stages 3 and 4 are not. The mockup: [mockup.html](mockup.html) (open it in a
 browser; it runs two made-up projects, Simple and Difficult, so every state can be seen).
 
 ## The question it answers
@@ -73,7 +73,7 @@ A job has:
 - **steps**: named, each with how far it has got, as the Cut detector's top line has now
   (download, decode, every frame, keyframes, sound, compare…).
 - **a turn**: what it takes while it works. Three kinds of turns, each limited (a setting,
-  `settingsun.txt`):
+  `settings\run.txt`):
   - downloads: 2 at once by default (the network);
   - decoding and heavy work: half the processor cores by default, as now;
   - programs: no limit by default.
@@ -180,6 +180,23 @@ download is never treated as live (22f9f14).
    two download turns, two Cut detectors sharing a recording, an Audio match needing seven jobs,
    an ENF on a grid log, a plugin that is never kept, a Cut detector with nothing wired, a live
    microphone; a failed download and a cancel spread to what needs them and no further.
+   **Built** (2026-11-12): `queue.rs`. Needs from wires (Cut detector: its SOURCERs; Audio match:
+   its file SOURCERs and the Cut detectors whose pieces it takes); ENF, Planes and plugins ride on
+   their SOURCER's run (asking for one runs the SOURCER again, feeding only the riders queued). A
+   job's key (in memory, hashed) is its own settings that change what it works out plus its needs'
+   keys; up to date = done on the key it has now; stale = ran on another key (orange dot). Auto
+   (on) asks for what changed half a second after the last change, not while stopped, and leaves
+   what was cancelled until Run or ▶. Turns: `ingest::Turns`, downloads (2) and heavy work (half the
+   cores), `settings\run.txt`. ▶/■ in the title bar's top right, Run and Cancel on the right-click
+   menu, ▶/■ in the queue list; Restart became Run again. The Cut detector's `wait_copy` and the
+   Audio match's `from_source` wait and `cut_ui.pending` are gone: a job starts once its needs are
+   done and reads their results. Tested in `jobs_tests.rs`: `play_runs_what_it_needs`,
+   `a_change_redoes_only_what_it_touches`, `the_difficult_project` (links at `example.invalid`
+   fail to download without fetching anything; files stand in for downloads), `turns_limit_how_many_at_once`.
+   Not yet: the live microphone (no device in a test); three real downloads on two turns (the
+   turns are tested alone); programs on the data bus still restart when their settings change
+   (stage 4); Play does not queue the sound it needs yet; Audio match still leaves links out
+   (files only).
 3. **Keeping results.** Keys and `cache\`, the Cut detector's scan and the SOURCER's decoded audio
    first, then Audio match and ENF; the kept state; Run again; Forget. Test: open the 44 minute
    project again, the Cut detector is there with no read; change the file, it reads again.
@@ -210,7 +227,7 @@ Every stage updates the READMEs of the nodes it touches in the same commit.
 10. **Plugins and programs** are kept only when their manifest says `keep = true`.
 11. **Restart becomes Run again**: works everything out anew without the kept results (one node:
     its right-click menu).
-12. **How many at once is a setting**, in `settingsun.txt` next to the program: downloads
+12. **How many at once is a setting**, in `settings\run.txt` next to the program: downloads
     (default 2), decoding and heavy work (default half the processor cores), programs (default no
     limit).
 

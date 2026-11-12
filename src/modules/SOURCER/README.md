@@ -45,9 +45,13 @@ Ports:
 - setting `source`: the path, URL or `mic:<device>` in the first box.
 
 The run's steps (download for a web page, then decode, with percent from the file's length) and
-its state are on the dot before its name and in the queue list; the nodes reading its sound (ENF,
-Planes, plugins) wait for it there ("for 'phone 3' (download 34%)") and fail with it ("needs
-'phone 3', which failed").
+its state are on the dot before its name and in the queue list. In the queue it needs nothing: it
+waits only for a turn (2 downloads at once, half the processor cores decoding, `settings\run.txt`).
+The nodes reading its sound as it decodes (ENF, Planes, plugins) run with it: asking for one of
+them runs the SOURCER again, feeding the ones queued (the others keep their results); they wait
+for it there ("for 'phone 3' (download 34%)") and fail with it ("needs 'phone 3', which failed").
+A Cut detector or an Audio match after it starts once its run is done, and reads its decoded sound
+(and its downloaded copy). A change to its input makes it and what follows stale.
 
 On the canvas: the two boxes, then (once there is a source) status and UTC clock, the waveform (the whole recording, or the last 30 s when live;
 hover it to read the time), and for video a viewer with one small frame a second (hover the waveform

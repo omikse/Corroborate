@@ -58,7 +58,8 @@ pub struct Wired {
     pub label: String,
     pub clock: String,
     pub path: String,
-    pub source: Option<(Shared, u64)>,
+    /// Its SOURCER's state: its decoded sound, when that run is done (else the file is decoded).
+    pub source: Option<Shared>,
     /// A piece of the file (from a Cut detector): its audio from and to, seconds in the file.
     pub range: Option<(f64, f64)>,
 }
@@ -933,9 +934,8 @@ impl App {
         }
     }
 
-    /// The files wired into node `i`, and the labels of sources that are not files. `before`: each
-    /// source's run before this run started.
-    pub(crate) fn audio_match_inputs(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> (Vec<Wired>, Vec<String>) {
+    /// The files wired into node `i`, and the labels of sources that are not files.
+    pub(crate) fn audio_match_inputs(&self, i: NodeId) -> (Vec<Wired>, Vec<String>) {
         let (mut files, mut other) = (Vec::new(), Vec::new());
         for p in self.graph.nodes()[i].spec.inputs.iter().filter(|p| p.kind == PortKind::Audio) {
             let Some((f, o)) = self.graph.feeder(i, p.name) else { continue };
@@ -943,7 +943,7 @@ impl App {
             match &self.nodes[f].kind {
                 Kind::Sourcer { input } => match sourcer_node::input(input) {
                     Some(runtime::Input::File(path)) => {
-                        let source = before.get(&f).map(|&r| (self.nodes[f].state.clone(), r));
+                        let source = Some(self.nodes[f].state.clone());
                         files.push(Wired { label, clock: self.clock_of(f).unwrap_or_default(), path, source, range: None })
                     }
                     _ => other.push(label),
@@ -951,7 +951,7 @@ impl App {
                 // A piece of a cut recording: its file, from where to where.
                 Kind::CutDetector { .. } => match self.piece_feed(f, o).and_then(|pf| Some((self.source_file(pf.src)?, pf))) {
                     Some((path, pf)) => {
-                        let source = Some((self.nodes[pf.src].state.clone(), before.get(&pf.src).copied().unwrap_or(0)));
+                        let source = Some(self.nodes[pf.src].state.clone());
                         files.push(Wired { label: pf.name, clock: pf.clock, path, source, range: Some((pf.piece.a0, pf.piece.a1)) })
                     }
                     None => other.push(format!("{label} › {o}")),
@@ -989,9 +989,9 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
     }
     set(&|s| {
         s.running = true;
-        s.status = format!("waiting for {} recordings to decode…", files.len());
+        s.status = format!("decoding {} recordings…", files.len());
         s.progress = crate::jobs::Progress::new([FINGERPRINT, MATCH]);
-        s.progress.waits = Some(format!("for its {} recordings to decode", files.len()));
+        s.progress.step(FINGERPRINT, StepState::Working, 0.0, "");
     });
     let stop2 = stop.clone();
     thread::spawn(move || {
@@ -1033,10 +1033,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                                     }
                                 })
                             };
-                            let audio = match &w.source {
-                                Some((st, before)) => from_source(st, *before, &stop2, &|secs| stage(Stage::Waiting(secs))),
-                                None => None,
-                            };
+                            let audio = w.source.as_ref().and_then(from_source);
                             let audio = match audio {
                                 Some(a) if !a.is_empty() => Ok(a),
                                 _ if stop2.load(Ordering::Relaxed) => Err("stopped".to_string()),
@@ -1057,9 +1054,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             let n = ready.fetch_add(1, Ordering::Relaxed) + 1;
                             set(&|s| {
                                 s.status = format!("fingerprinted {n} of {} recordings…", files.len());
-                                if s.progress.waits.is_none() {
-                                    s.progress.step(FINGERPRINT, StepState::Working, n as f32 / files.len() as f32, "");
-                                }
+                                s.progress.step(FINGERPRINT, StepState::Working, n as f32 / files.len() as f32, "");
                             });
                         }
                         done
@@ -1112,27 +1107,15 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
     });
 }
 
-/// The audio source `st` decoded in this run (its run differs from `before` and is done), at the
-/// match's rate. None: stopped, or the source ended with no audio (the file is decoded here then).
-/// `report` is told the seconds decoded so far.
-pub(crate) fn from_source(st: &Shared, before: u64, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Vec<f32>> {
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return None;
-        }
-        let audio = {
-            let s = st.lock().unwrap();
-            let secs = if s.run_id != before { s.audio_s } else { 0.0 };
-            ((s.run_id != before && s.done && !s.running).then(|| s.source.audio.clone()), secs)
-        };
-        let (audio, secs) = audio;
-        report(secs);
-        if let Some(a) = audio {
-            let a = a.lock().unwrap();
-            return (!a.is_empty()).then(|| audio_match::halve(&a));
-        }
-        thread::sleep(std::time::Duration::from_millis(100));
+/// The sound SOURCER state `st` decoded, at the match's rate, when its run is done (the queue
+/// starts a job once what it needs is done). None: not decoded there (the file is decoded here).
+pub(crate) fn from_source(st: &Shared) -> Option<Vec<f32>> {
+    let s = st.lock().unwrap();
+    if s.running || !s.done {
+        return None;
     }
+    let a = s.source.audio.lock().unwrap();
+    (!a.is_empty()).then(|| audio_match::halve(&a))
 }
 
 pub(crate) fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {

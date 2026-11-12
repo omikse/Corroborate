@@ -131,43 +131,90 @@ pub fn read_wav(path: &str, sr_out: f64, mut f: impl FnMut(&[f32])) -> Result<()
     Ok(())
 }
 
-/// How many recordings are decoded at once, by the sources and the Audio match together: half
-/// the cores (at least two). Fifty at once leave the window no time to draw.
-pub fn decoders_at_once() -> usize {
-    (thread::available_parallelism().map_or(4, |n| n.get()) / 2).max(2)
+/// Turns: how many of one kind of work run at once (docs/run-queue/plan.md). Each kind has a
+/// limit (a setting, `settings\run.txt`) and a count of the turns taken now; a turn is waited for
+/// and given back when dropped.
+pub struct Turns {
+    /// The limit set; 0: the default.
+    limit: std::sync::atomic::AtomicUsize,
+    default: fn() -> usize,
+    taken: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
 }
 
-static DECODING: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+impl Turns {
+    pub const fn new(default: fn() -> usize) -> Self {
+        Turns { limit: std::sync::atomic::AtomicUsize::new(0), default, taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() }
+    }
+
+    /// How many at once.
+    pub fn limit(&self) -> usize {
+        match self.limit.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => (self.default)(),
+            n => n,
+        }
+    }
+
+    /// Sets how many at once (0: the default).
+    pub fn set_limit(&self, n: usize) {
+        self.limit.store(n, std::sync::atomic::Ordering::Relaxed);
+        self.freed.notify_all();
+    }
+
+    /// How many turns are taken now.
+    pub fn now(&self) -> usize {
+        *self.taken.lock().unwrap()
+    }
+
+    /// Waits for a turn; None when `stop` is set first.
+    pub fn take(&'static self, stop: &std::sync::atomic::AtomicBool) -> Option<Turn> {
+        let mut n = self.taken.lock().unwrap();
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            if *n < self.limit() {
+                *n += 1;
+                return Some(Turn(self));
+            }
+            n = self.freed.wait_timeout(n, std::time::Duration::from_millis(100)).unwrap().0;
+        }
+    }
+}
+
+/// A turn taken, given back when dropped.
+pub struct Turn(&'static Turns);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *self.0.taken.lock().unwrap() -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// Decoding and heavy work (sources, Audio match, Cut detector together): half the cores (at
+/// least two) by default. Fifty at once leave the window no time to draw.
+pub static HEAVY: Turns = Turns::new(|| (thread::available_parallelism().map_or(4, |n| n.get()) / 2).max(2));
+/// Downloads (yt-dlp): two at once by default (the network).
+pub static DOWNLOADS: Turns = Turns::new(|| 2);
+
+/// How many recordings are decoded at once.
+pub fn decoders_at_once() -> usize {
+    HEAVY.limit()
+}
 
 /// How many turns to decode are taken now.
 pub fn decoding_now() -> usize {
-    *DECODING.0.lock().unwrap()
+    HEAVY.now()
 }
 
 /// A turn to decode a recording, given back when dropped.
-pub struct DecodeTurn(());
-
-impl Drop for DecodeTurn {
-    fn drop(&mut self) {
-        *DECODING.0.lock().unwrap() -= 1;
-        DECODING.1.notify_one();
-    }
-}
+pub type DecodeTurn = Turn;
 
 /// Waits for a turn to decode a recording (`decoders_at_once`); None when `stop` is set first.
 /// Live sources do not wait: they cannot.
 pub fn decode_turn(stop: &std::sync::atomic::AtomicBool) -> Option<DecodeTurn> {
-    let mut n = DECODING.0.lock().unwrap();
-    loop {
-        if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
-        }
-        if *n < decoders_at_once() {
-            *n += 1;
-            return Some(DecodeTurn(()));
-        }
-        n = DECODING.1.wait_timeout(n, std::time::Duration::from_millis(100)).unwrap().0;
-    }
+    HEAVY.take(stop)
 }
 
 /// Decode `input` (file path or URL) with ffmpeg to f32 mono at `sr` and deliver chunks of

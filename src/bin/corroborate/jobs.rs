@@ -3,7 +3,7 @@
 //! what the job waits for, and how it ended. From it, the state shown on the node's dot (before its
 //! name) and in the queue list (Queue in the top bar).
 //!
-//! docs/run-queue/plan.md, stage 1: this only shows what runs; how runs start is unchanged.
+//! docs/run-queue/plan.md, stage 1; what starts a job, and when, is the queue (queue.rs).
 
 use crate::runtime::NodeState;
 use crate::{App, Kind, NodeId, DIM, TEXT};
@@ -87,6 +87,12 @@ pub fn turn_waits() -> String {
     format!("for a turn to decode ({} of {n} in use)", corroborate::ingest::decoding_now().min(n))
 }
 
+/// "for a turn to download (2 of 2 in use)".
+pub fn download_waits() -> String {
+    let d = &corroborate::ingest::DOWNLOADS;
+    format!("for a turn to download ({} of {} in use)", d.now().min(d.limit()), d.limit())
+}
+
 /// What waiting for job `label` (whose state is `s`) is waiting for: "for SOURCER 'phone 3'
 /// (download 34%)".
 pub fn waits_for(label: &str, s: &NodeState) -> String {
@@ -104,6 +110,8 @@ pub fn waits_for(label: &str, s: &NodeState) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
     NotRun,
+    /// Its result is from before a change to what went into it.
+    Stale,
     Queued,
     Working,
     Done,
@@ -116,6 +124,7 @@ impl JobState {
     pub fn word(self) -> &'static str {
         match self {
             JobState::NotRun => "not run",
+            JobState::Stale => "stale",
             JobState::Queued => "queued",
             JobState::Working => "working",
             JobState::Done => "done",
@@ -129,6 +138,7 @@ impl JobState {
     pub fn color(self) -> Color32 {
         match self {
             JobState::NotRun => Color32::from_rgb(0x56, 0x5c, 0x66),
+            JobState::Stale => Color32::from_rgb(0xe0, 0xa4, 0x58),
             JobState::Queued => Color32::from_rgb(0x8a, 0x90, 0x99),
             JobState::Working => Color32::from_rgb(0xe0, 0xc8, 0x5a),
             JobState::Done => Color32::from_rgb(0x8c, 0xdc, 0x6e),
@@ -148,6 +158,8 @@ pub struct JobView {
     pub why: String,
     pub took: Option<f64>,
     pub started: Option<Instant>,
+    /// Its place in the order asked (the queue list's order).
+    pub order: Option<u64>,
 }
 
 impl JobView {
@@ -165,7 +177,8 @@ impl JobView {
                 Some(t) => format!("done in {}", took_text(t)),
                 None => w.into(),
             },
-            JobState::NotRun => "not run: Run starts it".into(),
+            JobState::NotRun => "not run: Run or ▶ starts it".into(),
+            JobState::Stale => "stale: changed since it ran".into(),
             _ if self.why.is_empty() => w.into(),
             _ => format!("{w}: {}", self.why),
         }
@@ -199,7 +212,7 @@ pub fn view(s: &NodeState) -> JobView {
         (_, JobState::Live) => format!("{:.0} s in", s.audio_s),
         _ => String::new(),
     };
-    JobView { state, step: p.working(), why, took: p.took, started: p.started }
+    JobView { state, step: p.working(), why, took: p.took, started: p.started, order: None }
 }
 
 /// Does node kind `k` do work (a job, with a state dot)?
@@ -236,46 +249,41 @@ pub fn draw_dot(p: &egui::Painter, c: Pos2, r: f32, st: JobState, now: f64) -> b
 }
 
 impl App {
-    /// Node `i`'s job state, or None when it does no work.
+    /// Node `i`'s job state, or None when it does no work: its run's, or the queue's while it
+    /// waits there or ended there; stale when it ran on what has changed since.
     pub(crate) fn job_view(&self, i: NodeId) -> Option<JobView> {
         let n = &self.nodes[i];
         if n.hidden || !is_job(&n.kind) {
             return None;
         }
         let mut v = view(&n.state.lock().unwrap());
-        // An Audio match fed pieces waits for its Cut detectors before it starts.
-        if self.cut_ui.pending.contains(&i) {
-            let cds: Vec<NodeId> = self.graph.wires().iter().filter(|w| w.to == i && matches!(self.nodes[w.from].kind, Kind::CutDetector { .. })).map(|w| w.from).collect();
+        let Some(r) = self.queue.recs.get(&i) else { return Some(v) };
+        v.order = Some(r.order);
+        let stopping = r.stop.as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed));
+        if self.queue.waiting.contains(&i) {
             v.state = JobState::Queued;
-            v.why = "for its Cut detectors' pieces".into();
-            for c in cds {
-                let s = self.nodes[c].state.lock().unwrap();
-                if s.cut.is_some() {
-                    continue;
-                }
-                let cv = view(&s);
-                match cv.state {
-                    JobState::Failed | JobState::Cancelled => {
-                        v.state = cv.state;
-                        v.why = format!("needs '{}', which {}", self.nodes[c].label, if cv.state == JobState::Failed { "failed" } else { "was cancelled" });
-                        break;
-                    }
-                    _ => v.why = format!("{}: its pieces", waits_for(&self.nodes[c].label, &s)),
-                }
-            }
-        }
-        // Stopped: what has not ended yet is being stopped.
-        if self.stopped && matches!(v.state, JobState::Queued | JobState::Working | JobState::Live) {
+            v.step = None;
+            v.why = self.waits_text(i);
+            v.started = r.asked;
+        } else if let Some((st, why)) = &r.ended {
+            v.state = *st;
+            v.why = why.clone();
+            v.step = None;
+            v.took = None;
+        } else if stopping && matches!(v.state, JobState::Queued | JobState::Working | JobState::Live) {
+            // Told to stop: it is ending.
             v.state = JobState::Cancelled;
             v.why.clear();
+        } else if matches!(v.state, JobState::Done | JobState::Failed | JobState::Cancelled) && r.ran.is_some() && r.ran != self.queue.keys.get(&i).copied() && self.queue.keys.contains_key(&i) {
+            v.state = JobState::Stale;
         }
         Some(v)
     }
 
-    /// Every job on the canvas's levels, in the order they started (not run last).
+    /// Every job on the canvas's levels, in the order asked (never asked last).
     pub(crate) fn jobs(&self) -> Vec<(NodeId, JobView)> {
         let mut v: Vec<(NodeId, JobView)> = (0..self.nodes.len()).filter_map(|i| self.job_view(i).map(|j| (i, j))).collect();
-        v.sort_by_key(|(i, j)| (j.started.is_none(), j.started, *i));
+        v.sort_by_key(|(i, j)| (j.order.is_none(), j.order, *i));
         v
     }
 
@@ -283,13 +291,13 @@ impl App {
     pub(crate) fn queue_counts(&self) -> String {
         let jobs = self.jobs();
         let count = |s: JobState| jobs.iter().filter(|(_, j)| j.state == s).count();
-        let order = [JobState::Live, JobState::Working, JobState::Queued, JobState::Failed, JobState::Cancelled, JobState::Done];
+        let order = [JobState::Live, JobState::Working, JobState::Queued, JobState::Stale, JobState::Failed, JobState::Cancelled, JobState::Done];
         let parts: Vec<String> = order.iter().filter_map(|&s| (count(s) > 0).then(|| format!("{} {}", count(s), s.word()))).collect();
         if parts.is_empty() { "nothing run".into() } else { parts.join(" · ") }
     }
 
-    /// The queue list: every job, in the order it started, with its state, step and how far, what
-    /// it waits for, how long it took or why it failed. Read only.
+    /// The queue list: every job, in the order asked, with its state, step and how far, what it
+    /// waits for, how long it took or why it failed; ■ cancels one queued or working, ▶ runs one.
     pub(crate) fn queue_window(&mut self, ctx: &egui::Context) {
         if !self.queue_open {
             return;
@@ -298,12 +306,13 @@ impl App {
         let now = ctx.input(|i| i.time);
         let mut open = true;
         let mut moving = false;
+        let mut act: Option<(NodeId, bool)> = None;
         egui::Window::new("Queue").open(&mut open).resizable(true).default_width(420.0).default_pos(Pos2::new(220.0, 60.0)).show(ctx, |ui| {
             if jobs.is_empty() {
                 ui.label(egui::RichText::new("no nodes do work here").color(DIM));
                 return;
             }
-            egui::Grid::new("queue grid").num_columns(3).spacing([10.0, 6.0]).striped(true).show(ui, |ui| {
+            egui::Grid::new("queue grid").num_columns(4).spacing([10.0, 6.0]).striped(true).show(ui, |ui| {
                 for (i, j) in &jobs {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
                     moving |= draw_dot(ui.painter(), r.center(), DOT_R, j.state, now);
@@ -317,7 +326,17 @@ impl App {
                             }
                         });
                     } else {
-                        ui.label(egui::RichText::new(text).color(if j.state == JobState::Failed { j.state.color() } else { DIM }));
+                        // A long reason (yt-dlp's errors) is cut short; hover for all of it.
+                        let short = if text.chars().count() > 90 { format!("{}…", text.chars().take(89).collect::<String>()) } else { text.clone() };
+                        let l = ui.label(egui::RichText::new(short).color(if j.state == JobState::Failed { j.state.color() } else { DIM }));
+                        if text.chars().count() > 90 {
+                            l.on_hover_text(&text);
+                        }
+                    }
+                    let busy = matches!(j.state, JobState::Queued | JobState::Working | JobState::Live);
+                    let b = ui.small_button(if busy { "■" } else { "▶" }).on_hover_text(if busy { "cancel it (and what needs it)" } else { "run it and what it needs" });
+                    if b.clicked() {
+                        act = Some((*i, !busy));
                     }
                     ui.end_row();
                 }
@@ -325,6 +344,11 @@ impl App {
         });
         if moving {
             ctx.request_repaint();
+        }
+        match act {
+            Some((i, true)) => self.run_node(i),
+            Some((i, false)) => self.cancel_job(i),
+            None => {}
         }
         self.queue_open = open;
     }

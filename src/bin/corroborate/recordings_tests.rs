@@ -490,35 +490,39 @@ fn top_bar_shot() {
     d.shot("project_top_bar");
 }
 
-/// The top bar: the window title is the program and its build; Run, Stop and Restart are always
-/// there; Run while running does nothing, Restart starts again; a missing recording shows a
-/// warning that opens the recordings.
+/// The top bar: the window title is the program and its build; Run, Stop, Run again and Auto are
+/// always there; Run runs only what is not up to date, Run again everything anew; a missing
+/// recording shows a warning that opens the recordings.
 #[test]
 fn top_bar_run_stop_restart_and_warning() {
     let dir = fresh("bar");
     let clip = dir.join("north.wav");
     wav(&clip, 440.0, 0.5);
     let mut d = Drive::new();
-    d.app().add(Kind::Sourcer { input: clip.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
+    let s = d.app().add(Kind::Sourcer { input: clip.to_string_lossy().into_owned() }, Pos2::new(40.0, 60.0));
     d.app().add(Kind::Map, Pos2::new(400.0, 60.0));
     d.frames(2);
     d.app().save_project_as(dir.join("bar"));
     d.app().stop_run();
     d.frames(2);
     assert!(d.app().title.starts_with("Corroborate · "), "{}", d.app().title);
-    for b in ["▶ Run", "■ Stop", "↻ Restart", "Arrange", "+ Add node", "bar ⏷"] {
+    for b in ["▶ Run", "■ Stop", "↻ Run again", "Auto", "Arrange", "+ Add node", "bar ⏷"] {
         assert!(d.h.query_by_label(b).is_some(), "{b} is there while stopped");
     }
     assert!(d.h.query_by_label_contains("missing or changed").is_none(), "no warning while all is well");
     d.shot("top_bar_stopped");
     d.click("▶ Run");
     assert!(!d.app().stopped);
-    let runs = d.app().runs;
+    let run_of = |d: &mut Drive| d.app().nodes[s].state.lock().unwrap().run_id;
+    assert!(d.wait_until(30.0, |a| a.job_view(s).is_some_and(|v| v.state == crate::jobs::JobState::Done)), "the SOURCER runs");
+    let first = run_of(&mut d);
     d.click("▶ Run");
-    assert_eq!(d.app().runs, runs, "Run while running does nothing");
-    d.click("↻ Restart");
-    assert_eq!(d.app().runs, runs + 1, "Restart starts again");
-    for b in ["▶ Run", "■ Stop", "↻ Restart"] {
+    d.frames(2);
+    assert_eq!(run_of(&mut d), first, "Run leaves what is up to date");
+    d.click("↻ Run again");
+    d.frames(2);
+    assert_ne!(run_of(&mut d), first, "Run again runs it anew");
+    for b in ["▶ Run", "■ Stop", "↻ Run again", "Auto"] {
         assert!(d.h.query_by_label(b).is_some(), "{b} is there while running");
     }
     d.shot("top_bar_running");

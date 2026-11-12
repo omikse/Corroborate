@@ -44,6 +44,7 @@ mod google_maps;
 mod groups;
 mod evidence;
 mod jobs;
+mod queue;
 mod playhead;
 mod sound;
 mod trace;
@@ -95,7 +96,7 @@ use eframe::egui::{
 };
 use nodes::Kind;
 use corroborate::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
-use runtime::{Input, Job, NodeState, Shared};
+use runtime::{Input, NodeState, Shared};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -236,13 +237,11 @@ struct App {
     /// The menu of a wire let go on empty canvas.
     drop_menu: Option<drop_menu::DropMenu>,
     msg: String,
-    stop: Option<Arc<AtomicBool>>,
     /// Recordings in progress, by record node, and each record's last note.
     recordings: HashMap<NodeId, result_record_node::Recording>,
     record_notes: HashMap<NodeId, String>,
-    /// What the running graph was started from; a change (held for a moment) restarts it.
-    run_sig: Option<String>,
-    sig_seen: (String, Instant),
+    /// The queue: what waits to run, what each job ran on (queue.rs).
+    queue: queue::Queue,
     textures: HashMap<NodeId, (u64, f64, TextureHandle)>,
     lut: [[u8; 4]; 256],
     /// This computer's audio devices (Add node → Live device), asked for once it opens.
@@ -265,10 +264,11 @@ struct App {
     changes: Vec<bus::SettingChange>,
     drafts: HashMap<(NodeId, String), String>,
     setting_errors: HashMap<(NodeId, String), String>,
-    /// How many times the graph has (re)started.
+    /// How many times the programs on the data bus have (re)started.
     runs: u64,
-    /// Stopped: nothing runs until Run (a project opens stopped, so a big one does not start
-    /// decoding everything at once). Running, changes restart the graph by themselves.
+    /// Stopped: Auto runs nothing until Run (a project opens stopped, so a big one does not start
+    /// decoding everything at once); ▶ on a node still runs it. Not stopped, with Auto on, a change
+    /// runs what it touches again.
     stopped: bool,
     /// The queue list is open (Queue in the top bar).
     queue_open: bool,
@@ -339,11 +339,9 @@ impl App {
             wiring_in: None,
             drop_menu: None,
             msg: String::new(),
-            stop: None,
             recordings: HashMap::new(),
             record_notes: HashMap::new(),
-            run_sig: None,
-            sig_seen: (String::new(), Instant::now()),
+            queue: Default::default(),
             textures: HashMap::new(),
             lut: colormap(),
             mics: Vec::new(),
@@ -393,6 +391,7 @@ impl App {
 
     fn new(start: Option<String>, autorun: bool) -> Self {
         let mut app = Self::empty();
+        queue::load_limits(&corroborate::home().join("settings"));
         if std::env::args().any(|a| a == "--new") {
             // --new: an empty canvas (the old project file is kept as project.bak.txt).
             let dir = corroborate::home().join("settings");
@@ -707,159 +706,37 @@ impl App {
         }
     }
 
+    /// Run (the top bar): every job that is not up to date, and the programs on the data bus.
     fn run(&mut self) {
         self.stopped = false;
-        self.stop_all();
         self.save_project();
-        self.runs += 1;
-        self.start_programs();
-        let dir = self.results_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.msg = format!("cannot create {}: {e}", dir.display());
-            return;
-        }
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut started = 0;
-        // Each source's run before this one: the Audio match takes a source's audio once it has
-        // been decoded again (its run changed and is done).
-        let before: HashMap<NodeId, u64> = (0..self.nodes.len()).filter(|&i| self.nodes[i].kind.is_source()).map(|i| (i, self.nodes[i].state.lock().unwrap().run_id)).collect();
-        for i in 0..self.nodes.len() {
-            let n = &self.nodes[i];
-            if n.hidden || !n.kind.is_source() {
-                continue;
-            }
-            let input = match &n.kind {
-                Kind::Sourcer { input } => sourcer_node::input(input),
-                _ => None,
-            };
-            let Some(input) = input else {
-                n.state.lock().unwrap().status = "nothing to open: set it in the node".into();
-                continue;
-            };
-            let mut job = Job {
-                label: n.label.clone(),
-                input,
-                source: n.state.clone(),
-                planes: Vec::new(),
-                enfs: Vec::new(),
-                plugins: Vec::new(),
-                stop: stop.clone(),
-                work_dir: dir.clone(),
-                taps: n.taps.clone(),
-                buses: self.audio_buses(i),
-                clock: self.clock_of(i).unwrap_or_default(),
-                downloads: self.downloads_dir(),
-            };
-            for (t, _) in self.graph.targets(i, "audio") {
-                let tn = &self.nodes[t];
-                if tn.hidden {
-                    continue;
-                }
-                match &tn.kind {
-                    Kind::Planes => job.planes.push(tn.state.clone()),
-                    Kind::Enf { .. } => job.enfs.push(self.enf_job(t)),
-                    Kind::Plugin { path } => job.plugins.push(self.plugin_job(t, path)),
-                    _ => {}
-                }
-            }
-            runtime::start(job);
-            started += 1;
-        }
-        // Audio match nodes read their files themselves, all at once.
-        for i in 0..self.nodes.len() {
-            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::AudioMatch { .. }) {
-                // Pieces of a cut recording are known once its Cut detector has read it.
-                if self.fed_by_pieces(i) {
-                    let mut s = self.nodes[i].state.lock().unwrap();
-                    s.reset();
-                    s.status = "waiting for the Cut detector's pieces…".into();
-                    drop(s);
-                    self.cut_ui.pending.insert(i);
-                    continue;
-                }
-                let (files, other) = self.audio_match_inputs(i, &before);
-                audio_match_node::start(self.nodes[i].state.clone(), files, other, stop.clone());
-            }
-        }
-        // Cut detectors read their recording's file themselves.
-        for i in 0..self.nodes.len() {
-            if !self.nodes[i].hidden && matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
-                let job = self.cut_job(i, &before);
-                cut_detector_node::start(self.nodes[i].state.clone(), job, stop.clone());
-            }
-        }
-        self.run_sig = Some(self.run_signature());
-        if started == 0 {
-            return;
-        }
-        self.stop = Some(stop);
+        let keys = self.job_keys();
+        self.restart_programs(&keys);
+        self.ask_all(false);
     }
 
-    /// What a run is made of: each source's input and what its audio feeds. The graph runs
-    /// always; when this changes (and stays changed for a moment, while typing) it restarts.
-    fn run_signature(&self) -> String {
-        let mut s = String::new();
-        for (i, n) in self.nodes.iter().enumerate() {
-            if n.hidden {
-                continue;
-            }
-            if let Kind::Sourcer { input } = &n.kind {
-                s.push_str(&format!("{i}:{input}|"));
-                for (t, _) in self.graph.targets(i, "audio") {
-                    // Wiring audio into a record taps it while recording: no restart.
-                    if matches!(self.nodes[t].kind, Kind::ResultRecord { .. }) {
-                        continue;
-                    }
-                    s.push_str(&format!("{t}:{}:{};", self.nodes[t].kind.spec().name, self.nodes[t].kind.saved_param()));
-                }
-            }
-            if let Kind::Module { settings, .. } = &n.kind {
-                // A program gets its settings when it starts.
-                s.push_str(&format!("{i}:{settings:?}|"));
-            }
-            if let Kind::Value { rows, .. } = &n.kind {
-                // Plugins read the values wired into them when they start.
-                if self.graph.targets(i, "value").iter().any(|(t, _)| matches!(self.nodes[*t].kind, Kind::Plugin { .. })) {
-                    s.push_str(&format!("{i}:{rows:?}|"));
-                }
-            }
+    /// Run again: everything worked out anew, even what is up to date.
+    fn run_again(&mut self) {
+        self.cancel_all();
+        for r in self.queue.recs.values_mut() {
+            r.ran = None;
         }
-        s.push_str(&self.cut_signature());
-        s
+        self.stopped = false;
+        self.save_project();
+        let keys = self.job_keys();
+        self.restart_programs(&keys);
+        self.ask_all(true);
     }
 
-    /// Start or restart the graph when what it runs from has changed.
-    fn keep_running(&mut self) {
-        if self.stopped {
-            return;
-        }
-        let sig = self.run_signature();
-        if self.run_sig.as_ref() == Some(&sig) {
-            return;
-        }
-        if self.sig_seen.0 != sig {
-            self.sig_seen = (sig, Instant::now());
-            if self.run_sig.is_some() {
-                return;
-            }
-        }
-        if self.run_sig.is_none() || self.sig_seen.1.elapsed() > Duration::from_millis(500) {
-            self.run();
-        }
-    }
-
-    /// Stop: every source and program stops, and nothing restarts until Run.
+    /// Stop: everything queued or working is cancelled, and Auto runs nothing until Run.
     fn stop_run(&mut self) {
         self.stop_all();
         self.stopped = true;
-        self.run_sig = None;
         self.msg = "stopped: Run starts it".into();
     }
 
     fn stop_all(&mut self) {
-        if let Some(s) = self.stop.take() {
-            s.store(true, Ordering::Relaxed);
-        }
+        self.cancel_all();
         self.programs.clear();
     }
 
@@ -1173,12 +1050,24 @@ impl App {
             if is_group && resp.double_clicked() {
                 group_act = Some(1);
             }
+            let job_busy = self.job_view(i).map(|j| matches!(j.state, jobs::JobState::Queued | jobs::JobState::Working | jobs::JobState::Live));
+            let mut job_act: Option<bool> = None;
             let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(label);
                 });
+                if let Some(busy) = job_busy {
+                    if ui.button("Run (▶)").on_hover_text("run this node and what it needs").clicked() {
+                        job_act = Some(true);
+                        ui.close();
+                    }
+                    if busy && ui.button("Cancel").on_hover_text("stop this node; what needs it ends too").clicked() {
+                        job_act = Some(false);
+                        ui.close();
+                    }
+                }
                 if ui.button(if collapsed { "Expand" } else { "Collapse" }).clicked() {
                     fold = true;
                     ui.close();
@@ -1254,6 +1143,11 @@ impl App {
                 }
                 break;
             }
+            match job_act {
+                Some(true) => self.run_node(i),
+                Some(false) => self.cancel_job(i),
+                None => {}
+            }
             match clock_act {
                 Some(true) => self.same_clock(&srcs),
                 Some(false) => self.separate_clocks(&srcs),
@@ -1282,7 +1176,31 @@ impl App {
             // while live); hovering it says the step and how far, what it waits for, or why it
             // failed.
             let mut name_x = 9.0;
+            let mut role_x = 9.0;
             if let Some(job) = self.job_view(i) {
+                // ▶ in the top right corner: run it and what it needs; ■ while it is queued or
+                // working: cancel.
+                let busy = matches!(job.state, jobs::JobState::Queued | jobs::JobState::Working | jobs::JobState::Live);
+                let c = head.right_center() - Vec2::new(14.0 * self.zoom, 0.0);
+                let hit = Rect::from_center_size(c, Vec2::splat(16.0 * self.zoom));
+                let b = ui.interact(hit, egui::Id::new(("run node", i)), Sense::click());
+                b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, if busy { "cancel node" } else { "run node" }));
+                let col = if b.hovered() { TEXT } else { DIM };
+                let k = 4.5 * self.zoom;
+                if busy {
+                    painter.rect_filled(Rect::from_center_size(c, Vec2::splat(k * 1.6)), 1.0, col);
+                } else {
+                    painter.add(egui::Shape::convex_polygon(vec![c + Vec2::new(-k * 0.8, -k), c + Vec2::new(k, 0.0), c + Vec2::new(-k * 0.8, k)], col, Stroke::NONE));
+                }
+                let tip = if busy { "cancel: this node stops (and what needs it)" } else { "run this node and what it needs" };
+                if b.on_hover_text(tip).clicked() {
+                    if busy {
+                        self.cancel_job(i);
+                    } else {
+                        self.run_node(i);
+                    }
+                }
+                role_x = 28.0;
                 let c = head.left_center() + Vec2::new(14.0 * self.zoom, 0.0);
                 let r = jobs::DOT_R * self.zoom;
                 if jobs::draw_dot(&painter, c, r, job.state, ui.input(|i| i.time)) {
@@ -1293,7 +1211,7 @@ impl App {
                 name_x = 24.0;
             }
             painter.text(head.left_center() + Vec2::new(name_x * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
-            painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, if spec.name == groups::GROUP { "group" } else { role_text(spec.role) }, FontId::proportional(10.0 * self.zoom), DIM);
+            painter.text(head.right_center() - Vec2::new(role_x * self.zoom, 0.0), Align2::RIGHT_CENTER, if spec.name == groups::GROUP { "group" } else { role_text(spec.role) }, FontId::proportional(10.0 * self.zoom), DIM);
             // The node's own drawing and controls: its look.rhai when it has one (which may call
             // the folder's Rust `Look` as native()), else that `Look`.
             let show_status = frame.status.unwrap_or_else(|| nl.status());
@@ -1555,24 +1473,26 @@ impl App {
         ui.horizontal(|ui| {
             self.file_menu(ui);
             ui.separator();
-            // Running, changes restart the graph by themselves; a project opens stopped.
-            // Recording is in the Result record node.
-            let running = !self.stopped;
+            // Run asks for every job that is not up to date; a project opens stopped. Recording is
+            // in the Result record node.
+            let busy = !self.queue.waiting.is_empty() || self.running() || !self.programs.is_empty();
             let nodes = self.nodes.iter().filter(|n| !n.hidden && !matches!(n.kind, Kind::Group { .. } | Kind::GroupInput | Kind::GroupOutput)).count();
-            let sources = self.nodes.iter().filter(|n| !n.hidden && n.kind.is_source()).count();
             let count = format!("{nodes} node{}", if nodes == 1 { "" } else { "s" });
-            let about = format!("{nodes} nodes run, {sources} of them sources; while it runs, changes restart it");
-            let run = bar_button(ui, "▶ Run", Extra::Count(count), running, true).on_hover_text(if running { format!("running: {about}") } else { format!("start: {about}") });
-            if run.clicked() && !running {
+            let run = bar_button(ui, "▶ Run", Extra::Count(count), busy, true).on_hover_text("run every node that is not up to date (and what it needs)");
+            if run.clicked() {
                 self.msg.clear();
                 self.run();
             }
-            if bar_button(ui, "■ Stop", Extra::None, false, running).on_hover_text("stop every source; nothing runs until Run").on_disabled_hover_text("not running").clicked() {
+            if bar_button(ui, "■ Stop", Extra::None, false, busy || !self.stopped).on_hover_text("cancel everything queued or working; Auto runs nothing until Run").on_disabled_hover_text("not running").clicked() {
                 self.stop_run();
             }
-            if bar_button(ui, "↻ Restart", Extra::None, false, true).on_hover_text("start every source again from its beginning").clicked() {
+            if bar_button(ui, "↻ Run again", Extra::None, false, true).on_hover_text("work everything out anew, even what is up to date").clicked() {
                 self.msg.clear();
-                self.run();
+                self.run_again();
+            }
+            // Auto: a change runs what it touches again (while not stopped).
+            if bar_button(ui, "Auto", Extra::None, self.queue.auto, true).on_hover_text("a change marks what it touches stale; with Auto on, those run again at once (not while stopped)").clicked() {
+                self.queue.auto = !self.queue.auto;
             }
             // The queue list: every job's state, step and how far.
             if bar_button(ui, "Queue", Extra::Count(self.queue_counts()), self.queue_open, true).on_hover_text("every node that does work: what it does, waits for, how long it took").clicked() {
