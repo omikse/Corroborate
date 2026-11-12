@@ -52,7 +52,7 @@ fn a_clip_falls_into_its_pieces() {
     app.wire(s, "audio", c, "audio");
     app.wire(s, "time", c, "time");
     app.run();
-    assert!(d.wait_until(90.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "the clip was read: {}", d.app().nodes[c].state.lock().unwrap().status);
+    assert!(d.wait_until(300.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "the clip was read: {}", d.app().nodes[c].state.lock().unwrap().status);
     d.wait_until(30.0, |a| a.source_length(s).is_some());
     d.frames(3);
     let app = d.app();
@@ -116,4 +116,52 @@ fn a_clip_falls_into_its_pieces() {
     assert!(back.graph.wires().iter().any(|w| w.from == c2), "the wire from a piece came back");
     let json = cut_detector_node::json(d.app(), c);
     assert!(json.contains("\"pieces\":[") && json.contains("by_lanes"), "{json}");
+}
+
+/// A minute of a wandering tone over noise, at one loudness (an "original"), and a copy with 25 to 28 s taken out
+/// (a jump cut), both WAV.
+fn jump_cut_pair() -> (PathBuf, PathBuf) {
+    let (orig, cut) = (out_dir().join("cut_orig.wav"), out_dir().join("cut_jump.wav"));
+    let ff = |args: &[&str]| assert!(corroborate::no_window(&mut std::process::Command::new("ffmpeg")).args(["-v", "error", "-y"]).args(args).status().is_ok_and(|s| s.success()), "{args:?}");
+    if !orig.exists() {
+        let expr = "0.3*sin(2*PI*(500*t+80*sin(t*1.3)+40*sin(t*3.7)))+0.05*(random(0)-0.5)";
+        ff(&["-f", "lavfi", "-i", &format!("aevalsrc={expr}:s=16000:d=60"), orig.to_str().unwrap()]);
+    }
+    if !cut.exists() {
+        ff(&["-i", orig.to_str().unwrap(), "-filter_complex", "[0:a]atrim=0:25,asetpts=PTS-STARTPTS[a];[0:a]atrim=28:60,asetpts=PTS-STARTPTS[b];[a][b]concat=n=2:v=0:a=1[o]", "-map", "[o]", cut.to_str().unwrap()]);
+    }
+    (orig, cut)
+}
+
+/// Stage 2 in the node: a sound with 3 s cut out, compared with the original: the compare lane
+/// finds the cut on its own (no picture), the sound lanes run, the pieces follow.
+#[test]
+fn a_jump_cut_is_found_by_comparing() {
+    let (orig, cut) = jump_cut_pair();
+    let mut d = Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: cut.to_string_lossy().into_owned() }, Pos2::new(20.0, 40.0));
+    let o = app.add(Kind::Sourcer { input: orig.to_string_lossy().into_owned() }, Pos2::new(20.0, 500.0));
+    let c = app.add(Kind::CutDetector { rows: Vec::new() }, Pos2::new(300.0, 40.0));
+    app.wire(s, "audio", c, "audio");
+    app.wire_many(o, "audio", c);
+    let inputs: Vec<&str> = app.graph.nodes()[c].spec.inputs.iter().map(|p| p.name).collect();
+    assert!(app.graph.feeder(c, "compare with 1").is_some(), "{inputs:?}");
+    app.run();
+    assert!(d.wait_until(300.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "read: {}", d.app().nodes[c].state.lock().unwrap().status);
+    d.frames(3);
+    let app = d.app();
+    let v = app.cut_view(c);
+    let keys: Vec<&str> = v.lanes.iter().map(|l| l.key.as_str()).collect();
+    assert_eq!(keys, ["level", "noise", "compare 1"]);
+    println!("{}", v.lanes[2].note);
+    for l in &v.lanes {
+        println!("{}: {:?}", l.name, l.peaks.iter().map(|p| (p.t, p.value)).collect::<Vec<_>>());
+    }
+    let on: Vec<&corroborate::cuts::Cut> = v.cuts.iter().filter(|x| x.on()).collect();
+    assert_eq!(on.len(), 1, "{:?}", v.cuts);
+    assert!((on[0].t_snd - 25.0).abs() <= 0.1, "{}", on[0].t_snd);
+    assert_eq!(v.pieces.len(), 2);
+    assert!((v.pieces[1].a0 - 25.0).abs() <= 0.1);
+    d.shot("cut_detector_compare");
 }

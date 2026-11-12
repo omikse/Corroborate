@@ -24,15 +24,6 @@ kind = "time"
 many = true
 
 [[output]]
-name = "edits"
-kind = "event"
-status = "possible"
-about = "Where a recording's match with the others jumps: cuts, inserts, reordered parts (for the cut detector)."
-needs = ["audio", "audio 2"]
-when = "an edited recording overlaps an unedited one"
-min_quality = "good"
-
-[[output]]
 name = "shared sounds"
 kind = "event"
 status = "possible"

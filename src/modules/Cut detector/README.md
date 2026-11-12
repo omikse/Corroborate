@@ -15,8 +15,8 @@ Inputs:
   the file itself (one extra ffmpeg pass over every frame). Files only for now: a stream or a
   microphone is named in the status and not read.
 - `time` (optional): when the recording starts, usually the SOURCER's time.
-- `compare with n` and `events n` grow as rows: other recordings of the same event, and moments
-  from any node that confirm cuts (see Lanes).
+- `compare with n` and `events n` grow as rows: other recordings of the same event (files, each
+  read like this one), and moments from any node that confirm cuts (see Lanes).
 
 Outputs:
 - `cuts` (event): the cuts that are on, one event each: `t_start` at the picture's cut, its
@@ -49,13 +49,39 @@ Each lane is a row under the filmstrip and the waveform, on the recording's own 
   without re-encoding), and keyframes off the file's regular rhythm (a piece cut without
   re-encoding starts on a keyframe; Vázquez-Padín et al. 2012 for the idea). A file with no regular
   rhythm (an encoder that puts keyframes at scene changes) gives no keyframe cues, and says so.
+- **sound level** (when `audio` is wired): loudness (RMS, root mean square, in dB) every 50 ms;
+  a mark where the mean of the next second differs from the second before. Default threshold
+  15 dB: on a 16 min phone recording of a crowd (Jiku) the level stepped by more than 12 dB 13
+  times, by more than 15 dB 5 times.
+- **background noise** (when `audio` is wired): the noise level under the sound for each second,
+  every quarter second (Pan, Zhang, Lyu, ICASSP 2012: band-pass channels of a natural sound have
+  about the same kurtosis, and noise lowers each channel's kurtosis by its share of the channel's
+  variance; a line through the 16 channels gives the noise variance). A mark where the median of
+  the 2 s after a moment differs from the 2 s before. It is rough on real sound (on the same phone
+  recording it stepped by more than 6 dB 198 times in 16 min, at most 23 dB), so its default
+  threshold is 15 dB: a lane to read along with the others more than one that cuts alone. On a
+  made sound with its noise 20 dB louder after 6 s it marks 6 s, and nothing else over 15 dB.
+- **compare: <recording>**, one per recording wired into `compare with`: this recording matched
+  against the other with the audio match's library (`audio_match::match_pair`, links every 15 s,
+  run twice with the chunks half a chunk apart), and a mark where the lag between them jumps by
+  0.1 s or more. The mark's height is the jump in seconds: forward, this recording lacks what the
+  other heard (a cut here); backward, it has a stretch the other lacks (a stretch moved here, or
+  the other was paused). The moment is found by GCC-PHAT windows (2 s every half second, then 1 s
+  every 20 ms) voting for the old lag or the new one; windows too quiet to tell abstain. A long
+  stretch that votes for neither is quiet (one mark in its middle, its error half the stretch) or
+  sound the other did not hear (a mark at each end). Marks of the same jump from several compared
+  recordings (the same seconds, within 3 s) are one cut: its time the mean of theirs, its error
+  half their spread. This is why Audio match's `edits` output is retired: pieces from this node go
+  into Audio match, so Audio match could not feed this node back (no cycles).
 - **events n**: one lane per wired events input, named after what feeds it. Each event is a single
   moment with its error (one frame when it has none). An event confirms a cut a lane found when it
   falls within its error (a blue dot under the cut, "+ events" in the table); on its own it makes no
   cut. Events on another clock than the recording's are left out and counted.
 
 Cues of different lanes within 1 s of each other are one cut. The picture lanes set the cut's
-picture time; sound lanes (stage 2) its sound time.
+picture time, the sound lanes its sound time (a J-cut or L-cut has the two apart); with one kind
+of cue only, both are the same. Of several cues, the surest (the smallest error) sets the time,
+the strongest among equals.
 
 ## On the canvas
 
@@ -91,13 +117,33 @@ error, whether the lanes put it on, the switch, the cues in words) and the piece
   pieces, their times and lengths, a cut switched off, a hand cut, saved and opened again with its
   outputs and wires.
 
+- `cargo test --profile fast --lib cuts` also: the noise estimate under clicks (10 dB more noise
+  reads 10 ± 2.5 dB more), a noise step and a level step marked on their moment.
+- `cargo test --profile fast --bin corroborate cut_tests::a_jump_cut_is_found_by_comparing`: a
+  made sound with 25 to 28 s taken out, compared with the original in the node: one cut, at
+  25.002 s, two pieces.
+- `cargo test --profile fast --test jiku_cuts -- --ignored --nocapture` (needs the Jiku data, see
+  tests/jiku.rs), on real phone recordings of one event:
+  - a recording with 3 s cut out at 40 s, compared with another phone: the cut at 39.92 s (80 ms
+    off), 3.01 s missing (truth 3.00). Neither sound lane passes its threshold there
+    (level 13 dB, noise 12 dB): a jump cut in a crowd is for the compare lane.
+  - a recording cut into four pieces of 45 s and joined as 3 1 4 2, compared with the 10 other
+    phones (3 heard all of it): all three joins found by each of the 3, joined into three cuts at
+    44.81, 90.89 and 134.23 s (true 45, 90 and 135; errors stated 1.4, 1.0 and 1.5 s). Each
+    piece, matched on its own against the other phones, lands within 9 to 14 ms of where the
+    ground truth puts it, and their true order comes back (2 4 1 3).
+  The joins are placed only to about a second: the place in the sound where one lag gives way to
+  the other is as sharp as the sound there (a quiet start of a piece blurs it). A picture cue,
+  where there is video, places it to the frame.
+
 PySceneDetect as an oracle on the same clips (plan, stage 1) is not run yet: it needs a Python
 package installed.
 
 ## Status
 
-Stage 1 of the plan (picture and timestamps, hand cuts, pieces as rows) is built. Sound cues,
-`compare with` and Audio match taking pieces follow.
+Stages 1 and 2 of the plan are built: picture and timestamps, hand cuts, pieces as rows; sound
+level, background noise, `compare with` and the events input. Audio match taking pieces and the
+placed strip follow (stage 3).
 
 Files: `module.toml` (ports), `mod.rs` (ports from the rows, the rows' keys), `node.rs` (the run,
 the outputs, the canvas), the method in `src/cuts.rs`.

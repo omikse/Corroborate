@@ -91,7 +91,12 @@ Outputs:
 - `synced N`, `end N`: the row's audio start time and audio end time. These are the only way the
   node's times reach other nodes: there is no global clock solve any more (2026-11-11), so a
   recording is placed elsewhere only by wiring its times there (a Timeline, say).
-- Possible (drawn greyed): edits (for the cut detector), shared sounds, sound source.
+- Possible (drawn greyed): shared sounds, sound source.
+
+Retired (2026-11-12): the possible `edits` output. Pieces of a cut recording come from the Cut
+detector into this node, so this node's findings cannot go back into the Cut detector (a cycle);
+the Cut detector compares recordings itself with the same library calls (its `compare with`
+inputs).
 
 Gone (2026-11-11): quality, clock drift, same recording, speed change, gaps and links. The marks
 show the findings; the result file keeps the quality (level, verdict, counts per pair), each pair's

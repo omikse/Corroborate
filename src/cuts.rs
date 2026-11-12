@@ -410,6 +410,304 @@ pub fn packets_lane(p: &Packets) -> Lane {
     Lane { key: "keyframes".into(), name: "keyframes and gaps".into(), role: Role::Picture, unit: "mark".into(), curve: Vec::new(), peaks, thr: Some(0.5), note }
 }
 
+// ---------------------------------------------------------------- sound
+
+/// The sound lanes' audio rate (the audio match's, `audio_match::SR`).
+pub const SOUND_SR: f64 = crate::audio_match::SR as f64;
+/// The sound level: one value every `LEVEL_STEP_S`, compared over `LEVEL_SIDE_S` either side.
+pub const LEVEL_STEP_S: f64 = 0.05;
+pub const LEVEL_SIDE_S: f64 = 1.0;
+/// Its default threshold, dB: on a 16 min phone recording of a crowd (Jiku) the level moved by
+/// more than 12 dB between one second and the next 13 times, by more than 15 dB 5 times.
+pub const LEVEL_THR: f32 = 15.0;
+/// The background noise: one estimate for each `NOISE_WIN_S` window every `NOISE_STEP_S`.
+pub const NOISE_WIN_S: f64 = 1.0;
+pub const NOISE_STEP_S: f64 = 0.25;
+/// Seconds either side of a moment the noise is compared over.
+pub const NOISE_SIDE_S: f64 = 2.0;
+/// Its default threshold, dB. The estimate is rough on real sound: on the same phone recording
+/// it stepped by more than 6 dB 198 times in 16 min, at most by 23 dB; 15 dB keeps about a dozen.
+/// A lane to read along with the others more than one that cuts alone.
+pub const NOISE_THR: f32 = 15.0;
+/// Lane marks smaller than this are left out, dB.
+const SOUND_FLOOR: f32 = 2.0;
+
+fn median(mut v: Vec<f32>) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
+/// The steps of a curve `db` sampled every `step` seconds: at each moment, how far the mean of
+/// `side` seconds after it is from the mean of `side` seconds before it (a mean, not a median: a
+/// step then peaks on its moment instead of a plateau).
+fn steps(db: &[f32], step: f64, side: f64) -> Vec<(f64, f32)> {
+    let w = ((side / step).round() as usize).max(1);
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    (w..db.len().saturating_sub(w).max(w))
+        .filter(|&k| k + w <= db.len())
+        .map(|k| (k as f64 * step, (mean(&db[k..k + w]) - mean(&db[k - w..k])).abs()))
+        .collect()
+}
+
+/// A lane from a curve of steps: its peaks over `SOUND_FLOOR`.
+fn step_lane(key: &str, name: &str, unit: &str, curve: Vec<(f64, f32)>, thr: f32, err: f64, note: String, what: &str) -> Lane {
+    let times: Vec<f64> = curve.iter().map(|c| c.0).collect();
+    let vals: Vec<f32> = curve.iter().map(|c| c.1).collect();
+    let peaks = peaks_of(&times, &vals, SOUND_FLOOR).into_iter().map(|k| Peak { t: times[k], value: vals[k], error_s: err, note: format!("{what} steps by {:.1} {unit}", vals[k]), lasting: None }).collect();
+    Lane { key: key.into(), name: name.into(), role: Role::Sound, unit: unit.into(), curve, peaks, thr: Some(thr), note }
+}
+
+/// The sound level lane: loudness (RMS, root mean square, in dB) every 50 ms, and where its
+/// median over the next second differs from the one over the second before.
+pub fn level_lane(audio: &[f32]) -> Lane {
+    let n = (LEVEL_STEP_S * SOUND_SR) as usize;
+    let db: Vec<f32> = audio.chunks(n).map(|c| (10.0 * ((c.iter().map(|&x| (x * x) as f64).sum::<f64>() / c.len() as f64).max(1e-12)).log10()) as f32).collect();
+    let note = format!("loudness every {:.0} ms; a mark where the mean of the next {LEVEL_SIDE_S:.0} s differs from the second before", LEVEL_STEP_S * 1e3);
+    step_lane("level", "sound level", "dB", steps(&db, LEVEL_STEP_S, LEVEL_SIDE_S), LEVEL_THR, LEVEL_STEP_S, note, "the level")
+}
+
+/// The background noise of one window (Pan, Zhang, Lyu, ICASSP 2012): band-pass channels of a
+/// natural sound have about the same kurtosis, and noise added to them lowers each channel's
+/// kurtosis by its share of the channel's variance. With √κ̃ₖ = √κ (1 − σ²/vₖ) for each channel's
+/// kurtosis κ̃ₖ and variance vₖ, a straight line through (1/vₖ, √κ̃ₖ) gives σ², the noise
+/// variance, in dB. Channels: 16 bands of a 256-point spectrum (31 Hz bins at 8 kHz) from 125 Hz
+/// up.
+pub fn noise_db(x: &[f32], planner: &mut realfft::RealFftPlanner<f32>) -> Option<f32> {
+    const N: usize = 256;
+    const BANDS: usize = 16;
+    const PER: usize = 7;
+    if x.len() < 4 * N {
+        return None;
+    }
+    let fft = planner.plan_fft_forward(N);
+    let win: Vec<f32> = (0..N).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / N as f32).cos()).collect();
+    // Per band: Σ c², Σ c⁴, count, over every coefficient's real and imaginary part.
+    let mut acc = vec![(0.0f64, 0.0f64, 0usize); BANDS];
+    let mut buf = vec![0.0f32; N];
+    let mut out = fft.make_output_vec();
+    let mut s = 0;
+    while s + N <= x.len() {
+        for (b, (v, w)) in buf.iter_mut().zip(x[s..s + N].iter().zip(&win)) {
+            *b = v * w;
+        }
+        fft.process(&mut buf, &mut out).ok()?;
+        for (band, a) in acc.iter_mut().enumerate() {
+            for c in &out[4 + band * PER..4 + (band + 1) * PER] {
+                for v in [c.re as f64, c.im as f64] {
+                    let q = v * v;
+                    a.0 += q;
+                    a.1 += q * q;
+                    a.2 += 1;
+                }
+            }
+        }
+        s += N / 2;
+    }
+    let pts: Vec<(f64, f64)> = acc
+        .iter()
+        .filter(|a| a.0 > 0.0)
+        .map(|a| {
+            let v = a.0 / a.2 as f64;
+            let kurt = (a.1 / a.2 as f64) / (v * v) - 3.0;
+            (1.0 / v, kurt.max(0.0).sqrt())
+        })
+        .collect();
+    let vmin = acc.iter().filter(|a| a.0 > 0.0).map(|a| a.0 / a.2 as f64).fold(f64::MAX, f64::min);
+    if pts.len() < 4 || vmin <= 0.0 || vmin == f64::MAX {
+        return None;
+    }
+    // a = u − w·b by least squares; σ² = w / u.
+    let n = pts.len() as f64;
+    let (mb, ma) = (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n);
+    let sbb: f64 = pts.iter().map(|p| (p.0 - mb).powi(2)).sum();
+    let sab: f64 = pts.iter().map(|p| (p.0 - mb) * (p.1 - ma)).sum();
+    let var = if sbb > 0.0 {
+        let slope = sab / sbb;
+        let u = ma - slope * mb;
+        let w = -slope;
+        if u > 0.0 && w > 0.0 { (w / u).min(vmin) } else { vmin }
+    } else {
+        vmin
+    };
+    Some((10.0 * var.max(1e-20).log10()) as f32)
+}
+
+/// The background noise lane: the noise level of each second, every quarter of a second, and
+/// where the second after a moment differs from the second before.
+pub fn noise_lane(audio: &[f32]) -> Lane {
+    let mut planner = realfft::RealFftPlanner::<f32>::new();
+    let (w, h) = ((NOISE_WIN_S * SOUND_SR) as usize, (NOISE_STEP_S * SOUND_SR) as usize);
+    let mut est: Vec<f32> = Vec::new();
+    let mut s = 0;
+    while s + w <= audio.len() {
+        est.push(noise_db(&audio[s..s + w], &mut planner).unwrap_or(f32::NAN));
+        s += h;
+    }
+    // The windows wholly in the `NOISE_SIDE_S` after a moment against those wholly in the ones
+    // before: the median of each.
+    let win = (NOISE_WIN_S / NOISE_STEP_S).round() as usize;
+    let side = (NOISE_SIDE_S / NOISE_STEP_S).round() as usize;
+    let med = |a: usize, b: usize| {
+        let v: Vec<f32> = est[a..b].iter().copied().filter(|x| x.is_finite()).collect();
+        (v.len() * 2 > b - a).then(|| median(v))
+    };
+    let curve: Vec<(f64, f32)> = (side..(est.len() + win).saturating_sub(side))
+        .filter_map(|k| {
+            let before = med(k - side, k + 1 - win)?;
+            let after = med(k, (k + side + 1 - win).min(est.len()))?;
+            Some((k as f64 * NOISE_STEP_S, (after - before).abs()))
+        })
+        .collect();
+    let note = format!("background noise level of each second (Pan, Zhang, Lyu 2012: kurtosis of 16 band-pass channels); a mark where the {NOISE_SIDE_S:.0} s after differ from the {NOISE_SIDE_S:.0} s before (medians)");
+    step_lane("noise", "background noise", "dB", curve, NOISE_THR, NOISE_STEP_S, note, "the background noise")
+}
+
+/// How well `ours` (a window of this recording) lines up with `theirs` at `lag` seconds (their
+/// moment = ours + lag), allowing `slack` seconds either way: GCC-PHAT's peak-to-sidelobe ratio,
+/// 0 when the peak is outside the slack.
+fn fits(planner: &mut realfft::RealFftPlanner<f32>, ours: &[f32], theirs: &[f32], t0: f64, lag: f64, slack: f64) -> f64 {
+    let sr = SOUND_SR;
+    let a = (t0 + lag - slack) * sr;
+    if a < 0.0 {
+        return 0.0;
+    }
+    let (a, len) = (a as usize, ours.len() + (2.0 * slack * sr) as usize);
+    let Some(seg) = theirs.get(a..a + len) else { return 0.0 };
+    match crate::audio_match::gcc_phat(planner, ours, seg) {
+        Some((at, psr)) if (at / sr - slack).abs() <= slack => psr,
+        _ => 0.0,
+    }
+}
+
+/// Windows of `w` seconds every `hop` from `lo` to `hi` (seconds in `ours`), each with its vote:
+/// how much better it fits `theirs` at lag `lx` than at `ly` (GCC-PHAT's peak-to-sidelobe ratio
+/// at each, `fits`), by the window's middle.
+fn votes(planner: &mut realfft::RealFftPlanner<f32>, ours: &[f32], theirs: &[f32], lo: f64, hi: f64, lx: f64, ly: f64, w: f64, hop: f64) -> Vec<(f64, f64)> {
+    const SLACK: f64 = 0.03;
+    let sr = SOUND_SR;
+    let mut out = Vec::new();
+    let mut t = lo.max(0.0);
+    while t + w <= hi {
+        let (a, n) = ((t * sr).round() as usize, (w * sr) as usize);
+        if let Some(o) = ours.get(a..a + n) {
+            out.push((t + w / 2.0, fits(planner, o, theirs, t, lx, SLACK) - fits(planner, o, theirs, t, ly, SLACK)));
+        }
+        t += hop;
+    }
+    out
+}
+
+/// A vote counts for a lag when it is this much (peak-to-sidelobe ratio) better than the other;
+/// a window between abstains (too quiet, or neither lag fits).
+const VOTE: f64 = 1.0;
+
+/// Where the votes change from the old lag to the new: each window counts +1 (old), −1 (new) or 0,
+/// and the splits that agree with the most of them (a step fit) form a stretch: the windows in it
+/// abstain. Returns its first and last split.
+fn switch_over(votes: &[(f64, f64)]) -> Option<(f64, f64)> {
+    if votes.len() < 2 {
+        return None;
+    }
+    let score: Vec<f64> = votes.iter().map(|v| if v.1 > VOTE { 1.0 } else if v.1 < -VOTE { -1.0 } else { 0.0 }).collect();
+    if !score.contains(&1.0) || !score.contains(&-1.0) {
+        return None;
+    }
+    let total: f64 = score.iter().sum();
+    let mut run = 0.0;
+    let gains: Vec<(usize, f64)> = (1..votes.len())
+        .map(|j| {
+            run += score[j - 1];
+            (j, run - (total - run))
+        })
+        .collect();
+    let best = gains.iter().map(|g| g.1).fold(f64::MIN, f64::max);
+    let at = |j: usize| (votes[j - 1].0 + votes[j].0) / 2.0;
+    let first = gains.iter().find(|g| g.1 == best)?.0;
+    let last = gains.iter().rev().find(|g| g.1 == best)?.0;
+    Some((at(first), at(last)))
+}
+
+/// The loudness of `x` (RMS, dB).
+fn level_db(x: &[f32]) -> f64 {
+    10.0 * (x.iter().map(|&v| (v * v) as f64).sum::<f64>() / x.len().max(1) as f64).max(1e-12).log10()
+}
+
+/// The compare lane against another recording of the same event: where this recording's lag
+/// against it jumps between two of the audio match's links (`audio_match::match_pair`, 15 s
+/// apart), located by GCC-PHAT windows voting for the old lag or the new one (2 s windows every
+/// half second, then 1 s windows every 20 ms round the answer, `switch_over`). Windows where the
+/// sound gives too little to tell abstain; a long stretch of them between the old lag and the new
+/// is either quiet (the cut is somewhere in it: one mark in its middle, its error half the
+/// stretch) or sound the other recording did not hear (a piece from elsewhere: a mark at each
+/// end). A jump forward: this recording lacks what the other heard (a cut here); backward: it has a
+/// stretch the other lacks (a stretch moved here, or the other was paused).
+pub fn compare_lane(key: &str, name: &str, ours: &crate::audio_match::Clip, theirs: &crate::audio_match::Clip) -> Lane {
+    let mut planner = realfft::RealFftPlanner::<f32>::new();
+    let pair = crate::audio_match::match_pair(theirs, ours, &mut planner);
+    let mut hits = pair.hits.clone();
+    // A second pass with the chunks half a chunk later: twice as many links to find jumps between.
+    let shift = crate::audio_match::CHUNK_S / 2.0;
+    let skip = (shift * SOUND_SR) as usize;
+    let mut chunks = pair.chunks;
+    if ours.audio.len() > skip {
+        let later = crate::audio_match::Clip::new(ours.audio[skip..].to_vec());
+        let p2 = crate::audio_match::match_pair(theirs, &later, &mut planner);
+        chunks += p2.chunks;
+        hits.extend(p2.hits.into_iter().map(|h| crate::audio_match::Hit { t_b: h.t_b + shift, ..h }));
+    }
+    hits.sort_by(|x, y| x.t_b.total_cmp(&y.t_b));
+    let sr = SOUND_SR;
+    let mut peaks = Vec::new();
+    for w in hits.windows(2) {
+        let (x, y) = (&w[0], &w[1]);
+        let (lx, ly) = (x.t_a - x.t_b, y.t_a - y.t_b);
+        let d = ly - lx;
+        let err = x.error_s.hypot(y.error_s);
+        if d.abs() < crate::audio_match::GAP_MIN_S.max(5.0 * err) {
+            continue;
+        }
+        // Each link is the lag that wins over its 8 s window: the jump may be inside either
+        // window, so the search runs from the start of the first to the end of the second.
+        let half = crate::audio_match::WIN_S / 2.0;
+        let (lo, hi) = (x.t_b - half, y.t_b + half);
+        let what = if d > 0.0 { format!("lacks {d:.2} s that {name} heard: a cut here") } else { format!("has {:.2} s that {name} did not hear: a stretch from elsewhere, or {name} paused", -d) };
+        let jump = format!("the lag against {name} jumps by {d:+.2} s");
+        let coarse = votes(&mut planner, &ours.audio, &theirs.audio, lo, hi, lx, ly, 2.0, 0.5);
+        let Some((a, b)) = switch_over(&coarse) else {
+            peaks.push(Peak { t: (lo + hi) / 2.0, value: d.abs() as f32, error_s: (hi - lo) / 2.0, note: format!("{jump} somewhere between {lo:.0} and {hi:.0} s (not located): this recording {what}"), lasting: None });
+            continue;
+        };
+        // Close in on one moment with shorter windows.
+        let fine = |planner: &mut realfft::RealFftPlanner<f32>, c: f64| -> Option<(f64, f64)> {
+            let (p, q) = switch_over(&votes(planner, &ours.audio, &theirs.audio, c - 2.5, c + 2.5, lx, ly, 1.0, 0.02))?;
+            Some(((p + q) / 2.0, ((q - p) / 2.0).max(0.02)))
+        };
+        let mut mark = |t: f64, e: f64, note: String| peaks.push(Peak { t, value: d.abs() as f32, error_s: e, note, lasting: None });
+        if b - a <= 2.0 {
+            let (t, e) = fine(&mut planner, (a + b) / 2.0).unwrap_or(((a + b) / 2.0, ((b - a) / 2.0).max(0.25)));
+            mark(t, e, format!("{jump}: this recording {what}"));
+            continue;
+        }
+        // A long stretch that votes for neither: quiet, or unheard by the other.
+        let slice = |p: f64, q: f64| &ours.audio[((p.max(0.0) * sr) as usize).min(ours.audio.len())..((q.max(0.0) * sr) as usize).min(ours.audio.len())];
+        let inside = level_db(slice(a, b));
+        let around = level_db(slice(lo, a)).max(level_db(slice(b, hi)));
+        if inside < around - 10.0 {
+            mark((a + b) / 2.0, (b - a) / 2.0, format!("{jump} within {:.1} s of quiet ({:.0} dB under the sound round it): this recording {what}", b - a, around - inside));
+        } else {
+            let gap = format!("{jump} across {:.1} s that do not line up with {name}: it did not hear them", b - a);
+            let (pa, pb) = (fine(&mut planner, a).unwrap_or((a, 0.25)), fine(&mut planner, b).unwrap_or((b, 0.25)));
+            mark(pa.0, pa.1, format!("{gap}; the old lag ends here"));
+            mark(pb.0, pb.1, format!("{gap}; the new lag starts here"));
+        }
+    }
+    let note = format!("{} links with {name} ({chunks} chunks of 15 s tried, every 7.5 s); a mark where the lag jumps", hits.len());
+    Lane { key: key.into(), name: format!("compare: {name}"), role: Role::Sound, unit: "s".into(), curve: Vec::new(), peaks, thr: Some(crate::audio_match::GAP_MIN_S as f32), note }
+}
+
 /// A person's choice about one cut, saved with the project.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Switch {
@@ -498,6 +796,13 @@ impl Cut {
     }
 }
 
+/// Marks of the same jump from different compared recordings this far apart are one cut, seconds.
+pub const COMPARE_JOIN_S: f64 = 3.0;
+
+fn is_compare(l: &Lane) -> bool {
+    l.key.starts_with("compare")
+}
+
 fn moves_picture(r: Role) -> bool {
     matches!(r, Role::Picture | Role::Both)
 }
@@ -525,8 +830,11 @@ pub fn find_cuts(lanes: &[Lane], thr: &[Option<f32>], switches: &[(f64, Switch)]
     let passing: Vec<&Cue> = all.iter().filter(|c| c.passes).collect();
     let mut clusters: Vec<Vec<&Cue>> = Vec::new();
     for c in passing {
+        // Recordings compared with this one see the same jump (the same seconds missing) a
+        // little apart: one cut.
+        let same_jump = |cl: &Vec<&Cue>| is_compare(&lanes[c.lane]) && cl.iter().any(|q| is_compare(&lanes[q.lane]) && (q.value - c.value).abs() <= 0.1 && c.t - q.t <= COMPARE_JOIN_S);
         match clusters.last_mut() {
-            Some(cl) if c.t - cl.last().unwrap().t <= JOIN_S => cl.push(c),
+            Some(cl) if c.t - cl.last().unwrap().t <= JOIN_S || same_jump(cl) => cl.push(c),
             _ => clusters.push(vec![c]),
         }
     }
@@ -535,12 +843,24 @@ pub fn find_cuts(lanes: &[Lane], thr: &[Option<f32>], switches: &[(f64, Switch)]
         .into_iter()
         .map(|cl| {
             let real: Vec<&&Cue> = cl.iter().filter(|c| !c.flash).collect();
-            let best = |pick: &dyn Fn(Role) -> bool| real.iter().filter(|c| pick(lanes[c.lane].role)).max_by(|a, b| strength(a).total_cmp(&strength(b))).map(|c| (c.t, err_of(c)));
+            // The surest cue sets the time (the smallest error), the strongest among equals.
+            let best = |pick: &dyn Fn(Role) -> bool| real.iter().filter(|c| pick(lanes[c.lane].role)).max_by(|a, b| err_of(b).total_cmp(&err_of(a)).then(strength(a).total_cmp(&strength(b)))).map(|c| (c.t, err_of(c)));
             let pic = best(&moves_picture);
-            let snd = best(&moves_sound);
+            // Several recordings compared: the mean of where each put the jump, its error half
+            // their spread (each counts; none is dropped).
+            let cmp: Vec<&&&Cue> = real.iter().filter(|c| is_compare(&lanes[c.lane])).collect();
+            let snd = if cmp.len() >= 2 {
+                let mean = cmp.iter().map(|c| c.t).sum::<f64>() / cmp.len() as f64;
+                let (lo, hi) = cmp.iter().fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c.t), hi.max(c.t)));
+                let own = cmp.iter().map(|c| err_of(c)).fold(0.0, f64::max);
+                Some((mean, ((hi - lo) / 2.0).max(own)))
+            } else {
+                best(&moves_sound)
+            };
             let flash_t = cl.iter().max_by(|a, b| strength(a).total_cmp(&strength(b))).map(|c| c.t).unwrap_or(0.0);
             let (t_pic, error_s) = pic.or(snd).unwrap_or((flash_t, frame_s));
             let t_snd = snd.map_or(t_pic, |s| s.0);
+            let error_s = if pic.is_some() { error_s } else { snd.map_or(error_s, |s| s.1) };
             let (lo, hi) = (cl.first().unwrap().t - JOIN_S, cl.last().unwrap().t + JOIN_S);
             // Every lane's marks round it, passing or not: what agrees, and by how much.
             let cues = all.iter().filter(|c| c.t >= lo && c.t <= hi).cloned().collect();
@@ -750,5 +1070,75 @@ mod tests {
         let l = lasting(&f, 0.04);
         assert!(l[25] < 1.0, "flash {}", l[25]);
         assert!(l[68] > 50.0, "cut {}", l[68]);
+    }
+    /// Gaussian noise from a fixed seed.
+    fn noise(n: usize, sigma: f32, seed: &mut u64) -> Vec<f32> {
+        let mut u = || {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((*seed >> 11) as f64 / (1u64 << 53) as f64).max(1e-12)
+        };
+        (0..n).map(|_| (sigma as f64 * (-2.0 * u().ln()).sqrt() * (2.0 * std::f64::consts::PI * u()).cos()) as f32).collect()
+    }
+
+    /// Clicks and short bursts, louder low than high as natural sounds are (a one-pole low-pass):
+    /// high kurtosis in every band, the high bands quiet enough for noise to show.
+    fn clicks(n: usize, seed: &mut u64) -> Vec<f32> {
+        let raw = raw_clicks(n, seed);
+        let mut y = 0.0f32;
+        raw.iter().map(|&v| {
+            y = 0.95 * y + 0.2 * v;
+            y
+        }).collect()
+    }
+
+    fn raw_clicks(n: usize, seed: &mut u64) -> Vec<f32> {
+        let mut x = vec![0.0f32; n];
+        let mut k = 0;
+        while k < n {
+            let burst = noise(40, 0.3, seed);
+            for (j, b) in burst.iter().enumerate() {
+                if let Some(v) = x.get_mut(k + j) {
+                    *v += b * (1.0 - j as f32 / 40.0);
+                }
+            }
+            k += 211 + (*seed % 300) as usize;
+        }
+        x
+    }
+
+    #[test]
+    fn noise_under_a_sound_is_measured_by_its_kurtosis() {
+        let mut seed = 7;
+        let sr = SOUND_SR as usize;
+        let sound = clicks(sr, &mut seed);
+        let mut planner = realfft::RealFftPlanner::<f32>::new();
+        let mut at = |sigma: f32, seed: &mut u64| {
+            let x: Vec<f32> = sound.iter().zip(noise(sr, sigma, seed)).map(|(a, b)| a + b).collect();
+            noise_db(&x, &mut planner).unwrap()
+        };
+        let (quiet, loud) = (at(0.003, &mut seed), at(0.0095, &mut seed));
+        assert!(((loud - quiet) - 10.0).abs() < 2.5, "quiet {quiet:.1} dB, loud {loud:.1} dB");
+    }
+
+    #[test]
+    fn the_sound_lanes_mark_a_splice() {
+        let mut seed = 11;
+        let sr = SOUND_SR as usize;
+        // 6 s of clicks over quiet noise, then 6 s of the same over noise 20 dB louder.
+        let sound = clicks(12 * sr, &mut seed);
+        let mut x = sound.clone();
+        for (k, v) in noise(12 * sr, 0.001, &mut seed).into_iter().enumerate() {
+            x[k] += if k < 6 * sr { v } else { v * 10.0 };
+        }
+        let lane = noise_lane(&x);
+        let over: Vec<f64> = lane.peaks.iter().filter(|p| p.value >= NOISE_THR).map(|p| p.t).collect();
+        assert_eq!(over.len(), 1, "{:?}", lane.peaks.iter().map(|p| (p.t, p.value)).collect::<Vec<_>>());
+        assert!((over[0] - 6.0).abs() <= 0.25, "{over:?}");
+        // A tone that drops by 20 dB at 5 s: the level lane.
+        let tone: Vec<f32> = (0..10 * sr).map(|k| (if k < 5 * sr { 0.1 } else { 0.01 }) * (k as f32 * 0.3).sin()).collect();
+        let lane = level_lane(&tone);
+        let over: Vec<(f64, f32)> = lane.peaks.iter().filter(|p| p.value >= LEVEL_THR).map(|p| (p.t, p.value)).collect();
+        assert_eq!(over.len(), 1, "{over:?}");
+        assert!((over[0].0 - 5.0).abs() <= 0.05 && (over[0].1 - 20.0).abs() < 1.0, "{over:?}");
     }
 }

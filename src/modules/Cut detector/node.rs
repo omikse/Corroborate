@@ -1,6 +1,8 @@
 //! The Cut detector node in the workbench. Once the graph runs it reads the wired recording's file
 //! itself (`corroborate::cuts`): every frame for the picture lanes, ffprobe's packets for the
-//! keyframes and gaps. What it found (`Scan`) stays in the node's state; the cuts are worked out
+//! keyframes and gaps; its sound (the source's decoded audio, at the audio match's 8 kHz) for the
+//! sound level and background noise; and each recording wired into `compare with` for a compare
+//! lane against it. What it found (`Scan`) stays in the node's state; the cuts are worked out
 //! from it every frame, with the thresholds, switches and hand cuts kept in the node's rows and the
 //! events wired in, so changing any of them needs no new run. Each piece is a recording of its
 //! own: `audio n`, `video n` (streams), `time n` (as played: the wired start plus where the piece
@@ -38,6 +40,30 @@ pub struct Job {
     pub video: bool,
     pub audio: bool,
     pub source: Option<(Shared, u64)>,
+    /// The recordings wired into `compare with`.
+    pub compare: Vec<Other>,
+}
+
+/// A recording to compare with: its input's key (`compare 2`), its name, its file and its
+/// source's state as in `Job`.
+pub struct Other {
+    pub key: String,
+    pub name: String,
+    pub path: String,
+    pub source: Option<(Shared, u64)>,
+}
+
+/// A recording's sound at the audio match's rate: its source's decoded audio once that run is
+/// done, else its file decoded here. None: stopped.
+fn sound_of(path: &str, source: &Option<(Shared, u64)>, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Result<Vec<f32>, String>> {
+    let audio = source.as_ref().and_then(|(st, before)| crate::audio_match_node::from_source(st, *before, stop, report));
+    if stop.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(match audio {
+        Some(a) if !a.is_empty() => Ok(a),
+        _ => crate::audio_match_node::decode(path, stop),
+    })
 }
 
 /// Reads the recording on a thread of its own, writing into `state` (unless `stop` is set first,
@@ -97,6 +123,38 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
                 Err(e) => scan.notes.push(format!("keyframes: {e}")),
             }
         }
+        if job.audio || !job.compare.is_empty() {
+            set(&|s| s.status = "waiting for the sound…".into());
+            let Some(sound) = sound_of(&job.path, &job.source, &stop, &|secs| set(&|s| s.status = format!("waiting for the source's sound: {secs:.0} s decoded…"))) else { return };
+            match sound {
+                Ok(a) => {
+                    if scan.len == 0.0 {
+                        scan.len = a.len() as f64 / cuts::SOUND_SR;
+                    }
+                    if job.audio {
+                        set(&|s| s.status = "sound level and background noise…".into());
+                        scan.lanes.push(cuts::level_lane(&a));
+                        scan.lanes.push(cuts::noise_lane(&a));
+                    }
+                    if !job.compare.is_empty() {
+                        set(&|s| s.status = "fingerprinting the sound…".into());
+                        let ours = corroborate::audio_match::Clip::new(a);
+                        for o in &job.compare {
+                            set(&|s| s.status = format!("comparing with {}…", o.name));
+                            match sound_of(&o.path, &o.source, &stop, &|_| {}) {
+                                None => return,
+                                Some(Ok(theirs)) => scan.lanes.push(cuts::compare_lane(&o.key, &o.name, &ours, &corroborate::audio_match::Clip::new(theirs))),
+                                Some(Err(e)) => scan.notes.push(format!("{}: {e}", o.name)),
+                            }
+                        }
+                    }
+                }
+                Err(e) => scan.notes.push(format!("sound: {e}")),
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         if scan.frame_s == 0.0 {
             scan.frame_s = 1.0 / 30.0;
         }
@@ -147,15 +205,31 @@ pub fn clock_text(t: f64) -> String {
     if m > 0.0 { format!("{m:.0}:{s:05.2}") } else { format!("{s:.2}") }
 }
 
-/// The lanes a run will make, before it has: so the node keeps its size.
-fn planned_lanes(video: bool) -> Vec<Lane> {
+/// The lanes a run will make, before it has: so the node keeps its size. `compare`: the keys and
+/// names of the recordings wired into `compare with`.
+fn planned_lanes(video: bool, audio: bool, compare: &[(String, String)]) -> Vec<Lane> {
     let empty = |key: &str, name: &str, role: Role, thr: f32| Lane { key: key.into(), name: name.into(), role, unit: String::new(), curve: Vec::new(), peaks: Vec::new(), thr: Some(thr), note: "not read yet: the graph reads it when it runs".into() };
     let mut v = Vec::new();
     if video {
         v.push(empty("picture", "picture", Role::Picture, cuts::PICTURE_THR));
         v.push(empty("keyframes", "keyframes and gaps", Role::Picture, 0.5));
     }
+    if audio {
+        v.push(empty("level", "sound level", Role::Sound, cuts::LEVEL_THR));
+        v.push(empty("noise", "background noise", Role::Sound, cuts::NOISE_THR));
+    }
+    for (key, name) in compare {
+        v.push(empty(key, &format!("compare: {name}"), Role::Sound, corroborate::audio_match::GAP_MIN_S as f32));
+    }
     v
+}
+
+/// A recording's name: its file's, when its node still has the module's name.
+fn rec_name(app: &App, f: NodeId) -> String {
+    match app.source_file(f) {
+        Some(p) if app.nodes[f].label == "SOURCER" => p.rsplit(['\\', '/']).next().unwrap_or(&p).to_string(),
+        _ => app.node_name(f),
+    }
 }
 
 impl App {
@@ -184,7 +258,27 @@ impl App {
         let video = self.graph.feeder(i, "video").is_some();
         let audio = self.graph.feeder(i, "audio").is_some();
         let source = before.get(&src).map(|&r| (self.nodes[src].state.clone(), r));
-        Ok(Job { path, video, audio, source })
+        let mut compare = Vec::new();
+        for (key, f) in self.cut_compared(i) {
+            if let Some(p) = self.source_file(f) {
+                compare.push(Other { key, name: rec_name(self, f), path: p, source: before.get(&f).map(|&r| (self.nodes[f].state.clone(), r)) });
+            }
+        }
+        Ok(Job { path, video, audio, source, compare })
+    }
+
+    /// The recordings wired into node `i`'s `compare with` inputs: each lane's key and the source.
+    pub(crate) fn cut_compared(&self, i: NodeId) -> Vec<(String, NodeId)> {
+        self.graph.nodes()[i]
+            .spec
+            .inputs
+            .iter()
+            .filter_map(|p| {
+                let n = p.name.strip_prefix("compare with ")?;
+                let (f, _) = self.graph.feeder(i, p.name)?;
+                Some((format!("compare {n}"), f))
+            })
+            .collect()
     }
 
     /// What run signature the cut detectors add: what is wired into each.
@@ -226,9 +320,13 @@ impl App {
         v.clock = v.src.and_then(|f| self.clock_of(f)).unwrap_or_default();
         v.scan = self.nodes[i].state.lock().unwrap().cut.clone();
         let video = self.graph.feeder(i, "video").is_some();
+        let audio = self.graph.feeder(i, "audio").is_some();
         v.lanes = match &v.scan {
             Some(s) => s.lanes.iter().map(|l| Lane { curve: Vec::new(), ..l.clone() }).collect(),
-            None => planned_lanes(video),
+            None => {
+                let compare: Vec<(String, String)> = self.cut_compared(i).into_iter().map(|(k, f)| (k, rec_name(self, f))).collect();
+                planned_lanes(video, audio, &compare)
+            }
         };
         v.frame_s = v.scan.as_ref().map_or(1.0 / 30.0, |s| s.frame_s);
         // One lane per wired events input, named by what feeds it.
@@ -441,7 +539,8 @@ pub fn json(app: &App, i: NodeId) -> String {
         })
         .collect();
     let pieces: Vec<String> = v.pieces.iter().map(|p| format!("{{\"n\":{},\"video\":[{},{}],\"audio\":[{},{}]}}", p.n, num(p.v0), num(p.v1), num(p.a0), num(p.a1))).collect();
-    format!(",\"clock\":\"{}\",\"length_s\":{},\"lanes\":[{}],\"cuts\":[{}],\"pieces\":[{}]", json_escape(&v.clock), num(v.len), lanes.join(","), cuts_j.join(","), pieces.join(","))
+    let file = v.scan.as_ref().map_or(String::new(), |s| s.path.clone());
+    format!(",\"file\":\"{}\",\"clock\":\"{}\",\"length_s\":{},\"lanes\":[{}],\"cuts\":[{}],\"pieces\":[{}]", json_escape(&file), json_escape(&v.clock), num(v.len), lanes.join(","), cuts_j.join(","), pieces.join(","))
 }
 
 // ---------------------------------------------------------------- on the canvas
@@ -530,7 +629,7 @@ impl crate::look::NodeLook for Look {
             note.push_str(&format!("; {} events on another clock left out", v.off_clock));
         }
         let on = v.cuts.iter().filter(|c| c.on()).count();
-        let head = if v.scan.is_some() { format!("{} cuts on of {} · {} pieces · {}", on, v.cuts.len(), v.pieces.len(), note) } else { note };
+        let head = if v.scan.is_some() { format!("{on} of {} cut{} on · {} piece{} · {note}", v.cuts.len(), if v.cuts.len() == 1 { "" } else { "s" }, v.pieces.len(), if v.pieces.len() == 1 { "" } else { "s" }) } else { note };
         p.text(Pos2::new(area.left(), y(NOTE_H * 0.5)), Align2::LEFT_CENTER, head, font(11.0), DIM);
 
         // Labels on the left.

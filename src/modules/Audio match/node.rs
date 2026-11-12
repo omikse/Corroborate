@@ -1048,7 +1048,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
 /// The audio source `st` decoded in this run (its run differs from `before` and is done), at the
 /// match's rate. None: stopped, or the source ended with no audio (the file is decoded here then).
 /// `report` is told the seconds decoded so far.
-fn from_source(st: &Shared, before: u64, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Vec<f32>> {
+pub(crate) fn from_source(st: &Shared, before: u64, stop: &AtomicBool, report: &dyn Fn(f64)) -> Option<Vec<f32>> {
     loop {
         if stop.load(Ordering::Relaxed) {
             return None;
@@ -1068,7 +1068,7 @@ fn from_source(st: &Shared, before: u64, stop: &AtomicBool, report: &dyn Fn(f64)
     }
 }
 
-fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
+pub(crate) fn decode(path: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
     // Its turn among every decoder of the project (the sources' too).
     let Some(_turn) = corroborate::ingest::decode_turn(stop) else { return Err("stopped".into()) };
     let (mut child, rx) = corroborate::ingest::spawn_ffmpeg(path, audio_match::SR)?;
