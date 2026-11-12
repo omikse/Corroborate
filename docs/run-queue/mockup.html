@@ -45,15 +45,11 @@ button.lit{border-color:#5fb3a1;color:#a8e0d2}
 .node{position:absolute;width:280px;background:var(--node);border:1px solid var(--boxline);border-radius:4px;box-shadow:0 2px 8px #0006}
 .node .title{height:26px;display:flex;align-items:center;gap:8px;padding:0 8px;background:var(--head);border-radius:4px 4px 0 0;font-size:12.5px}
 .node .title .kind{margin-left:auto;color:var(--faint);font-size:10.5px}
-.state{position:relative;height:22px;display:flex;align-items:center;gap:7px;padding:0 6px 0 8px;border-bottom:1px solid var(--seam);background:#24272d;font-size:11.5px;cursor:default}
-.state .dot{width:8px;height:8px;border-radius:50%;flex:none}
-.state .txt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
-.state .txt b{font-weight:500;color:var(--text)}
-.state .fill{position:absolute;left:0;bottom:-1px;height:2px;background:var(--working)}
-.state .fill.unknown{width:30%!important;animation:slide 1.2s linear infinite}
+.title .dot{width:9px;height:9px;border-radius:50%;flex:none;cursor:default;box-sizing:border-box}
+.title .dot.ring{background:transparent!important;border:2px solid;border-right-color:transparent!important;animation:spin .9s linear infinite}
+.title .dot.ring.slow{animation-duration:2.4s}
+@keyframes spin{to{transform:rotate(360deg)}}
 @keyframes slide{from{left:-30%}to{left:100%}}
-.title .run{padding:0;width:20px;height:18px;font-size:10px;line-height:16px;margin-right:-4px;color:var(--done);border-color:#3f5a3a;background:#26302a}
-.title .run.busy{color:var(--failed);border-color:#5a3a3a;background:#302626}
 .dot.pulse{animation:pulse 1s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
 .body{padding:6px 10px 8px;font-size:11.5px;color:var(--dim);display:flex;flex-direction:column;gap:5px}
@@ -101,7 +97,7 @@ li{margin:2px 0}
   <div>
     <h1>Running, the queue, and kept results</h1>
     <p>A made-up project, run by a pretend queue (seconds here stand for minutes). Each node that does work has a
-      ▶ in its top right corner to run it and everything it needs, and a state bar under its title. The queue lists every job in the order
+      state dot before its name (a turning ring while it is queued or working; hover it for what it is doing) and a ▶ in its top right corner to run it and everything it needs. The queue lists every job in the order
       asked. What is worked out is kept in <code>cache\</code>, so it is not worked out twice. Plan:
       <code>docs/run-queue/plan.md</code>.</p>
   </div>
@@ -298,8 +294,7 @@ function nodeHtml(id) {
   if (id === "tl") body = `<div class="row">a view: worked out when read, not a job</div><div class="row" id="tlres">no times yet</div>`;
   if (id === "mic") body = `<div class="row"><span class="mono">microphone (USB)</span></div>`;
   if (id === "enf") body = `<div class="row" id="enfres">no hum yet</div>`;
-  return `<div class="title">${n.title}<span class="kind">${n.kind}</span>${n.job ? `<button class="run" data-run="${id}"></button>` : ""}</div>
-    ${n.job ? `<div class="state" data-state="${id}"><span class="dot"></span><span class="txt"></span><span class="fill"></span></div>` : ""}
+  return `<div class="title">${n.job ? `<span class="dot" data-state="${id}"></span>` : ""}${n.title}<span class="kind">${n.kind}</span>${n.job ? `<button class="run" data-run="${id}"></button>` : ""}</div>
     <div class="body">${body}</div>`;
 }
 for (const id in N) {
@@ -342,18 +337,18 @@ function stateText(id) {
 }
 function drawNodes() {
   for (const id in S) {
-    const s = S[id], bar = el[id].querySelector(".state");
-    const dot = bar.querySelector(".dot"), fill = bar.querySelector(".fill"), btn = el[id].querySelector(".run");
-    dot.style.background = STATES[s.state].col;
-    dot.className = "dot" + (s.state === "live" || s.state === "queued" ? " pulse" : "");
-    bar.querySelector(".txt").innerHTML = stateText(id);
+    const s = S[id], dot = el[id].querySelector(".dot"), btn = el[id].querySelector(".run");
+    const col = STATES[s.state].col;
+    // Queued or working: a turning ring in the state's colour (slow while it waits); live: a
+    // pulsing dot; otherwise a still dot.
+    const turning = s.state === "queued" || s.state === "working";
+    dot.className = "dot" + (turning ? " ring" + (s.state === "queued" ? " slow" : "") : s.state === "live" ? " pulse" : "");
+    dot.style.background = turning ? "" : col;
+    dot.style.borderColor = turning ? col : "";
     const busy = ["queued","working","live"].includes(s.state);
     btn.textContent = busy ? "■" : "▶";
     btn.classList.toggle("busy", busy);
     btn.title = busy ? "cancel" : N[id].needs.length ? "run this and what it needs" : "run this";
-    fill.style.display = s.state === "working" ? "block" : "none";
-    fill.style.width = (s.frac * 100) + "%";
-    fill.className = "fill" + (s.state === "working" && N[id].steps[s.step][1] === 0 ? " unknown" : "");
   }
   const ps = document.getElementById("play-s1");
   if (wantPlay) { const s = S.s1, st = N.s1.steps[s.step]; ps.textContent = `waits for the sound: ${s.state === "working" ? `${st[0]} ${Math.round(s.frac * 100)}%` : STATES[s.state].name}`; ps.style.color = "var(--working)"; }
@@ -426,12 +421,10 @@ document.addEventListener("change", e => {
 });
 document.addEventListener("input", e => { if (e.target.dataset.act === "thr") document.getElementById("thrv").textContent = e.target.value; });
 document.addEventListener("mousemove", e => {
-  const bar = e.target.closest && e.target.closest(".state");
-  if (!bar || e.target.tagName === "BUTTON") { tip.style.display = "none"; return; }
+  const bar = e.target.closest && e.target.closest(".dot[data-state]");
+  if (!bar) { tip.style.display = "none"; return; }
   const id = bar.dataset.state, s = S[id], n = N[id];
-  const lines = [name(id), `state: ${STATES[s.state].name}`];
-  if (s.state === "queued") lines.push(`waits ${s.why}`);
-  if (s.state === "failed") lines.push(s.why);
+  const lines = [name(id), stateText(id).replace(/<\/?b>/g, "")];
   lines.push(`steps: ${n.steps.map(x => x[0]).join(", ")}`);
   if (n.needs.length) lines.push(`needs: ${n.needs.map(name).join(", ")}`);
   if (!n.live) lines.push(`key: ${key(id)}`, cache[id] ? `kept: ${cache[id] === key(id) ? "this key" : "an older key (stale)"}, ${n.mb} MB` : "kept: nothing");

@@ -149,10 +149,13 @@ download is never treated as live (22f9f14).
 
 ### On the canvas
 
-- Every job node gets a ▶ in its title bar's top right corner (run this and what it needs; a ■
-  while it is queued or working, to cancel) and a thin state bar under its title: the state's
-  colour, its step and percent.
-- Hovering the bar says what it waits for, how long it took, or why it failed.
+- Every job node gets a state dot in its title bar's top left corner, before its name: only the
+  dot, in the state's colour. While the job is queued or working the dot becomes a turning ring in
+  the same colour (slow while queued, faster while working); a live source's dot pulses.
+- Hovering the dot says the step and percent, what it waits for, how long it took, or why it
+  failed.
+- A ▶ in the title bar's top right corner runs the node and what it needs; while it is queued or
+  working it is a ■, to cancel.
 - Wires stay as they are; only a live stream's wires pulse.
 - **Queue** in the top bar, with counts ("2 working · 3 queued"), opens the queue list: every job
   of the session in the order asked, with its state, step, percent, what it waits for, how long it
@@ -161,7 +164,7 @@ download is never treated as live (22f9f14).
 ## Stages
 
 1. **Show it.** One kind of progress for every job (steps, percent, state) in the node's state, the
-   state bar on job nodes, the queue list (read only), yt-dlp's download percent on the SOURCER.
+   state dot on job nodes, the queue list (read only), yt-dlp's download percent on the SOURCER.
    No change to how runs start. Test: headless, the states and the list on a project with a link,
    a file, a Cut detector and an Audio match.
 2. **The queue.** Jobs with needs and turns; ▶ on a node runs it and what it needs; Stop and Cancel;
@@ -187,9 +190,10 @@ Every stage updates the READMEs of the nodes it touches in the same commit.
 4. **The decoded sound is kept** (about 85 MB per 44 minutes); the queue list shows the size and
    has Forget.
 5. **Running one node**: a ▶ in the node's top right corner, on its title bar: run this node and
-   what it needs. While it is queued or working it is a ■ (cancel). The state bar under the title
-   shows the state, step and percent.
-6. **Seeing it**: the state bars and the queue list (Queue in the top bar, with counts).
+   what it needs. While it is queued or working it is a ■ (cancel).
+6. **Seeing it**: a state dot before each job node's name, only the dot (a turning ring in the
+   state's colour while queued or working; hover for the step and percent), and the queue list
+   (Queue in the top bar, with counts) for the details.
 7. **No Pause** of the queue: Stop and per-job cancel.
 8. **Play before the sound is there** queues the SOURCER's download and decode, says what it waits
    for, and plays once the sound is there.
