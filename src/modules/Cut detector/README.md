@@ -164,9 +164,43 @@ package installed.
 
 Stages 1 to 3 of the plan are built: picture and timestamps, hand cuts, pieces as rows; sound
 level, background noise, `compare with` and the events input; pieces into Audio match as one
-device, and the placed strip. Left for later (stage 4): TransNet V2 for fades and dissolves (only
-if the pure-Rust `tract` runs it), the codec frame grid, vPDQ for compilations of other people's
-videos, and live stream outages.
+device, and the placed strip. What is left is below; nothing of it is started.
+
+## Further development
+
+Stage 4 of the plan, each on its own merit:
+- **Fades and dissolves**: TransNet V2 (a neural shot boundary detector) as a lane, only if the
+  pure-Rust `tract` runs its ONNX (Open Neural Network Exchange) model, so the tool stays one
+  portable folder. `scdet` sees hard cuts only; a slow dissolve never passes its threshold.
+- **Codec frame grid**: MP3 or AAC (advanced audio coding) frames, and the encoder's block grid in
+  the picture, broken where a re-encoded file was spliced (Bianchi et al. 2014; Yang, Shi, Huang
+  2010). Format-specific work, for edits that were re-encoded.
+- **Compilations of other people's videos**: vPDQ (frame hashes, the `pdqhash` crate) to find each
+  piece inside the original videos, as `compare with` does for sound; VCSL (video copy segment
+  localisation) as the benchmark.
+- **Live stream outages**: a gap in a live reading is known exactly from SOURCER's PC (personal
+  computer) clock; HLS (HTTP live streaming) playlists mark `#EXT-X-DISCONTINUITY` and
+  `#EXT-X-GAP`, read from the playlist itself (ffmpeg's reader carries on past them). Needs the
+  live path through the node: streams and microphones are not read now.
+
+Found while building stages 1 to 3:
+- **Pieces into ENF, Planes and plugins**: they read a source's audio as it decodes and take no
+  pieces yet. ENF on each piece would place it against a grid log, the second way to put shuffled
+  pieces in order.
+- **Hum cues as events**: hum phase jumps (Rodríguez et al. 2010) and frequency breaks (Esquef et
+  al. 2014) belong in ENF's library and come here as plain events. At 25 frames a second with 50 Hz
+  hum (or 30 with 60 Hz) a cut on frame boundaries leaves the phase unchanged; worth stating on
+  the node. The hum at the end of one piece continuing at the start of another could suggest an
+  order without grid logs (weak, a suggestion only).
+- **Sharper sound joins**: the compare lane places a join only to about a second on crowd sound.
+  More recordings in `compare with` narrow it (the marks' spread); a picture cue places it to the
+  frame. A finer vote where the lag change is small is untried.
+- **MP4 edit lists** (`elst`): a file can hold removed parts it does not play; read them as cues.
+- **Silence lane**: `silencedetect` marks (in the plan's stage 1) are not drawn yet.
+- **PySceneDetect as an oracle** on the test clips (plan, stage 1): needs a Python package
+  installed, so it waits for that download.
+- **Background noise lane**: too rough on crowd sound to cut alone (it only confirms). A steadier
+  estimate (longer windows, or only the quiet moments between sounds) would let it cut.
 
 Files: `module.toml` (ports), `mod.rs` (ports from the rows, the rows' keys), `node.rs` (the run,
 the outputs, the canvas), the method in `src/cuts.rs`.
