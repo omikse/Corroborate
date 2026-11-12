@@ -40,6 +40,8 @@ pub struct NodeState {
     pub found: Option<std::sync::Arc<crate::audio_match_node::Found>>,
     /// Cut detector: what its run found in the recording.
     pub cut: Option<std::sync::Arc<crate::cut_detector_node::Scan>>,
+    /// Cut detector: its run's steps and how far each has got.
+    pub cut_progress: crate::cut_detector_node::Progress,
     /// What a program sent on each of its outputs (the data bus), and a count of the changes.
     pub outbox: Vec<(&'static str, corroborate::data::Data)>,
     pub outbox_rev: u64,
@@ -86,6 +88,8 @@ pub struct Job {
     pub buses: Vec<std::sync::mpsc::SyncSender<String>>,
     /// The clock this source's times are on (its node's id, or the clock it shares).
     pub clock: String,
+    /// Where a video from the web is downloaded: the project's recordings\ folder.
+    pub downloads: std::path::PathBuf,
 }
 
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -123,7 +127,7 @@ fn run(job: Job) {
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
             set_status("yt-dlp: checking the link, downloading the audio if it is not live…");
-            match sourcer_node::resolve(u) {
+            match sourcer_node::resolve(u, &job.downloads) {
                 Ok((r, is_live)) => {
                     // A video that is not live is read as a recording: as fast as it decodes.
                     live = is_live;

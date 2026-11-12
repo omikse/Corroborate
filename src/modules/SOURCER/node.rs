@@ -9,6 +9,7 @@ use super::*;
 use corroborate::modules::sourcer::has_video;
 use corroborate::timebase::FileFacts;
 use std::io::Read;
+use std::path::Path;
 
 /// Direct media URLs ffmpeg opens itself; every other http(s) link is a page for yt-dlp.
 const DIRECT: [&str; 12] = [".mp3", ".wav", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".mp4", ".webm", ".mkv", ".m3u8", ".ts"];
@@ -151,14 +152,15 @@ fn kind_of(text: &str) -> &'static str {
 
 /// A direct media URL, and whether it is live. Web pages go through yt-dlp, which says both;
 /// direct URLs are live unless they end in a file extension (an mp3 on a server is a recording).
-pub fn resolve(url: &str) -> Result<(String, bool), String> {
+/// A video that is not live is downloaded into the folder `dir` (the project's recordings\).
+pub fn resolve(url: &str, dir: &Path) -> Result<(String, bool), String> {
     if !kind_of(url).contains("yt-dlp") {
         let path = url.to_lowercase();
         let file = DIRECT.iter().filter(|e| **e != ".m3u8").any(|e| path.split('?').next().unwrap_or("").ends_with(e));
         return Ok((url.to_string(), !file));
     }
     // Downloaded before: read the copy, no yt-dlp call (no network, no sign-in check).
-    if let Some(p) = downloaded(url) {
+    if let Some(p) = downloaded(url, dir) {
         return Ok((p, false));
     }
     let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])?;
@@ -168,8 +170,9 @@ pub fn resolve(url: &str) -> Result<(String, bool), String> {
     match lines.next() {
         Some(u) if out.status.success() && u.contains("://") && is_live => Ok((u.trim().to_string(), true)),
         // Not live: YouTube refuses its direct links to ffmpeg (403), so yt-dlp downloads the
-        // video into recordings\ and it is read as a file. The copy stays there as evidence.
-        Some(_) if out.status.success() => download(url).map(|p| (p, false)),
+        // video into the project's recordings\ and it is read as a file. The copy stays there as
+        // evidence.
+        Some(_) if out.status.success() => download(url, dir).map(|p| (p, false)),
         _ => Err(ytdlp_error("yt-dlp", &out.stderr, "no URL returned")),
     }
 }
@@ -235,27 +238,27 @@ fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
 }
 
 /// Download a video (one file with picture and sound, at most 480 lines; sound only when there is
-/// none) with yt-dlp to `recordings\<site> <id>.<ext>`; reuses an earlier download.
-fn download(url: &str) -> Result<String, String> {
-    let dir = corroborate::home().join("recordings");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+/// none) with yt-dlp to `<dir>\<site> <id>.<ext>`.
+fn download(url: &str, dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
     let template = dir.join("%(extractor)s %(id)s.%(ext)s").to_string_lossy().into_owned();
     let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o", &template, url])?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => {
             let p = p.trim().to_string();
-            remember(url, &p);
+            remember(url, &p, dir);
             Ok(p)
         }
         _ => Err(ytdlp_error("yt-dlp download", &out.stderr, "no file written")),
     }
 }
 
-/// `recordings\downloads.txt`: one `url<TAB>file` line per download, so the same link is read
-/// from its copy without asking yt-dlp again.
-fn downloads_list() -> std::path::PathBuf {
-    corroborate::home().join("recordings").join("downloads.txt")
+/// `<dir>\downloads.txt`: one `url<TAB>file` line per download (the file's name when it is in
+/// `dir`, so the list holds when the project folder moves), so the same link is read from its copy
+/// without asking yt-dlp again.
+fn downloads_list(dir: &Path) -> std::path::PathBuf {
+    dir.join("downloads.txt")
 }
 
 /// The URL as a key: trimmed, and for YouTube just the video id (watch?v=, youtu.be/, shorts/,
@@ -276,17 +279,48 @@ fn url_key(url: &str) -> String {
     u.to_string()
 }
 
-/// The file an earlier download of this URL left, if it is still there.
-fn downloaded(url: &str) -> Option<String> {
+/// The copy of this URL listed in `dir`'s downloads.txt, if it is still there.
+pub(crate) fn listed(url: &str, dir: &Path) -> Option<String> {
     let key = url_key(url);
-    let text = std::fs::read_to_string(downloads_list()).ok()?;
-    text.lines().rev().filter_map(|l| l.split_once('\t')).find(|(k, p)| url_key(k) == key && std::path::Path::new(p).exists()).map(|(_, p)| p.to_string())
+    let text = std::fs::read_to_string(downloads_list(dir)).ok()?;
+    text.lines().rev().filter_map(|l| l.split_once('\t')).map(|(k, p)| (k, dir.join(p))).find(|(k, p)| url_key(k) == key && p.is_file()).map(|(_, p)| p.to_string_lossy().into_owned())
 }
 
-fn remember(url: &str, path: &str) {
+/// The file an earlier download of this URL left in `dir`. One left in recordings\ next to the
+/// program (before projects kept their downloads, or by a project not saved yet) is copied into
+/// `dir` first, so the project holds its own copy.
+pub(crate) fn downloaded(url: &str, dir: &Path) -> Option<String> {
+    if let Some(p) = listed(url, dir) {
+        return Some(p);
+    }
+    let shared = corroborate::home().join("recordings");
+    if crate::recordings::key(&shared) == crate::recordings::key(dir) {
+        return None;
+    }
+    let old = listed(url, &shared)?;
+    let name = Path::new(&old).file_name()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let to = dir.join(name);
+    if !to.is_file() {
+        // Through a temporary name, so a copy cut short is never taken for the file.
+        let part = dir.join(format!("{}.part", name.to_string_lossy()));
+        std::fs::copy(&old, &part).ok()?;
+        std::fs::rename(&part, &to).ok()?;
+    }
+    let p = to.to_string_lossy().into_owned();
+    remember(url, &p, dir);
+    Some(p)
+}
+
+fn remember(url: &str, path: &str, dir: &Path) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(downloads_list()) {
-        let _ = writeln!(f, "{}\t{path}", url.trim());
+    let p = Path::new(path);
+    let shown = match (p.parent(), p.file_name()) {
+        (Some(d), Some(f)) if crate::recordings::key(d) == crate::recordings::key(dir) => f.to_string_lossy().into_owned(),
+        _ => path.to_string(),
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(downloads_list(dir)) {
+        let _ = writeln!(f, "{}\t{shown}", url.trim());
     }
 }
 

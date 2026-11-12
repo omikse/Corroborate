@@ -231,6 +231,57 @@ fn frame_length(times: &[f64]) -> f64 {
     d[d.len() / 2]
 }
 
+/// The player's pictures: this wide and high (the picture fitted inside, black bars round it).
+pub const PLAY_W: usize = 320;
+pub const PLAY_H: usize = 180;
+
+/// The frames of the file's first video stream from `from` for `dur` seconds, each with its time
+/// on the same clock as `scan_picture`'s (ffmpeg seeks to the frame exactly), as `PLAY_W` by
+/// `PLAY_H` rgb pictures.
+pub fn frames_at(path: &str, from: f64, dur: f64, stop: &AtomicBool) -> Result<Vec<(f64, Vec<u8>)>, String> {
+    let from = from.max(0.0);
+    let filter = format!("scale={PLAY_W}:{PLAY_H}:force_original_aspect_ratio=decrease,pad={PLAY_W}:{PLAY_H}:(ow-iw)/2:(oh-ih)/2,showinfo,format=rgb24");
+    let mut child = crate::no_window(&mut Command::new("ffmpeg"))
+        .args(["-hide_banner", "-nostdin", "-loglevel", "info", "-ss", &format!("{from:.3}"), "-i", path, "-t", &format!("{dur:.3}"), "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", &filter, "-f", "rawvideo", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start ffmpeg (is it on PATH?): {e}"))?;
+    let stderr = child.stderr.take().ok_or("no ffmpeg log")?;
+    let log = std::thread::spawn(move || {
+        let mut times = Vec::new();
+        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.starts_with("[Parsed_showinfo") && line.contains(" n:") {
+                if let Some(t) = line.split_whitespace().find_map(|w| w.strip_prefix("pts_time:")).and_then(|v| v.parse::<f64>().ok()) {
+                    times.push(t);
+                }
+            }
+        }
+        times
+    });
+    let mut out = child.stdout.take().ok_or("no ffmpeg output")?;
+    let mut pics = Vec::new();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("stopped".into());
+        }
+        let mut buf = vec![0u8; PLAY_W * PLAY_H * 3];
+        if out.read_exact(&mut buf).is_err() {
+            break;
+        }
+        pics.push(buf);
+    }
+    let _ = child.wait();
+    let times = log.join().map_err(|_| "ffmpeg's log reader crashed")?;
+    if pics.is_empty() {
+        return Err("no picture here".into());
+    }
+    // The seek makes the first frame's time 0.
+    Ok(times.into_iter().zip(pics).map(|(t, p)| (from + t, p)).collect())
+}
+
 /// Reads every frame of the file's first video stream once (ffmpeg): scdet scores, the lasting
 /// check, frozen and black stretches, and the filmstrip. `progress` is told the seconds read.
 pub fn scan_picture(path: &str, stop: &AtomicBool, progress: &dyn Fn(f64)) -> Result<PictureScan, String> {
@@ -244,6 +295,9 @@ pub fn scan_picture(path: &str, stop: &AtomicBool, progress: &dyn Fn(f64)) -> Re
         .spawn()
         .map_err(|e| format!("could not start ffmpeg (is it on PATH?): {e}"))?;
     let stderr = child.stderr.take().ok_or("no ffmpeg log")?;
+    // The newest frame's time, for `progress` (f64 bits).
+    let read_to = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let to = read_to.clone();
     let log = std::thread::spawn(move || {
         let mut m = Meta::default();
         let mut last_error = String::new();
@@ -252,6 +306,9 @@ pub fn scan_picture(path: &str, stop: &AtomicBool, progress: &dyn Fn(f64)) -> Re
                 last_error = line.trim().to_string();
             }
             m.line(&line);
+            if let Some(t) = m.times.last() {
+                to.store(t.to_bits(), Ordering::Relaxed);
+            }
         }
         (m, last_error)
     });
@@ -276,8 +333,8 @@ pub fn scan_picture(path: &str, stop: &AtomicBool, progress: &dyn Fn(f64)) -> Re
             thumbs.push((k, buf.clone()));
             next_thumb = k + 30;
         }
-        if k % 300 == 0 {
-            progress(k as f64 / 30.0);
+        if k % 60 == 0 {
+            progress(f64::from_bits(read_to.load(Ordering::Relaxed)));
         }
     }
     let _ = child.wait();

@@ -5,6 +5,7 @@
 use super::*;
 use crate::drive::{out_dir, Drive};
 use corroborate::data::Data;
+use std::path::Path;
 
 /// Four shots of 3 s at 25 frames a second, cut at 3, 6 and 9 s, a two-frame white flash at
 /// 4.48 s, a 440 Hz tone all through, and a creation time in its metadata.
@@ -116,6 +117,95 @@ fn a_clip_falls_into_its_pieces() {
     assert!(back.graph.wires().iter().any(|w| w.from == c2), "the wire from a piece came back");
     let json = cut_detector_node::json(d.app(), c);
     assert!(json.contains("\"pieces\":[") && json.contains("by_lanes"), "{json}");
+}
+
+/// A long recording's filmstrip fits one texture: a picture a second of 44 minutes (2645
+/// pictures, 127 000 pixels in one row, which the graphics card refuses) goes in rows; past what
+/// rows hold, every so many pictures is kept.
+#[test]
+fn a_long_filmstrip_fits_a_texture() {
+    use corroborate::cuts::{THUMB_H, THUMB_W};
+    for (n, side) in [(2645, 8192), (2645, 16384), (1, 8192), (60_000, 8192), (500_000, 2048)] {
+        let (cols, rows, step) = cut_detector_node::strip_layout(n, side);
+        assert!(cols * THUMB_W <= side && rows * THUMB_H <= side, "{n} pictures in {cols} x {rows} fit {side}");
+        assert!(cols * rows >= n.div_ceil(step), "{n}: every kept picture has a place");
+        if n <= (side / THUMB_W) * (side / THUMB_H) {
+            assert_eq!(step, 1, "{n} pictures all kept in {side}");
+        }
+    }
+}
+
+/// The player: a cut plays from 2 s before it to 2 s after, picture and sound, and pauses there.
+/// The pictures it reads are on the same times as the run's (the cut's frame is among them), and
+/// the run's steps all end done, with how long it took.
+#[test]
+fn the_player_plays_a_cut() {
+    let clip = four_shots();
+    let mut d = Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: clip.to_string_lossy().into_owned() }, Pos2::new(20.0, 40.0));
+    let c = app.add(Kind::CutDetector { rows: Vec::new() }, Pos2::new(300.0, 40.0));
+    app.wire(s, "video", c, "video");
+    app.wire(s, "audio", c, "audio");
+    app.run();
+    assert!(d.wait_until(300.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "read");
+    let prog = d.app().nodes[c].state.lock().unwrap().cut_progress.clone();
+    println!("steps {:?}", prog.steps.iter().map(|s| (s.name.clone(), s.state)).collect::<Vec<_>>());
+    assert!(prog.steps.len() >= 4 && prog.steps.iter().all(|s| s.state == cut_detector_node::StepState::Done), "{prog:?}");
+    assert!(prog.took.is_some());
+    d.wait_until(30.0, |a| a.source_length(s).is_some());
+    d.frames(3);
+    let app = d.app();
+    let v = app.cut_view(c);
+    let k = v.cuts.iter().position(|x| x.on()).expect("a cut");
+    let t_cut = v.cuts[k].t_pic;
+    app.play_cut(c, k);
+    let clock = app.clock_of(c).unwrap();
+    assert_eq!(app.selected, Some(c));
+    assert!(app.ph.playing);
+    assert!((app.playhead_on(&clock).unwrap() - (t_cut - 2.0)).abs() < 1e-9);
+    assert!(d.wait_until(60.0, |a| a.cut_player_times(c).iter().any(|t| (t - t_cut).abs() < 0.001)), "the cut's frame read: {:?}", d.app().cut_player_times(c));
+    d.shot("cut_detector_player");
+    assert!(d.wait_until(30.0, |a| !a.ph.playing), "the play pauses at its end");
+    let end = d.app().playhead_on(&clock).unwrap();
+    assert!(end >= t_cut + 2.0 - 1e-6 && end < t_cut + 2.5, "paused at {end}");
+    d.shot("cut_detector_player_end");
+}
+
+/// A YouTube link in the SOURCER: the detector reads the copy the SOURCER downloaded into the
+/// project's recordings\ (listed in its downloads.txt), and waits for one while there is none.
+/// A copy left in recordings\ next to the program is copied into the project first.
+#[test]
+fn a_downloaded_video_is_read() {
+    let clip = four_shots();
+    let dir = out_dir().join("cut_url_project");
+    let _ = std::fs::remove_dir_all(&dir);
+    let rec = dir.join("recordings");
+    std::fs::create_dir_all(&rec).unwrap();
+    let url = "https://www.youtube.com/watch?v=cuttest0001";
+    let mut d = Drive::new();
+    let app = d.app();
+    app.project_path = Some(dir.join("project.txt"));
+    assert_eq!(recordings::key(&app.downloads_dir()), recordings::key(&rec));
+    let s = app.add(Kind::Sourcer { input: url.into() }, Pos2::new(20.0, 40.0));
+    let c = app.add(Kind::CutDetector { rows: Vec::new() }, Pos2::new(300.0, 40.0));
+    app.wire(s, "video", c, "video");
+    let job = app.cut_job(c, &HashMap::new()).unwrap();
+    assert!(job.url.is_some() && job.path.is_empty(), "no copy yet: the run waits for the SOURCER's");
+    // The copy listed by its name in the project's list.
+    std::fs::copy(&clip, rec.join("youtube cuttest0001.mp4")).unwrap();
+    std::fs::write(rec.join("downloads.txt"), format!("{url}\tyoutube cuttest0001.mp4\n")).unwrap();
+    let job = app.cut_job(c, &HashMap::new()).unwrap();
+    assert!(job.url.is_none() && recordings::key(Path::new(&job.path)) == recordings::key(&rec.join("youtube cuttest0001.mp4")), "{}", job.path);
+    // One in recordings\ next to the program only: copied into the project.
+    let other = "https://youtu.be/cuttest0002";
+    let shared = corroborate::home().join("recordings");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::copy(&clip, shared.join("youtube cuttest0002.mp4")).unwrap();
+    std::fs::write(shared.join("downloads.txt"), format!("{other}\t{}\n", shared.join("youtube cuttest0002.mp4").display())).unwrap();
+    let p = sourcer_node::downloaded("https://www.youtube.com/watch?v=cuttest0002", &rec).expect("found next to the program");
+    assert_eq!(recordings::key(Path::new(&p)), recordings::key(&rec.join("youtube cuttest0002.mp4")));
+    assert!(std::fs::read_to_string(rec.join("downloads.txt")).unwrap().contains("cuttest0002\tyoutube cuttest0002.mp4"));
 }
 
 /// A minute of a wandering tone over noise, at one loudness (an "original"), and a copy with 25 to 28 s taken out
@@ -309,4 +399,41 @@ fn jiku_shuffled_pieces_land_in_audio_match() {
     let placed: Vec<usize> = app.placed(c).iter().map(|p| p.n).collect();
     assert_eq!(placed, [2, 4, 1, 3]);
     d.shot("cut_detector_jiku");
+}
+
+/// A 44 minute YouTube video (the copy in app\recordings, if it is there): read to the end
+/// without a crash (its filmstrip of 2645 pictures goes in rows), the progress row while it runs,
+/// and the player on its first cut.
+/// Run: cargo test --profile fast --bin corroborate cut_tests::a_long_video -- --ignored --nocapture
+#[test]
+#[ignore = "needs the video youtube 5wypCQp11wo.mp4 in app recordings"]
+fn a_long_video() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("app").join("recordings").join("youtube 5wypCQp11wo.mp4");
+    assert!(file.is_file(), "{}", file.display());
+    let mut d = Drive::new();
+    let app = d.app();
+    let s = app.add(Kind::Sourcer { input: file.to_string_lossy().into_owned() }, Pos2::new(20.0, 40.0));
+    let c = app.add(Kind::CutDetector { rows: Vec::new() }, Pos2::new(300.0, 40.0));
+    app.wire(s, "video", c, "video");
+    app.wire(s, "audio", c, "audio");
+    app.run();
+    let t0 = Instant::now();
+    d.wait_until(20.0, |a| a.nodes[c].state.lock().unwrap().cut_progress.steps.iter().any(|s| s.frac > 0.05));
+    d.shot("cut_long_running");
+    assert!(d.wait_until(1800.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "read: {}", d.app().nodes[c].state.lock().unwrap().status);
+    println!("read in {:.0} s", t0.elapsed().as_secs_f64());
+    d.wait_until(120.0, |a| a.source_length(s).is_some());
+    d.frames(3);
+    let v = d.app().cut_view(c);
+    println!("{} cuts, {} on, {} thumbs", v.cuts.len(), v.cuts.iter().filter(|x| x.on()).count(), v.scan.as_ref().unwrap().thumbs.len());
+    for x in v.cuts.iter().take(12) {
+        println!("  {:8.2} {} {}", x.t_pic, if x.on() { "on " } else { "off" }, x.why);
+    }
+    d.shot("cut_long_done");
+    if let Some(k) = v.cuts.iter().position(|x| x.on()) {
+        d.app().play_cut(c, k);
+        d.wait_until(60.0, |a| !a.cut_player_times(c).is_empty());
+        d.frames(3);
+        d.shot("cut_long_player");
+    }
 }

@@ -15,6 +15,7 @@ use corroborate::modules::cut_detector as cd;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
 
 static RUNS: AtomicU64 = AtomicU64::new(1);
 
@@ -37,6 +38,10 @@ pub struct Scan {
 /// differs and is done).
 pub struct Job {
     pub path: String,
+    /// A video from the web whose copy its SOURCER is still downloading into `downloads`: the
+    /// run waits for it (`path` is then empty).
+    pub url: Option<String>,
+    pub downloads: std::path::PathBuf,
     pub video: bool,
     pub audio: bool,
     pub source: Option<(Shared, u64)>,
@@ -50,7 +55,66 @@ pub struct Other {
     pub key: String,
     pub name: String,
     pub path: String,
+    pub url: Option<String>,
     pub source: Option<(Shared, u64)>,
+}
+
+/// Where a step of a run is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StepState {
+    Waiting,
+    Working,
+    Done,
+    Failed,
+}
+
+/// One step of a run: its name, where it is, how far (0 to 1; below 0 when not known) and what
+/// went wrong.
+#[derive(Clone, Debug)]
+pub struct Step {
+    pub name: String,
+    pub state: StepState,
+    pub frac: f32,
+    pub note: String,
+}
+
+/// A run's steps, when it started and how long it took once it ended.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    pub steps: Vec<Step>,
+    pub started: Option<std::time::Instant>,
+    pub took: Option<f64>,
+}
+
+/// The steps of a run, by name.
+const DOWNLOAD: &str = "download";
+const FRAMES: &str = "every frame";
+const KEYFRAMES: &str = "keyframes";
+const SOUND_STEP: &str = "sound";
+const LEVELS: &str = "level and noise";
+
+/// The file of a video from the web once its SOURCER has a copy in `dir`: waits while the
+/// SOURCER's run downloads it.
+fn wait_copy(url: &str, dir: &std::path::Path, source: &Option<(Shared, u64)>, stop: &AtomicBool) -> Result<String, String> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err("stopped".into());
+        }
+        let ended = source.as_ref().map(|(st, before)| {
+            let s = st.lock().unwrap();
+            (s.run_id != *before && s.live, s.run_id != *before && s.done && !s.running, s.status.clone())
+        });
+        if let Some(p) = sourcer_node::listed(url, dir) {
+            return Ok(p);
+        }
+        match ended {
+            None => return Err("run the graph: its SOURCER downloads the video".into()),
+            Some((true, _, _)) => return Err("a live stream: the detector reads recordings and downloaded videos".into()),
+            Some((_, true, status)) => return Err(format!("its SOURCER kept no copy of it ({status})")),
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
 }
 
 /// A recording's sound at the audio match's rate: its source's decoded audio once that run is
@@ -83,9 +147,25 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
         }
     };
     {
+        let mut names: Vec<String> = Vec::new();
+        if job.url.is_some() {
+            names.push(DOWNLOAD.into());
+        }
+        if job.video {
+            names.extend([FRAMES.into(), KEYFRAMES.into()]);
+        }
+        if job.audio || !job.compare.is_empty() {
+            names.push(SOUND_STEP.into());
+        }
+        if job.audio {
+            names.push(LEVELS.into());
+        }
+        names.extend(job.compare.iter().map(|o| format!("compare: {}", o.name)));
+        let steps = names.into_iter().map(|name| Step { name, state: StepState::Waiting, frac: -1.0, note: String::new() }).collect();
         let mut s = state.lock().unwrap();
         s.running = true;
         s.status = "waiting for its turn to decode…".into();
+        s.cut_progress = Progress { steps, started: Some(std::time::Instant::now()), took: None };
     }
     std::thread::spawn(move || {
         let set = |f: &dyn Fn(&mut runtime::NodeState)| {
@@ -94,14 +174,57 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
                 f(&mut s);
             }
         };
-        let mut scan = Scan { path: job.path.clone(), ..Default::default() };
+        // A step's state, how far it has got, and what went wrong.
+        let step = |name: &str, st: StepState, frac: f32, note: &str| {
+            set(&|s| {
+                if let Some(k) = s.cut_progress.steps.iter_mut().find(|k| k.name == name) {
+                    k.state = st;
+                    k.frac = frac;
+                    k.note = note.to_string();
+                }
+            })
+        };
+        let end = |summary: String| {
+            set(&|s| {
+                s.status = summary.clone();
+                s.running = false;
+                s.done = true;
+                s.cut_progress.took = s.cut_progress.started.map(|t| t.elapsed().as_secs_f64());
+            })
+        };
+        let path = match &job.url {
+            None => job.path.clone(),
+            Some(url) => {
+                step(DOWNLOAD, StepState::Working, -1.0, "");
+                set(&|s| s.status = "waiting for the SOURCER to download the video…".into());
+                match wait_copy(url, &job.downloads, &job.source, &stop) {
+                    Ok(p) => {
+                        step(DOWNLOAD, StepState::Done, 1.0, &p);
+                        p
+                    }
+                    Err(e) if e == "stopped" => return,
+                    Err(e) => {
+                        step(DOWNLOAD, StepState::Failed, 0.0, &e);
+                        return end(e);
+                    }
+                }
+            }
+        };
+        // How long the recording is, for how far each step has got.
+        let total = corroborate::timebase::file_facts(&path).len.filter(|l| *l > 0.0);
+        let part = |secs: f64| total.map_or(-1.0, |l| (secs / l).clamp(0.0, 1.0) as f32);
+        let mut scan = Scan { path: path.clone(), ..Default::default() };
         if job.video {
             let turn = corroborate::ingest::decode_turn(&stop);
             if turn.is_none() {
                 return;
             }
             set(&|s| s.status = "reading every frame…".into());
-            let picture = cuts::scan_picture(&job.path, &stop, &|secs| set(&|s| s.status = format!("reading every frame: {secs:.0} s…")));
+            step(FRAMES, StepState::Working, 0.0, "");
+            let picture = cuts::scan_picture(&path, &stop, &|secs| {
+                set(&|s| s.status = format!("reading every frame: {secs:.0} s…"));
+                step(FRAMES, StepState::Working, part(secs), "");
+            });
             drop(turn);
             match picture {
                 Ok(p) => {
@@ -109,47 +232,88 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
                     scan.frame_s = p.frame_s;
                     scan.lanes.push(cuts::picture_lane(&p));
                     scan.thumbs = p.thumbs;
+                    step(FRAMES, StepState::Done, 1.0, "");
                 }
                 Err(e) if e == "stopped" => return,
-                Err(e) => scan.notes.push(format!("picture: {e}")),
+                Err(e) => {
+                    step(FRAMES, StepState::Failed, 0.0, &e);
+                    scan.notes.push(format!("picture: {e}"));
+                }
             }
-            match cuts::scan_packets(&job.path) {
+            step(KEYFRAMES, StepState::Working, -1.0, "");
+            match cuts::scan_packets(&path) {
                 Ok(p) => {
                     if scan.frame_s == 0.0 {
                         scan.frame_s = p.frame_s;
                     }
                     scan.lanes.push(cuts::packets_lane(&p));
+                    step(KEYFRAMES, StepState::Done, 1.0, "");
                 }
-                Err(e) => scan.notes.push(format!("keyframes: {e}")),
+                Err(e) => {
+                    step(KEYFRAMES, StepState::Failed, 0.0, &e);
+                    scan.notes.push(format!("keyframes: {e}"));
+                }
             }
         }
         if job.audio || !job.compare.is_empty() {
             set(&|s| s.status = "waiting for the sound…".into());
-            let Some(sound) = sound_of(&job.path, &job.source, &stop, &|secs| set(&|s| s.status = format!("waiting for the source's sound: {secs:.0} s decoded…"))) else { return };
+            step(SOUND_STEP, StepState::Working, -1.0, "");
+            let Some(sound) = sound_of(&path, &job.source, &stop, &|secs| {
+                set(&|s| s.status = format!("waiting for the source's sound: {secs:.0} s decoded…"));
+                step(SOUND_STEP, StepState::Working, if secs > 0.0 { part(secs) } else { -1.0 }, "");
+            }) else {
+                return;
+            };
             match sound {
                 Ok(a) => {
+                    step(SOUND_STEP, StepState::Done, 1.0, "");
                     if scan.len == 0.0 {
                         scan.len = a.len() as f64 / cuts::SOUND_SR;
                     }
                     if job.audio {
                         set(&|s| s.status = "sound level and background noise…".into());
+                        step(LEVELS, StepState::Working, -1.0, "");
                         scan.lanes.push(cuts::level_lane(&a));
                         scan.lanes.push(cuts::noise_lane(&a));
+                        step(LEVELS, StepState::Done, 1.0, "");
                     }
                     if !job.compare.is_empty() {
                         set(&|s| s.status = "fingerprinting the sound…".into());
                         let ours = corroborate::audio_match::Clip::new(a);
                         for o in &job.compare {
+                            let name = format!("compare: {}", o.name);
+                            step(&name, StepState::Working, -1.0, "");
                             set(&|s| s.status = format!("comparing with {}…", o.name));
-                            match sound_of(&o.path, &o.source, &stop, &|_| {}) {
+                            let theirs = match &o.url {
+                                None => o.path.clone(),
+                                Some(u) => match wait_copy(u, &job.downloads, &o.source, &stop) {
+                                    Ok(p) => p,
+                                    Err(e) if e == "stopped" => return,
+                                    Err(e) => {
+                                        step(&name, StepState::Failed, 0.0, &e);
+                                        scan.notes.push(format!("{}: {e}", o.name));
+                                        continue;
+                                    }
+                                },
+                            };
+                            match sound_of(&theirs, &o.source, &stop, &|_| {}) {
                                 None => return,
-                                Some(Ok(theirs)) => scan.lanes.push(cuts::compare_lane(&o.key, &o.name, &ours, &corroborate::audio_match::Clip::new(theirs))),
-                                Some(Err(e)) => scan.notes.push(format!("{}: {e}", o.name)),
+                                Some(Ok(theirs)) => {
+                                    scan.lanes.push(cuts::compare_lane(&o.key, &o.name, &ours, &corroborate::audio_match::Clip::new(theirs)));
+                                    step(&name, StepState::Done, 1.0, "");
+                                }
+                                Some(Err(e)) => {
+                                    step(&name, StepState::Failed, 0.0, &e);
+                                    scan.notes.push(format!("{}: {e}", o.name));
+                                }
                             }
                         }
                     }
                 }
-                Err(e) => scan.notes.push(format!("sound: {e}")),
+                Err(e) => {
+                    step(SOUND_STEP, StepState::Failed, 0.0, &e);
+                    scan.notes.push(format!("sound: {e}"));
+                }
             }
         }
         if stop.load(Ordering::Relaxed) {
@@ -159,11 +323,7 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
             scan.frame_s = 1.0 / 30.0;
         }
         let summary = if scan.notes.is_empty() { format!("{} lanes read", scan.lanes.len()) } else { scan.notes.join("; ") };
-        set(&|s| {
-            s.status = summary.clone();
-            s.running = false;
-            s.done = true;
-        });
+        end(summary);
         let scan = Arc::new(scan);
         set(&|s| s.cut = Some(scan.clone()));
     });
@@ -189,17 +349,94 @@ pub struct CutView {
     pub off_clock: usize,
 }
 
-/// What the canvas keeps between frames: the view (once a frame), the filmstrips and the
-/// threshold being dragged.
+/// What the canvas keeps between frames: the view (once a frame), the filmstrips, the
+/// threshold being dragged and the players.
 #[derive(Default)]
 pub struct CutUi {
     pub cache: RefCell<HashMap<NodeId, Rc<CutView>>>,
-    strips: HashMap<NodeId, (u64, TextureHandle)>,
+    strips: HashMap<NodeId, Strip>,
     drag: Option<(NodeId, usize, f32)>,
     /// Audio match nodes fed pieces, waiting for their Cut detectors' runs (`sync_cut_ports`
     /// starts them), and each Cut detector's pieces as last seen (a change starts them again).
     pub pending: std::collections::HashSet<NodeId>,
     sigs: HashMap<NodeId, String>,
+    players: HashMap<NodeId, Player>,
+    /// The cut each node's player is on (its place among the node's cuts).
+    focus: HashMap<NodeId, usize>,
+    /// Playing a cut: the node, and where on its recording the play stops.
+    pub until: Option<(NodeId, f64)>,
+}
+
+/// A filmstrip's pictures in one texture, in rows (a texture has a largest side, 8192 or 16384
+/// pixels: a picture a second of a long recording in one row would not fit). `step`: every how
+/// many pictures one is kept, when even rows would not fit.
+struct Strip {
+    run: u64,
+    tex: TextureHandle,
+    cols: usize,
+    rows: usize,
+    step: usize,
+}
+
+/// A player's pictures: those read for the window `want` of the recording `path`, each with its
+/// time, and why there are none.
+#[derive(Default)]
+struct Frames {
+    path: String,
+    want: (f64, f64),
+    round: u64,
+    busy: bool,
+    got: Vec<(f64, Vec<u8>)>,
+    note: String,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+/// A node's player: its pictures and the one on screen (its time and texture).
+#[derive(Default)]
+struct Player {
+    frames: Arc<Mutex<Frames>>,
+    tex: Option<(f64, TextureHandle)>,
+}
+
+/// Makes sure the pictures round `t` are read into `frames`: a few seconds ahead when playing,
+/// read again before the window runs out.
+fn ask_frames(frames: &Arc<Mutex<Frames>>, path: &str, t: f64, playing: bool, ctx: &egui::Context) {
+    {
+        let mut f = frames.lock().unwrap();
+        let ahead = if playing { 2.0 } else { 0.0 };
+        if f.path == path && t >= f.want.0 && t < f.want.1 - ahead {
+            return;
+        }
+        if let Some(s) = f.stop.take() {
+            s.store(true, Ordering::Relaxed);
+        }
+        let from = (t - 0.5).max(0.0);
+        let to = t + if playing { 8.0 } else { 2.0 };
+        f.path = path.to_string();
+        f.want = (from, to);
+        f.round += 1;
+        f.busy = true;
+        let stop = Arc::new(AtomicBool::new(false));
+        f.stop = Some(stop.clone());
+        let (round, me, path, ctx) = (f.round, frames.clone(), path.to_string(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = cuts::frames_at(&path, from, to - from, &stop);
+            let mut f = me.lock().unwrap();
+            if f.round != round {
+                return;
+            }
+            f.busy = false;
+            match r {
+                Ok(got) => {
+                    f.got = got;
+                    f.note.clear();
+                }
+                Err(e) if e == "stopped" => {}
+                Err(e) => f.note = e,
+            }
+            ctx.request_repaint();
+        });
+    }
 }
 
 /// A piece fed to another node: the source of the recording, where it sits in the file, its
@@ -275,23 +512,33 @@ impl App {
     /// What a run of cut detector `i` reads.
     pub(crate) fn cut_job(&self, i: NodeId, before: &HashMap<NodeId, u64>) -> Result<Job, String> {
         let src = self.cut_source(i)?;
-        let path = match &self.nodes[src].kind {
-            Kind::Sourcer { input } => match sourcer_node::input(input) {
-                Some(runtime::Input::File(p)) => p,
-                _ => return Err("files only for now: a stream or microphone is not read".into()),
-            },
-            _ => return Err("wire a SOURCER's audio or video into it".into()),
-        };
+        let downloads = self.downloads_dir();
+        let (path, url) = self.rec_path(src, &downloads)?;
         let video = self.graph.feeder(i, "video").is_some();
         let audio = self.graph.feeder(i, "audio").is_some();
         let source = before.get(&src).map(|&r| (self.nodes[src].state.clone(), r));
         let mut compare = Vec::new();
         for (key, f) in self.cut_compared(i) {
-            if let Some(p) = self.source_file(f) {
-                compare.push(Other { key, name: rec_name(self, f), path: p, source: before.get(&f).map(|&r| (self.nodes[f].state.clone(), r)) });
+            if let Ok((p, url)) = self.rec_path(f, &downloads) {
+                compare.push(Other { key, name: rec_name(self, f), path: p, url, source: before.get(&f).map(|&r| (self.nodes[f].state.clone(), r)) });
             }
         }
-        Ok(Job { path, video, audio, source, compare })
+        Ok(Job { path, url, downloads, video, audio, source, compare })
+    }
+
+    /// The file SOURCER `f` reads: a file, or the copy of a video from the web in `dir` (with
+    /// the link while there is no copy yet: the run waits for the SOURCER's download).
+    fn rec_path(&self, f: NodeId, dir: &std::path::Path) -> Result<(String, Option<String>), String> {
+        let Kind::Sourcer { input } = &self.nodes[f].kind else { return Err("wire a SOURCER's audio or video into it".into()) };
+        match sourcer_node::input(input) {
+            Some(runtime::Input::File(p)) => Ok((p, None)),
+            Some(runtime::Input::Url(u)) => Ok(match sourcer_node::listed(&u, dir) {
+                Some(p) => (p, None),
+                None => (String::new(), Some(u)),
+            }),
+            Some(runtime::Input::Mic(_)) => Err("a microphone is not read: record it to a file first".into()),
+            None => Err("its SOURCER has nothing to open".into()),
+        }
     }
 
     /// The recordings wired into node `i`'s `compare with` inputs: each lane's key and the source.
@@ -501,6 +748,70 @@ impl App {
             }
         }
         self.start_piece_matches();
+        self.cut_play_tick();
+    }
+
+    /// A cut being played pauses where its play ends (or stops being one when the play was
+    /// paused, or moved to another node).
+    fn cut_play_tick(&mut self) {
+        let Some((n, end)) = self.cut_ui.until else { return };
+        if !self.ph.playing || self.selected != Some(n) {
+            self.cut_ui.until = None;
+            return;
+        }
+        let Some(clock) = self.clock_of(n) else { return };
+        if self.playhead_on(&clock).is_some_and(|t| t >= end) {
+            // A slow frame may have carried it past: it stops on the end.
+            self.set_playhead(&clock, end);
+            self.ph.playing = false;
+            self.cut_ui.until = None;
+        }
+    }
+
+    /// Node `i`'s player goes to cut `k` (its place among the node's cuts) and plays it, from
+    /// `CUT_PLAY_S` before to `CUT_PLAY_S` after, picture and sound.
+    pub(crate) fn play_cut(&mut self, i: NodeId, k: usize) {
+        let v = self.cut_view(i);
+        let Some(c) = v.cuts.get(k) else { return };
+        self.cut_ui.focus.insert(i, k);
+        let t = c.t_pic.min(c.t_snd);
+        let end = c.t_pic.max(c.t_snd) + CUT_PLAY_S;
+        self.play_from(i, (t - CUT_PLAY_S).max(0.0));
+        self.cut_ui.until = Some((i, end));
+    }
+
+    /// Node `i`'s playhead to `t` on its recording, playing.
+    fn play_from(&mut self, i: NodeId, t: f64) {
+        self.pick_only(i);
+        if let Some(c) = self.clock_of(i) {
+            self.set_playhead(&c, t);
+        }
+        self.ph.playing = true;
+    }
+
+    /// Play or pause node `i`'s player.
+    fn play_pause_cut(&mut self, i: NodeId) {
+        if self.selected == Some(i) && self.ph.playing {
+            self.ph.playing = false;
+            self.cut_ui.until = None;
+            return;
+        }
+        self.pick_only(i);
+        self.cut_ui.until = None;
+        self.ph.playing = true;
+    }
+
+    /// Node `i`'s playhead to `t` on its recording, without playing.
+    fn seek_cut(&mut self, i: NodeId, t: f64) {
+        if let Some(c) = self.clock_of(i) {
+            self.set_playhead(&c, t);
+        }
+    }
+
+    /// The times of the pictures node `i`'s player has read.
+    #[cfg(test)]
+    pub(crate) fn cut_player_times(&self, i: NodeId) -> Vec<f64> {
+        self.cut_ui.players.get(&i).map_or(Vec::new(), |p| p.frames.lock().unwrap().got.iter().map(|f| f.0).collect())
     }
 
     /// Starts the Audio match nodes fed pieces once their Cut detectors have read their
@@ -663,7 +974,14 @@ pub fn json(app: &App, i: NodeId) -> String {
 // ---------------------------------------------------------------- on the canvas
 
 const NODE_W: f32 = 1000.0;
-const NOTE_H: f32 = 20.0;
+const NOTE_H: f32 = 24.0;
+/// The player: its height, and its picture's size.
+const PLAYER_H: f32 = 150.0;
+const PIC_W: f32 = 240.0;
+const PIC_H: f32 = 135.0;
+/// A cut plays from this long before it to this long after it, seconds.
+pub const CUT_PLAY_S: f64 = 2.0;
+const DONE: Color32 = Color32::from_rgb(140, 210, 120);
 const FILM_H: f32 = 34.0;
 const WAVE_H: f32 = 30.0;
 const LANE_H: f32 = 30.0;
@@ -696,6 +1014,7 @@ struct Geom {
     wave: f32,
     lanes: f32,
     ruler: f32,
+    player: f32,
     table: f32,
 }
 
@@ -703,14 +1022,24 @@ fn geom() -> Geom {
     let film = NOTE_H;
     let wave = film + FILM_H;
     let lanes = wave + WAVE_H;
-    Geom { film, wave, lanes, ruler: 0.0, table: 0.0 }
+    Geom { film, wave, lanes, ruler: 0.0, player: 0.0, table: 0.0 }
 }
 
 fn layout(n_lanes: usize) -> Geom {
     let mut g = geom();
     g.ruler = g.lanes + n_lanes as f32 * LANE_H;
-    g.table = g.ruler + RULER_H + 8.0;
+    g.player = g.ruler + RULER_H + 8.0;
+    g.table = g.player + PLAYER_H + 8.0;
     g
+}
+
+/// What a click in the player or on the rows asks for.
+enum Act {
+    Play(usize),
+    PlayPause,
+    Toggle(usize),
+    Seek(f64),
+    Hand(f64),
 }
 
 pub struct Look;
@@ -741,15 +1070,85 @@ impl crate::look::NodeLook for Look {
         let tx = |t: f64| plot_x.0 + (t / len) as f32 * (plot_x.1 - plot_x.0);
         let xt = |x: f32| ((x - plot_x.0) / (plot_x.1 - plot_x.0)) as f64 * len;
 
-        // The line on top: what it is doing, or what is missing.
-        let status = app.nodes[i].state.lock().unwrap().status.clone();
-        let mut note = v.problem.clone().unwrap_or(status);
-        if v.off_clock > 0 {
-            note.push_str(&format!("; {} events on another clock left out", v.off_clock));
+        // The line on top: each step of the run and how far it has got, then what it found; or
+        // what is missing.
+        let (status, prog, running) = {
+            let s = app.nodes[i].state.lock().unwrap();
+            (s.status.clone(), s.cut_progress.clone(), s.running)
+        };
+        let mut act: Option<Act> = None;
+        {
+            let mid = y(NOTE_H * 0.5);
+            let mut x = area.left();
+            // A dot (the step's state) when `dot` is given, then the text.
+            let mut put = |dot: Option<Color32>, text: String, col: Color32, tip: Option<String>| -> Rect {
+                if let Some(d) = dot {
+                    p.circle_filled(Pos2::new(x + 3.5 * z, mid), 3.5 * z, d);
+                    x += 11.0 * z;
+                }
+                let g = p.layout_no_wrap(text, font(11.0), col);
+                let r = Rect::from_min_size(Pos2::new(x, mid - g.size().y * 0.5), g.size());
+                p.galley(r.min, g, col);
+                if let Some(t) = tip.filter(|t| !t.is_empty()) {
+                    ui.interact(r, ui.id().with(("cut-step", i, x as i32)), Sense::hover()).on_hover_text(t);
+                }
+                x = r.right() + 10.0 * z;
+                r
+            };
+            if let Some(e) = &v.problem {
+                put(None, e.clone(), WARN, None);
+            } else if prog.steps.is_empty() {
+                put(None, if status.is_empty() { "not read yet: Run reads the recording".into() } else { status.clone() }, if running { TEXT } else { DIM }, None);
+            } else {
+                for s in &prog.steps {
+                    match s.state {
+                        StepState::Done => {
+                            put(Some(DONE), s.name.clone(), DONE, Some(s.note.clone()));
+                        }
+                        StepState::Failed => {
+                            put(Some(RED), s.name.clone(), RED, Some(s.note.clone()));
+                        }
+                        StepState::Waiting => {
+                            put(Some(OFF), s.name.clone(), DIM, None);
+                        }
+                        StepState::Working => {
+                            let pct = if s.frac >= 0.0 { format!(" {:.0}%", s.frac * 100.0) } else { String::new() };
+                            let r = put(Some(PLAYHEAD), format!("{}{pct}", s.name), TEXT, Some(status.clone()));
+                            // A bar under it: how far, or a block running along it when that is
+                            // not known.
+                            let bar = Rect::from_min_max(Pos2::new(r.left(), r.bottom() + 1.0 * z), Pos2::new(r.right(), r.bottom() + 3.0 * z));
+                            p.rect_filled(bar, 0.0, TRACK);
+                            if s.frac >= 0.0 {
+                                p.rect_filled(Rect::from_min_max(bar.min, Pos2::new(bar.left() + bar.width() * s.frac, bar.bottom())), 0.0, PLAYHEAD);
+                            } else {
+                                let ph = (ui.ctx().input(|i| i.time) * 0.8).fract() as f32;
+                                let w = bar.width() * 0.3;
+                                let x0 = bar.left() + (bar.width() + w) * ph - w;
+                                p.rect_filled(Rect::from_min_max(Pos2::new(x0.max(bar.left()), bar.top()), Pos2::new((x0 + w).min(bar.right()), bar.bottom())), 0.0, PLAYHEAD);
+                            }
+                        }
+                    }
+                }
+                let on = v.cuts.iter().filter(|c| c.on()).count();
+                let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+                match (prog.took, prog.started) {
+                    (Some(took), _) => {
+                        put(None, format!("done in {}", took_text(took)), DONE, None);
+                        put(None, format!("{on} of {} on · {}", plural(v.cuts.len(), "cut"), plural(v.pieces.len(), "piece")), TEXT, None);
+                    }
+                    (None, Some(t0)) => {
+                        put(None, sourcer_node::fmt_secs(t0.elapsed().as_secs_f64()), DIM, None);
+                    }
+                    _ => {}
+                }
+                if v.off_clock > 0 {
+                    put(None, format!("{} events on another clock left out", v.off_clock), WARN, None);
+                }
+            }
+            if running {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
         }
-        let on = v.cuts.iter().filter(|c| c.on()).count();
-        let head = if v.scan.is_some() { format!("{on} of {} cut{} on · {} piece{} · {note}", v.cuts.len(), if v.cuts.len() == 1 { "" } else { "s" }, v.pieces.len(), if v.pieces.len() == 1 { "" } else { "s" }) } else { note };
-        p.text(Pos2::new(area.left(), y(NOTE_H * 0.5)), Align2::LEFT_CENTER, head, font(11.0), DIM);
 
         // Labels on the left.
         let label = |text: &str, top: f32, h: f32, col: Color32| {
@@ -764,31 +1163,40 @@ impl crate::look::NodeLook for Look {
         p.rect_filled(film, 0.0, TRACK);
         if let Some(scan) = v.scan.as_ref().filter(|s| !s.thumbs.is_empty()) {
             let run = app.nodes[i].state.lock().unwrap().run_id;
-            let fresh = app.cut_ui.strips.get(&i).is_none_or(|(r, _)| *r != run);
+            let fresh = app.cut_ui.strips.get(&i).is_none_or(|s| s.run != run);
             if fresh {
                 let n = scan.thumbs.len();
-                let mut rgb = Vec::with_capacity(n * cuts::THUMB_W * cuts::THUMB_H * 3);
-                for row in 0..cuts::THUMB_H {
-                    for t in &scan.thumbs {
-                        rgb.extend_from_slice(&t.rgb[row * cuts::THUMB_W * 3..(row + 1) * cuts::THUMB_W * 3]);
+                let max_side = ui.ctx().input(|inp| inp.max_texture_side);
+                let (cols, rows, step) = strip_layout(n, max_side);
+                let (tw, th) = (cuts::THUMB_W, cuts::THUMB_H);
+                let mut rgb = vec![0u8; cols * tw * rows * th * 3];
+                for (k, t) in scan.thumbs.iter().step_by(step).enumerate() {
+                    let (cx, cy) = (k % cols, k / cols);
+                    for row in 0..th {
+                        let at = ((cy * th + row) * cols * tw + cx * tw) * 3;
+                        rgb[at..at + tw * 3].copy_from_slice(&t.rgb[row * tw * 3..(row + 1) * tw * 3]);
                     }
                 }
-                let img = ColorImage::from_rgb([n * cuts::THUMB_W, cuts::THUMB_H], &rgb);
+                let img = ColorImage::from_rgb([cols * tw, rows * th], &rgb);
                 let tex = ui.ctx().load_texture(format!("cut-strip-{i}"), img, TextureOptions::LINEAR);
-                app.cut_ui.strips.insert(i, (run, tex));
+                app.cut_ui.strips.insert(i, Strip { run, tex, cols, rows, step });
             }
-            if let Some((_, tex)) = app.cut_ui.strips.get(&i) {
+            if let Some(s) = app.cut_ui.strips.get(&i) {
                 let n = scan.thumbs.len();
+                let kept = n.div_ceil(s.step);
                 let tile = film.height() * cuts::THUMB_W as f32 / cuts::THUMB_H as f32;
                 let tiles = ((film.width() / tile).ceil() as usize).max(1);
+                // A tile's picture, inset by half a pixel so its neighbours do not bleed in.
+                let (du, dv) = (0.5 / (s.cols * cuts::THUMB_W) as f32, 0.5 / (s.rows * cuts::THUMB_H) as f32);
                 for k in 0..tiles {
                     let x0 = film.left() + k as f32 * tile;
                     let t = xt((x0 + tile * 0.5).min(film.right()));
-                    let near = scan.thumbs.partition_point(|th| th.t < t).min(n - 1);
+                    let near = (scan.thumbs.partition_point(|th| th.t < t).min(n - 1) / s.step).min(kept - 1);
                     let r = Rect::from_min_max(Pos2::new(x0, film.top()), Pos2::new((x0 + tile).min(film.right()), film.bottom()));
-                    let u0 = near as f32 / n as f32;
-                    let u1 = u0 + (r.width() / tile) / n as f32;
-                    p.image(tex.id(), r, Rect::from_min_max(Pos2::new(u0, 0.0), Pos2::new(u1, 1.0)), Color32::WHITE);
+                    let u0 = (near % s.cols) as f32 / s.cols as f32;
+                    let v0 = (near / s.cols) as f32 / s.rows as f32;
+                    let u1 = u0 + (r.width() / tile) / s.cols as f32;
+                    p.image(s.tex.id(), r, Rect::from_min_max(Pos2::new(u0 + du, v0 + dv), Pos2::new(u1 - du, v0 + 1.0 / s.rows as f32 - dv)), Color32::WHITE);
                 }
             }
         }
@@ -918,32 +1326,50 @@ impl crate::look::NodeLook for Look {
             }
         }
 
-        // Clicks on the plot: a cut switches; elsewhere a cut by hand.
+        // The cut the player is on, and the playhead, across the rows.
+        let focus = app.cut_ui.focus.get(&i).copied().filter(|k| *k < v.cuts.len());
+        if let Some(c) = focus.map(|k| &v.cuts[k]) {
+            let (x, top) = (tx(c.t_pic), y(g.film) - 1.0 * z);
+            p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 4.0 * z, top - 5.0 * z), Pos2::new(x + 4.0 * z, top - 5.0 * z), Pos2::new(x, top)], TEXT, Stroke::NONE));
+        }
+        let ph_t = if v.clock.is_empty() { None } else { app.playhead_on(&v.clock) };
+        if let Some(t) = ph_t.filter(|t| (0.0..=len).contains(t)) {
+            p.line_segment([Pos2::new(tx(t), y(g.film)), Pos2::new(tx(t), y(g.ruler + RULER_H))], Stroke::new(1.5 * z, PLAYHEAD));
+        }
+
+        // Clicks on the rows: a cut plays; elsewhere the playhead moves there, and a double click
+        // cuts there by hand.
         let plot = Rect::from_min_max(Pos2::new(plot_x.0, y(g.film)), Pos2::new(plot_x.1 - 12.0 * z, y(g.ruler)));
         let resp = ui.interact(plot, ui.id().with(("cut-plot", i)), Sense::click());
-        let near_cut = |x: f32| v.cuts.iter().filter(|c| (tx(c.t_pic) - x).abs().min((tx(c.t_snd) - x).abs()) <= 5.0 * z).min_by(|a, b| (tx(a.t_pic) - x).abs().total_cmp(&(tx(b.t_pic) - x).abs()));
+        let near_cut = |x: f32| v.cuts.iter().enumerate().filter(|(_, c)| (tx(c.t_pic) - x).abs().min((tx(c.t_snd) - x).abs()) <= 5.0 * z).min_by(|a, b| (tx(a.1.t_pic) - x).abs().total_cmp(&(tx(b.1.t_pic) - x).abs())).map(|(k, _)| k);
         if let Some(pos) = resp.hover_pos() {
-            let tip = match near_cut(pos.x) {
-                Some(c) => format!("cut at {} s, {}: {}\nclick to switch it {}", clock_text(c.t_pic), if c.on() { "on" } else { "off" }, cut_words(&v, c), if c.on() { "off" } else { "on" }),
-                None => format!("{} s: click to cut here by hand", clock_text(xt(pos.x).clamp(0.0, len))),
+            let tip = match near_cut(pos.x).map(|k| &v.cuts[k]) {
+                Some(c) => format!("cut at {} s, {}: {}\nclick to play it ({CUT_PLAY_S:.0} s either side); switch it in the player below", clock_text(c.t_pic), if c.on() { "on" } else { "off" }, cut_words(&v, c)),
+                None => format!("{} s: click to move the playhead here, double-click to cut here by hand", clock_text(xt(pos.x).clamp(0.0, len))),
             };
             resp.clone().on_hover_text_at_pointer(tip);
         }
-        if resp.clicked() && v.scan.is_some() {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                match near_cut(pos.x).cloned() {
-                    Some(c) => app.toggle_cut(i, &c),
-                    None => {
-                        // On the nearest frame.
-                        let t = (xt(pos.x).clamp(0.0, len) / v.frame_s).round() * v.frame_s;
-                        app.hand_cut(i, t);
-                    }
-                }
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let t = xt(pos.x).clamp(0.0, len);
+            if resp.double_clicked() && v.scan.is_some() && near_cut(pos.x).is_none() {
+                // On the nearest frame.
+                act = Some(Act::Hand((t / v.frame_s).round() * v.frame_s));
+            } else if resp.clicked() {
+                act = Some(match near_cut(pos.x) {
+                    Some(k) => Act::Play(k),
+                    None => Act::Seek(t),
+                });
             }
         }
 
-        // The ruler, with each piece's number in its middle.
+        // The ruler, with each piece's number in its middle; a click or drag moves the playhead.
         let ruler = full(g.ruler, RULER_H);
+        let rr = ui.interact(ruler, ui.id().with(("cut-ruler", i)), Sense::click_and_drag()).on_hover_text("click or drag to move the playhead");
+        if rr.clicked() || rr.dragged() {
+            if let Some(pos) = rr.interact_pointer_pos() {
+                act = Some(Act::Seek(xt(pos.x).clamp(0.0, len)));
+            }
+        }
         let step = crate::audio_match_node::tick_step(len);
         let mut q = 0.0;
         while q <= len + 1e-9 {
@@ -953,6 +1379,106 @@ impl crate::look::NodeLook for Look {
             q += step;
         }
         p.line_segment([Pos2::new(area.left(), y(g.ruler + RULER_H + 4.0)), Pos2::new(area.right(), y(g.ruler + RULER_H + 4.0))], Stroke::new(z, SEAM));
+
+        // The player: the picture at the playhead, every frame of it (read a few seconds at a
+        // time), and the sound through the program's sound output; buttons to go from cut to cut.
+        let pic = Rect::from_min_size(Pos2::new(area.left(), y(g.player)), Vec2::new(PIC_W * z, PIC_H * z));
+        p.rect_filled(pic, 2.0 * z, Color32::BLACK);
+        let playing = app.ph.playing && app.selected == Some(i);
+        let has_video = app.graph.feeder(i, "video").is_some();
+        let pic_note = match (&v.scan, ph_t) {
+            _ if !has_video => Some("no video wired: the sound plays alone".to_string()),
+            (None, _) => Some("the picture shows once Run has read the recording".to_string()),
+            (Some(_), None) => Some("no playhead yet".to_string()),
+            (Some(scan), Some(t)) => {
+                let Player { frames, tex } = app.cut_ui.players.entry(i).or_default();
+                ask_frames(frames, &scan.path, t, playing, ui.ctx());
+                let f = frames.lock().unwrap();
+                let pick = f.got.iter().rev().find(|(ft, _)| *ft <= t + 1e-3).or(f.got.first());
+                match pick {
+                    Some((ft, rgb)) => {
+                        let ft = *ft;
+                        let img = || ColorImage::from_rgb([cuts::PLAY_W, cuts::PLAY_H], rgb);
+                        match tex {
+                            Some((shown, h)) if *shown != ft => {
+                                h.set(img(), TextureOptions::LINEAR);
+                                *shown = ft;
+                            }
+                            Some(_) => {}
+                            None => *tex = Some((ft, ui.ctx().load_texture(format!("cut-play-{i}"), img(), TextureOptions::LINEAR))),
+                        }
+                        if let Some((_, h)) = tex {
+                            p.image(h.id(), pic, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                        }
+                        p.text(pic.left_bottom() + Vec2::new(4.0, -3.0) * z, Align2::LEFT_BOTTOM, clock_text(ft), FontId::monospace(10.0 * z), TEXT);
+                        // Far from the picture shown: the right one is being read.
+                        (f.busy && (t - ft).abs() > 0.5).then(|| "reading…".to_string())
+                    }
+                    None if f.busy => Some("reading the picture…".to_string()),
+                    None => Some(if f.note.is_empty() { "no picture here".to_string() } else { f.note.clone() }),
+                }
+            }
+        };
+        if let Some(n) = pic_note {
+            p.text(pic.center(), Align2::CENTER_CENTER, n, font(10.5), DIM);
+        }
+        let ctl = Rect::from_min_max(Pos2::new(pic.right() + 14.0 * z, pic.top()), Pos2::new(area.right(), y(g.player + PLAYER_H)));
+        let n_cuts = v.cuts.len();
+        let at = ph_t.unwrap_or(0.0);
+        let prev = match focus {
+            Some(k) => k.checked_sub(1),
+            None => v.cuts.iter().rposition(|c| c.t_pic < at - 0.01),
+        };
+        let next = match focus {
+            Some(k) => (k + 1 < n_cuts).then_some(k + 1),
+            None => v.cuts.iter().position(|c| c.t_pic > at + 0.01),
+        };
+        let focused = focus.map(|k| (k, &v.cuts[k]));
+        let words = focused.map(|(_, c)| cut_words(&v, c));
+        crate::look::area(ui, ctl, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(prev.is_some(), egui::Button::new("◀ cut").small()).on_hover_text("play the cut before").clicked() {
+                    act = prev.map(Act::Play);
+                }
+                let which = match focused {
+                    Some((k, _)) => format!("cut {} of {n_cuts}", k + 1),
+                    None if n_cuts == 0 => "no cuts".to_string(),
+                    None => format!("{n_cuts} cut{}", if n_cuts == 1 { "" } else { "s" }),
+                };
+                ui.label(egui::RichText::new(which).color(TEXT));
+                if ui.add_enabled(next.is_some(), egui::Button::new("cut ▶").small()).on_hover_text("play the cut after").clicked() {
+                    act = next.map(Act::Play);
+                }
+                ui.add_space(12.0);
+                if ui.small_button(if playing { "Pause" } else { "Play" }).on_hover_text("play or pause from the playhead (Space)").clicked() {
+                    act = Some(Act::PlayPause);
+                }
+                if let Some((k, c)) = focused {
+                    if ui.small_button("Play the cut again").on_hover_text(format!("from {CUT_PLAY_S:.0} s before it to {CUT_PLAY_S:.0} s after")).clicked() {
+                        act = Some(Act::Play(k));
+                    }
+                    let to = if c.on() { "Switch it off" } else { "Switch it on" };
+                    if ui.small_button(to).on_hover_text("saved with the project and written to the result file").clicked() {
+                        act = Some(Act::Toggle(k));
+                    }
+                }
+            });
+            let mono = |t: String, c: Color32| egui::RichText::new(t).monospace().color(c);
+            ui.label(mono(format!("playhead {} of {}", clock_text(at), clock_text(len)), DIM));
+            match (focused, &words) {
+                (Some((_, c)), Some(w)) => {
+                    let state = if c.on() { ("on", RED) } else { ("off", OFF) };
+                    ui.horizontal(|ui| {
+                        ui.label(mono(format!("at {} s ± {:.3}", clock_text(c.t_pic), c.error_s), TEXT));
+                        ui.label(egui::RichText::new(state.0).color(state.1).strong());
+                    });
+                    ui.add(egui::Label::new(egui::RichText::new(w).small().color(DIM)).wrap());
+                }
+                _ => {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("Click a cut on the rows, or ◀ cut and cut ▶, to play it: {CUT_PLAY_S:.0} s before it to {CUT_PLAY_S:.0} s after, picture and sound. Click the rows elsewhere to move the playhead; double-click to cut there by hand.")).small().color(DIM)).wrap());
+                }
+            }
+        });
 
         // The pieces.
         let cols: [(&str, f32); 6] = [("piece", 0.0), ("picture in the file", 46.0), ("sound in the file", 196.0), ("length", 346.0), ("cut before it", 416.0), ("time out", 0.0)];
@@ -1020,7 +1546,35 @@ impl crate::look::NodeLook for Look {
             let words = format!("{} by {}: {}{}", if placed[0].real { "real time" } else { "on the group's clock" }, placed[0].by, order.join(" "), if in_order { " (the file's order)" } else { " (true order: not the file's)" });
             p.text(Pos2::new(r.right(), r.bottom() + 2.0 * z), Align2::RIGHT_TOP, words, font(10.0), if in_order { DIM } else { RED });
         }
+
+        match act {
+            Some(Act::Play(k)) => app.play_cut(i, k),
+            Some(Act::PlayPause) => app.play_pause_cut(i),
+            Some(Act::Toggle(k)) => {
+                let c = v.cuts[k].clone();
+                app.toggle_cut(i, &c);
+            }
+            Some(Act::Seek(t)) => app.seek_cut(i, t),
+            Some(Act::Hand(t)) => app.hand_cut(i, t),
+            None => {}
+        }
     }
+}
+
+/// How long a run took: seconds with a tenth under a minute, else minutes and seconds.
+fn took_text(s: f64) -> String {
+    if s < 60.0 { format!("{s:.1} s") } else { sourcer_node::fmt_secs(s) }
+}
+
+/// How `n` filmstrip pictures go into one texture whose sides are at most `max_side` pixels:
+/// columns, rows, and every how many pictures one is kept (1 unless even rows would not fit).
+pub fn strip_layout(n: usize, max_side: usize) -> (usize, usize, usize) {
+    let per_row = (max_side / cuts::THUMB_W).max(1);
+    let fit = per_row * (max_side / cuts::THUMB_H).max(1);
+    let step = n.div_ceil(fit).max(1);
+    let kept = n.div_ceil(step).max(1);
+    let cols = kept.min(per_row);
+    (cols, kept.div_ceil(cols), step)
 }
 
 /// The cues behind a cut, short: lanes over their thresholds and confirmations.

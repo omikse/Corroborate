@@ -28,7 +28,14 @@ impl App {
             return None;
         }
         let i = self.selected?;
-        let src = if self.nodes[i].kind.is_source() { i } else { self.audio_source(i)?.0 };
+        let src = if self.nodes[i].kind.is_source() {
+            i
+        } else if matches!(self.nodes[i].kind, Kind::CutDetector { .. }) {
+            // A cut detector plays its recording's sound, wired as audio or only as video.
+            self.cut_source(i).ok()?
+        } else {
+            self.audio_source(i)?.0
+        };
         let t = self.playhead_on(&self.clock_of(src)?)?;
         let audio = self.nodes[src].state.lock().ok()?.source.audio.clone();
         Some((audio, t))

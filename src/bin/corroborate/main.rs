@@ -742,6 +742,7 @@ impl App {
                 taps: n.taps.clone(),
                 buses: self.audio_buses(i),
                 clock: self.clock_of(i).unwrap_or_default(),
+                downloads: self.downloads_dir(),
             };
             for (t, _) in self.graph.targets(i, "audio") {
                 let tn = &self.nodes[t];

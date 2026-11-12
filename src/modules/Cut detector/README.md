@@ -12,8 +12,9 @@ can drag, and any cut can be switched on or off, or put in by hand.
 
 Inputs:
 - `audio` and `video` (either or both, from one source): the recording to split. The node reads
-  the file itself (one extra ffmpeg pass over every frame). Files only for now: a stream or a
-  microphone is named in the status and not read.
+  the file itself (one extra ffmpeg pass over every frame): a file, or a video from the web (a
+  YouTube link) once its SOURCER has downloaded it into the project's `recordings\` (the run waits
+  for that download). A live stream or a microphone is named in the status and not read.
 - `time` (optional): when the recording starts, usually the SOURCER's time.
 - `compare with n` and `events n` grow as rows: other recordings of the same event (files, each
   read like this one), and moments from any node that confirm cuts (see Lanes).
@@ -91,15 +92,28 @@ the strongest among equals.
 
 ## On the canvas
 
-- The top line: how many cuts are on, how many pieces, and what the run is doing.
-- The filmstrip (a picture a second), the waveform (the source's), then the lanes: a lane's curve,
+- The top line: the run's steps (the SOURCER's download when it has one to wait for, every frame,
+  keyframes, sound, level and noise, each compare), each with a dot: grey waiting, yellow working
+  (with how far, in percent and a bar, or a moving block when that is not known), green done, red
+  failed (hover for why). Once all are done: how long it took, how many cuts are on, how many
+  pieces.
+- The filmstrip (a picture a second; a long recording's pictures go into one texture in rows, as
+  a texture has a largest side), the waveform (the source's), then the lanes: a lane's curve,
   its marks (strong when over the threshold) and its threshold as a dashed line. Drag the
   triangle at the right end of a lane up or down to change its threshold; the change is saved
   with the project and goes into the result file's setting changes.
 - Cuts are red lines down the rows, at the picture time over the picture rows and the sound time
   over the sound rows; a cut that is off is a grey dashed line. Hover a cut to read the cues
-  behind it. Click it to switch it; click anywhere else on the rows to cut there by hand (on the
-  nearest frame, marked "hand"). Every switch goes into the result file.
+  behind it; click it to play it. The playhead is a yellow line down the rows: click the rows
+  anywhere else, or click or drag the ruler, to move it there. Double-click the rows to cut there
+  by hand (on the nearest frame, marked "hand"). Every switch goes into the result file.
+- The player, under the ruler, to check each cut by eye and ear: the picture at the playhead
+  (every frame, read a few seconds at a time at 320 by 180), the sound through the program's sound
+  output (the node is selected, so its recording's sound plays, as Play on a SOURCER does).
+  `◀ cut` and `cut ▶` go to the cut before or after and play it, from 2 s before it to 2 s after,
+  then pause; the cut it is on is marked by a white triangle over the filmstrip. Next to them: Play
+  or Pause from the playhead (Space too), Play the cut again, and Switch it off (or on); under them
+  where the playhead is, the cut's time with its error, on or off, and the cues behind it.
 - The pieces table: where each piece's picture and sound sit in the file, its length, the cues
   behind the cut before it, and its time out.
 - The placed strip, once pieces go into an Audio match: each piece where it was placed (on real
@@ -125,7 +139,14 @@ error, whether the lanes put it on, the switch, the cues in words) and the piece
   every second) cut and joined without re-encoding: the join is the one keyframe off the rhythm.
 - `cargo test --profile fast --bin corroborate cut_tests`: the node headless on that clip: four
   pieces, their times and lengths, a cut switched off, a hand cut, saved and opened again with its
-  outputs and wires.
+  outputs and wires. The player: a cut plays from 2 s before to 2 s after and pauses there, the
+  pictures it reads are on the run's times (the cut's frame among them), every step of the run
+  ends done. A YouTube link: the copy in the project's `recordings\` is read, the run waits while
+  there is none, a copy next to the program is copied into the project. A filmstrip of 44 minutes
+  (2645 pictures) fits a texture in rows (in one row it is 127 000 pixels wide, which the graphics
+  card refuses: the program crashed on such a video once its run ended).
+- `cargo test --profile fast --bin corroborate cut_tests::a_long_video -- --ignored --nocapture`:
+  a 44 minute YouTube video, when its copy is in `app\recordings`.
 
 - `cargo test --profile fast --lib cuts` also: the noise estimate under clicks (10 dB more noise
   reads 10 ± 2.5 dB more), a noise step and a level step marked on their moment.

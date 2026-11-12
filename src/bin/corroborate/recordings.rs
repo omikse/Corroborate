@@ -218,6 +218,12 @@ impl App {
         self.project_path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf)
     }
 
+    /// Where a SOURCER downloads a video from the web: the project's recordings\ folder, or
+    /// recordings\ next to the program while the project has no folder (not saved yet).
+    pub(crate) fn downloads_dir(&self) -> PathBuf {
+        self.project_dir().map_or_else(|| corroborate::home().join("recordings"), |d| d.join("recordings"))
+    }
+
     /// The file a SOURCER's text names, absolute; None for URLs, microphones and empty boxes.
     pub(crate) fn file_of(input: &str) -> Option<PathBuf> {
         match sourcer_node::input(input)? {
