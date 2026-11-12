@@ -187,8 +187,20 @@ devices may not.
   years in about 20 s), [ENF_extraction](https://github.com/geokarant/ENF_extraction) (MATLAB:
   STFT, Capon, ESPRIT, MUSIC estimators).
 
+## Kept
+
+Its hum track (readings, runs, the grid's frequency) and the dating against the grid logs are kept
+in the project's `cache\`, under its SOURCER's sound (its file's size and print), its grid data
+file (and when that changed) and the time and place wired in. Opening the project loads them (teal
+dot; the area is worked out again from the grid's frequency), without reading the sound. A changed
+grid data file makes it stale: it reads its SOURCER's sound again (from the kept sound, without
+decoding) and dates anew.
+
 ## Limits
 
 - One nominal frequency per run; a recording that moves between grids is not handled.
+- The grid log store is not part of what its kept result is known by: after adding grid logs, Run
+  again on the node (right-click) dates anew. Dating anew reads the hum again too: the hum track is
+  kept with its dating, not alone.
 - The drift itself (matching against grid-frequency logs to date a recording) is measured and
   shown, not yet used.

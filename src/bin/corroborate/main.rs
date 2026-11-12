@@ -37,6 +37,8 @@ mod groups_tests;
 mod cut_tests;
 #[cfg(test)]
 mod jobs_tests;
+#[cfg(test)]
+mod kept_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
@@ -45,6 +47,7 @@ mod groups;
 mod evidence;
 mod jobs;
 mod queue;
+mod kept;
 mod playhead;
 mod sound;
 mod trace;
@@ -95,6 +98,7 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2,
 };
 use nodes::Kind;
+use queue::JobAct;
 use corroborate::area::{robinson, Area, GridMap, WorldMask, COLS, ROBINSON_ASPECT, ROWS};
 use runtime::{Input, NodeState, Shared};
 use std::collections::HashMap;
@@ -721,6 +725,8 @@ impl App {
         for r in self.queue.recs.values_mut() {
             r.ran = None;
         }
+        // Without the kept results.
+        self.queue.fresh = (0..self.nodes.len()).filter(|&i| self.role(i).is_some()).collect();
         self.stopped = false;
         self.save_project();
         let keys = self.job_keys();
@@ -1051,7 +1057,7 @@ impl App {
                 group_act = Some(1);
             }
             let job_busy = self.job_view(i).map(|j| matches!(j.state, jobs::JobState::Queued | jobs::JobState::Working | jobs::JobState::Live));
-            let mut job_act: Option<bool> = None;
+            let mut job_act: Option<JobAct> = None;
             let label = &mut self.nodes[i].label;
             resp.context_menu(|ui| {
                 ui.horizontal(|ui| {
@@ -1060,11 +1066,19 @@ impl App {
                 });
                 if let Some(busy) = job_busy {
                     if ui.button("Run (▶)").on_hover_text("run this node and what it needs").clicked() {
-                        job_act = Some(true);
+                        job_act = Some(JobAct::Run);
+                        ui.close();
+                    }
+                    if ui.button("Run again").on_hover_text("work this node out anew, without its kept result (what it needs runs only if it is not up to date)").clicked() {
+                        job_act = Some(JobAct::Again);
                         ui.close();
                     }
                     if busy && ui.button("Cancel").on_hover_text("stop this node; what needs it ends too").clicked() {
-                        job_act = Some(false);
+                        job_act = Some(JobAct::Cancel);
+                        ui.close();
+                    }
+                    if ui.button("Forget kept result").on_hover_text("delete this node's kept result from the project's cache\\ folder (what is shown stays until it runs again)").clicked() {
+                        job_act = Some(JobAct::Forget);
                         ui.close();
                     }
                 }
@@ -1144,8 +1158,10 @@ impl App {
                 break;
             }
             match job_act {
-                Some(true) => self.run_node(i),
-                Some(false) => self.cancel_job(i),
+                Some(JobAct::Run) => self.run_node(i),
+                Some(JobAct::Again) => self.run_node_again(i),
+                Some(JobAct::Cancel) => self.cancel_job(i),
+                Some(JobAct::Forget) => self.forget_kept(i),
                 None => {}
             }
             match clock_act {

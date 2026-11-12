@@ -454,18 +454,45 @@ impl SourceState {
     pub fn push_audio(&mut self, x: &[f32]) {
         self.audio.lock().unwrap().extend(x.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16));
         for &v in x {
-            let (lo, hi, n) = &mut self.acc;
-            if *n == 0 {
-                (*lo, *hi) = (v, v);
-            } else {
-                *lo = lo.min(v);
-                *hi = hi.max(v);
-            }
-            *n += 1;
-            if *n == PEAK {
-                self.peaks.push([*lo, *hi]);
-                *n = 0;
-            }
+            self.peak(v);
+        }
+    }
+
+    /// Sound as it is kept (16 bit): the same as `push_audio` without converting it twice.
+    pub fn push_i16(&mut self, x: &[i16]) {
+        self.audio.lock().unwrap().extend_from_slice(x);
+        for &v in x {
+            self.peak(v as f32 / 32767.0);
+        }
+    }
+
+    fn peak(&mut self, v: f32) {
+        let (lo, hi, n) = &mut self.acc;
+        if *n == 0 {
+            (*lo, *hi) = (v, v);
+        } else {
+            *lo = lo.min(v);
+            *hi = hi.max(v);
+        }
+        *n += 1;
+        if *n == PEAK {
+            self.peaks.push([*lo, *hi]);
+            *n = 0;
+        }
+    }
+
+    /// Whether ffprobe found pictures (they are read when asked).
+    pub fn has_video(&self) -> bool {
+        self.pictures.is_some()
+    }
+
+    /// What `start_side` finds out, from a kept result instead of ffprobe.
+    pub fn restore_side(&mut self, opened: String, meta: Vec<(String, String)>, video: bool, stop: Arc<AtomicBool>) {
+        self.meta = meta;
+        if video {
+            self.pictures = Some((opened, stop));
+        } else {
+            self.video_note = "no video stream".into();
         }
     }
 

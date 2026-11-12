@@ -36,28 +36,43 @@ In the workbench: right-click (or **+ Add node**) to add nodes, drag from a dot 
 Every node that does work (SOURCER, Cut detector, Audio match, ENF, Planes, plugins) has a state
 dot before its name: grey not run, orange stale (it ran on something that has changed since), a
 turning grey ring while queued (waiting for another node or a turn), a turning yellow ring while
-working, green done, red failed, brown cancelled, a pulsing red dot while live. Hover it for the
-step and percent, what it waits for, how long it took or why it failed. **▶** in its title bar's
-top right corner runs it and every node it needs that is not up to date (nothing after it); while
-it is queued or working it is a **■**, which cancels it (also on its right-click menu: Run, Cancel).
+working, green done, teal kept (loaded from what an earlier run kept, not worked out again), red
+failed, brown cancelled, a pulsing red dot while live. Hover it for the step and percent, what it
+waits for, how long it took or why it failed. **▶** in its title bar's top right corner runs it and
+every node it needs that is not up to date (nothing after it); while it is queued or working it is
+a **■**, which cancels it. Its right-click menu: Run, Run again (this node anew, without its kept
+result), Cancel, Forget kept result.
 
 One queue for the project (docs/run-queue/plan.md, stage 2): a node starts once what it needs is
 done and a turn of its kind is free, in the order asked. A Cut detector needs the SOURCERs it reads;
 an Audio match needs the SOURCERs of its files and the Cut detectors whose pieces it takes; ENF,
 Planes and plugins read a SOURCER's sound as it decodes, so they run with it (asking for one runs
-its SOURCER again: results are not kept between runs yet, stage 3). A node that fails or is
+its SOURCER again, from its kept sound when it has one). A node that fails or is
 cancelled ends what needs it at once ("needs 'phone 3', which failed"), and nothing else. Turns:
 2 downloads and half the processor cores' worth of decoding and heavy work at once, set in
 `settings\run.txt`.
 
+What a node works out is kept in the project's `cache\` folder (stage 3), one file per result,
+named by what went into it: the node's kind and method version, its settings that change what it
+works out, and what it reads (a file by its size and print, a web video by its link). Kept: a
+SOURCER's decoded sound (16 kHz, 16 bit: about 85 MB for 44 minutes) with its waveform, a Cut
+detector's scan, an Audio match's result, an ENF's hum track and dating. Opening a project loads
+them at once (nothing decodes; the project opens stopped), and a node whose result is kept loads
+it instead of working it out (a SOURCER reads its kept sound for the ENF, Planes or plugins on
+it). A changed file makes its SOURCER and what follows stale. Two SOURCERs on the same file share
+one kept sound. A live source, Planes and plugins are not kept. Deleting `cache\` only costs the
+time to work things out again; an untitled project keeps its results in `cache\` next to the
+program.
+
 The top bar: the project menu (its button is the project's name, with • while it has unsaved
 changes); **▶ Run** (every node that is not up to date; lit while anything runs), **■ Stop**
-(cancel everything queued or working), **↻ Run again** (everything anew, even what is up to date)
+(cancel everything queued or working), **↻ Run again** (everything anew, without the kept results)
 and **Auto** (on by default: a change makes what it touches stale and runs it again half a second
 after the last change; a project opens stopped, and Auto waits for Run); **Queue**, with counts
 ("2 working · 1 queued", after a run "5 done · 1 failed"), which opens the list of every node that
 does work, in the order asked: its state, step and percent (with a bar), what it waits for, how
-long it took or why it failed, and ▶ or ■ to run or cancel it; **+ Add node**, which
+long it took or why it failed, and ▶ or ■ to run or cancel it, and under it how much is kept,
+with **Forget all kept**; **+ Add node**, which
 also has **Live device** (this computer's microphones and capture cards, asked of ffmpeg when it
 opens) and **Value of a type**; **Types**, every data type that travels on wires; **Arrange**; and a warning when recordings are missing or changed,
 which opens their list. Messages are at the bottom of the canvas, over the line of keys.

@@ -6,7 +6,7 @@
 //! What a job needs comes from its wires:
 //! - a SOURCER needs nothing; it downloads (a turn to download) and decodes (a turn to decode);
 //! - ENF, Planes and plugins read a SOURCER's sound as it decodes: they ride on its run, so asking
-//!   for one runs its SOURCER again (nothing is kept between runs yet: stage 3);
+//!   for one runs its SOURCER again (from its kept sound when it has one, `kept.rs`);
 //! - a Cut detector needs the SOURCERs of its recording and of what it compares with;
 //! - an Audio match needs the SOURCERs of its files and the Cut detectors whose pieces it takes.
 //!
@@ -17,10 +17,12 @@
 //! touches runs again. What was cancelled is left alone until Run or ▶.
 
 use crate::jobs::{End, JobState};
+use crate::kept;
 use crate::runtime::{self, Job};
 use crate::{sourcer_node, App, Kind, NodeId};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,12 +42,23 @@ pub struct Queue {
     /// The programs' settings they last started with (programs join the queue in stage 4).
     programs: Option<u64>,
     asks: u64,
+    /// Jobs to work out anew, without their kept results (Run again), until they start.
+    pub fresh: HashSet<NodeId>,
 }
 
 impl Default for Queue {
     fn default() -> Self {
-        Queue { waiting: Vec::new(), recs: HashMap::new(), auto: true, keys: HashMap::new(), seen: None, programs: None, asks: 0 }
+        Queue { waiting: Vec::new(), recs: HashMap::new(), auto: true, keys: HashMap::new(), seen: None, programs: None, asks: 0, fresh: HashSet::new() }
     }
+}
+
+/// What a node's right-click menu asks of its job.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JobAct {
+    Run,
+    Again,
+    Cancel,
+    Forget,
 }
 
 /// One job's record in the queue.
@@ -62,6 +75,8 @@ pub struct Rec {
     pub order: u64,
     /// Ended without starting: cancelled while queued, or a need failed or was cancelled.
     pub ended: Option<(JobState, String)>,
+    /// Where its run's result is kept once it is done (None: it is not kept).
+    pub keep: Option<PathBuf>,
 }
 
 /// How a job runs.
@@ -165,7 +180,15 @@ impl App {
         let n = &self.nodes[i];
         let feeder = |port: &str| self.graph.feeder(i, port).map(|(f, o)| format!("{f}.{o}")).unwrap_or_default();
         match &n.kind {
-            Kind::Sourcer { input } => format!("{input}|{}", self.clock_of(i).unwrap_or_default()),
+            // A file by its size and print too: a changed file makes it stale (read once per size
+            // and modified time).
+            Kind::Sourcer { input } => {
+                let print = match sourcer_node::input(input) {
+                    Some(runtime::Input::File(p)) => kept::print_of(&p).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                format!("{input}|{}|{print}", self.clock_of(i).unwrap_or_default())
+            }
             Kind::Planes => String::new(),
             Kind::Enf { grid } => {
                 // A new grid log (the file or folder changes) makes the ENF stale.
@@ -238,7 +261,7 @@ impl App {
             return false;
         }
         let s = self.nodes[i].state.lock().unwrap();
-        !s.running && crate::jobs::view(&s).state == JobState::Done
+        !s.running && crate::jobs::view(&s).state.has_result()
     }
 
     /// Job `i` ended badly (failed or cancelled) and is not asked for again: how, in words.
@@ -271,6 +294,18 @@ impl App {
             self.restart(i);
         }
         if self.queue.waiting.contains(&i) || (!force && self.up_to_date(i, keys)) {
+            return;
+        }
+        // A kept result is loaded instead. A Cut detector's or an ENF's kept key is known from
+        // the files it reads; an Audio match's from its pieces, once what cuts them is there. A
+        // SOURCER reads its kept sound when it starts (the ENF, Planes or plugins riding on it
+        // read it then).
+        let now = match role {
+            Role::Source => false,
+            Role::Rider(_) => true,
+            Role::Work => matches!(self.nodes[i].kind, Kind::CutDetector { .. }) || self.needs(i).iter().all(|&n| self.up_to_date(n, keys)),
+        };
+        if now && self.try_kept(i, keys) {
             return;
         }
         for n in self.needs(i) {
@@ -372,14 +407,22 @@ impl App {
 
     /// Starts job `i` (its needs are done): a SOURCER with the riders queued on it.
     fn start_job(&mut self, i: NodeId, keys: &HashMap<NodeId, u64>) {
+        // Kept: loaded, not worked out (a SOURCER reads its kept sound below, for its riders).
+        if self.role(i) != Some(Role::Source) && self.try_kept(i, keys) {
+            return;
+        }
+        let fresh = self.queue.fresh.remove(&i);
         self.queue.waiting.retain(|&w| w != i);
         let stop = Arc::new(AtomicBool::new(false));
         let key = keys.get(&i).copied();
+        let keep = self.kept_path(i);
+        let from_kept = keep.clone().filter(|p| self.role(i) == Some(Role::Source) && !fresh && p.exists());
         {
             let r = self.rec(i);
             r.ran = key;
             r.stop = Some(stop.clone());
             r.ended = None;
+            r.keep = if from_kept.is_some() { None } else { keep };
         }
         let state = self.nodes[i].state.clone();
         match &self.nodes[i].kind {
@@ -409,6 +452,7 @@ impl App {
                     buses: self.audio_buses(i),
                     clock: self.clock_of(i).unwrap_or_default(),
                     downloads: self.downloads_dir(),
+                    from_kept,
                 };
                 let riders: Vec<NodeId> = self.queue.waiting.iter().copied().filter(|&r| self.role(r) == Some(Role::Rider(Some(i)))).collect();
                 for &r in &riders {
@@ -421,11 +465,14 @@ impl App {
                 }
                 for r in riders {
                     self.queue.waiting.retain(|&w| w != r);
+                    self.queue.fresh.remove(&r);
                     let k = keys.get(&r).copied();
+                    let keep = self.kept_path(r);
                     let rec = self.rec(r);
                     rec.ran = k;
                     rec.stop = Some(stop.clone());
                     rec.ended = None;
+                    rec.keep = keep;
                 }
                 runtime::start(job);
             }
@@ -534,7 +581,222 @@ impl App {
             }
         }
         self.pump(&keys);
+        self.keep_results();
         self.queue.keys = keys;
+    }
+
+    // ---------------- kept results (stage 3, `kept.rs`)
+
+    /// The project's `cache\` folder; an untitled project's is next to the program (in a test it
+    /// keeps nothing).
+    pub(crate) fn cache_dir(&self) -> Option<PathBuf> {
+        match self.project_dir() {
+            Some(d) => Some(d.join("cache")),
+            None if cfg!(test) => None,
+            None => Some(corroborate::home().join("cache")),
+        }
+    }
+
+    /// Job `i`'s kept file's name now: from its kept key (`kept.rs`). None: it is not kept (a
+    /// live source, Planes, plugins), or what it reads cannot be read.
+    pub(crate) fn kept_name(&self, i: NodeId) -> Option<String> {
+        let print = |p: &str| kept::print_of(p);
+        match &self.nodes[i].kind {
+            Kind::Sourcer { input } => {
+                let what = match sourcer_node::input(input)? {
+                    runtime::Input::File(p) => format!("file|{}", print(&p)?),
+                    runtime::Input::Url(u) if sourcer_node::kind_of(&u).contains("yt-dlp") => format!("link|{u}"),
+                    _ => return None,
+                };
+                Some(kept::name("sourcer", &format!("v{}|{what}", kept::SOURCER_V)))
+            }
+            Kind::CutDetector { .. } => {
+                let j = self.cut_job(i).ok()?;
+                let mut what = format!("v{}|video {}|audio {}|{}", kept::CUT_V, j.video, j.audio, print(&j.path)?);
+                for o in &j.compare {
+                    what.push_str(&format!("|{}<{}", o.key, print(&o.path)?));
+                }
+                Some(kept::name("cut", &what))
+            }
+            Kind::AudioMatch { .. } => {
+                let (files, other) = self.audio_match_inputs(i);
+                if files.len() < 2 {
+                    return None;
+                }
+                let mut what = format!("v{}|{other:?}", kept::MATCH_V);
+                for w in &files {
+                    let range = w.range.map(|(a, b)| format!("{a:.3}-{b:.3}")).unwrap_or_default();
+                    what.push_str(&format!("|{}|{}|{}|{range}", w.label, w.clock, print(&w.path)?));
+                }
+                Some(kept::name("match", &what))
+            }
+            Kind::Enf { .. } => {
+                let Some(Role::Rider(Some(s))) = self.role(i) else { return None };
+                let sound = self.kept_name(s)?;
+                Some(kept::name("enf", &format!("v{}|{sound}|{}", kept::ENF_V, self.own_key(i))))
+            }
+            _ => None,
+        }
+    }
+
+    /// Where job `i`'s result is kept (None: it is not kept).
+    pub(crate) fn kept_path(&self, i: NodeId) -> Option<PathBuf> {
+        Some(self.cache_dir()?.join(self.kept_name(i)?))
+    }
+
+    /// Loads job `i`'s kept result into its state, when there is one (not for a SOURCER: it reads
+    /// its kept sound as it starts, `start_job`), and not when it is to be worked out anew.
+    fn try_kept(&mut self, i: NodeId, keys: &HashMap<NodeId, u64>) -> bool {
+        if self.queue.fresh.contains(&i) || self.role(i) == Some(Role::Source) {
+            return false;
+        }
+        let Some(path) = self.kept_path(i) else { return false };
+        if !path.exists() {
+            return false;
+        }
+        let state = self.nodes[i].state.clone();
+        let enf = matches!(self.nodes[i].kind, Kind::Enf { .. }).then(|| self.enf_job(i));
+        let mut s = state.lock().unwrap();
+        let rev = s.outbox_rev;
+        let loaded = match &self.nodes[i].kind {
+            Kind::CutDetector { .. } => kept::read(&path, "cut").and_then(|b| kept::get_scan(&b)).map(|(scan, status)| {
+                s.reset();
+                s.cut = Some(Arc::new(scan));
+                s.status = status;
+            }),
+            Kind::AudioMatch { .. } => kept::read(&path, "match").and_then(|b| kept::get_match(&b)).map(|(found, stages, status)| {
+                s.reset();
+                s.found = Some(Arc::new(found));
+                s.matching = stages;
+                s.status = status;
+            }),
+            Kind::Enf { .. } => kept::read(&path, "enf").and_then(|b| {
+                s.reset();
+                kept::get_enf(&b, &mut s)?;
+                crate::enf_node::restore(enf.as_ref()?, &mut s);
+                Some(())
+            }),
+            _ => None,
+        };
+        if loaded.is_none() {
+            // A kept file that does not read is worked out again (and written anew).
+            return false;
+        }
+        s.run_id = kept::run_id();
+        s.outbox_rev = rev + 1;
+        s.done = true;
+        s.progress = crate::jobs::Progress::new(Vec::<String>::new());
+        s.progress.finish(End::Kept);
+        drop(s);
+        self.queue.waiting.retain(|&w| w != i);
+        self.queue.asks += 1;
+        let (order, key) = (self.queue.asks, keys.get(&i).copied());
+        let r = self.rec(i);
+        (r.ran, r.tried, r.stop, r.ended, r.keep) = (key, key, None, None, None);
+        r.asked = Some(Instant::now());
+        r.order = order;
+        true
+    }
+
+    /// Keeps what ended done since the last frame: each job's result in its kept file (written on
+    /// a thread of its own).
+    fn keep_results(&mut self) {
+        let ids: Vec<NodeId> = self.queue.recs.iter().filter(|(_, r)| r.keep.is_some()).map(|(&i, _)| i).collect();
+        for i in ids {
+            let state = self.nodes[i].state.clone();
+            let s = state.lock().unwrap();
+            if s.running {
+                continue;
+            }
+            let Some(path) = self.queue.recs.get_mut(&i).and_then(|r| r.keep.take()) else { continue };
+            if s.progress.end != Some(End::Done) || s.live {
+                continue;
+            }
+            match &self.nodes[i].kind {
+                Kind::Sourcer { .. } => {
+                    let run = s.run_id;
+                    drop(s);
+                    std::thread::spawn(move || keep_sound(&state, run, &path));
+                }
+                Kind::CutDetector { .. } => {
+                    if let Some(scan) = s.cut.clone() {
+                        let status = s.status.clone();
+                        std::thread::spawn(move || {
+                            let _ = kept::write(&path, "cut", kept::put_scan(&scan, &status));
+                        });
+                    }
+                }
+                Kind::AudioMatch { .. } => {
+                    if let Some(b) = kept::put_match(&s) {
+                        spawn_write(path, "match", b);
+                    }
+                }
+                Kind::Enf { .. } => spawn_write(path, "enf", kept::put_enf(&s)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Loads what is kept for this project (when it opens): SOURCERs read their kept sound (a
+    /// thread each), Cut detectors, ENFs and then Audio matches load theirs. Nothing is worked
+    /// out; the project stays stopped.
+    pub(crate) fn load_kept(&mut self) {
+        let Some(dir) = self.cache_dir() else { return };
+        if !dir.exists() {
+            return;
+        }
+        let keys = self.job_keys();
+        let ids: Vec<NodeId> = (0..self.nodes.len()).filter(|&i| self.role(i).is_some()).collect();
+        for &i in &ids {
+            if self.role(i) == Some(Role::Source) && self.kept_path(i).is_some_and(|p| p.exists()) {
+                self.queue.asks += 1;
+                let order = self.queue.asks;
+                let r = self.rec(i);
+                r.order = order;
+                r.tried = keys.get(&i).copied();
+                self.start_job(i, &keys);
+            }
+        }
+        for pass in [0, 1] {
+            for &i in &ids {
+                let first = matches!(self.nodes[i].kind, Kind::CutDetector { .. } | Kind::Enf { .. });
+                if first == (pass == 0) && self.role(i) != Some(Role::Source) {
+                    self.try_kept(i, &keys);
+                }
+            }
+            // The pieces of the Cut detectors just loaded (the Audio matches' keys read them).
+            self.cut_ui.cache.borrow_mut().clear();
+            self.match_ui.cache.borrow_mut().clear();
+        }
+        self.queue.keys = keys;
+    }
+
+    /// Run again on one node: it is worked out anew, without its kept result.
+    pub(crate) fn run_node_again(&mut self, i: NodeId) {
+        self.queue.fresh.insert(i);
+        if let Some(r) = self.queue.recs.get_mut(&i) {
+            r.ran = None;
+        }
+        self.run_node(i);
+    }
+
+    /// Forget kept result: deletes job `i`'s kept file (what it shows stays until it runs again).
+    pub(crate) fn forget_kept(&mut self, i: NodeId) {
+        match self.kept_path(i) {
+            Some(p) if p.exists() => {
+                let _ = std::fs::remove_file(&p);
+                self.msg = format!("forgot the kept result of '{}'", self.node_name(i));
+            }
+            _ => self.msg = format!("'{}' has no kept result", self.node_name(i)),
+        }
+    }
+
+    /// Forget all kept: empties the project's cache\ folder.
+    pub(crate) fn forget_all_kept(&mut self) {
+        if let Some(d) = self.cache_dir() {
+            kept::forget_all(&d);
+            self.msg = format!("forgot everything kept in {}", d.display());
+        }
     }
 
     /// Why queued job `i` waits: for which need (and how far it has got), or for its SOURCER.
@@ -550,4 +812,37 @@ impl App {
             None => "to start".into(),
         }
     }
+}
+
+/// Writes a kept result on a thread of its own.
+fn spawn_write(path: PathBuf, kind: &'static str, body: Vec<u8>) {
+    std::thread::spawn(move || {
+        let _ = kept::write(&path, kind, body);
+    });
+}
+
+/// Keeps SOURCER state `st`'s sound (its run `run`) in `path`, once ffprobe's view of the file is
+/// there too (it comes beside the decode).
+fn keep_sound(st: &runtime::Shared, run: u64, path: &std::path::Path) {
+    for _ in 0..200 {
+        if !st.lock().unwrap().source.meta.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let sound = {
+        let s = st.lock().unwrap();
+        if s.run_id != run {
+            return;
+        }
+        let opened = s.source.meta.iter().find(|(k, _)| k == "opened").map(|(_, v)| v.clone()).unwrap_or_default();
+        let audio = s.source.audio.lock().unwrap().clone();
+        kept::Sound { opened, anchor: s.anchor.clone(), meta: s.source.meta.clone(), video: s.source.has_video(), audio }
+    };
+    if sound.opened.is_empty() || sound.audio.is_empty() {
+        return;
+    }
+    let mut w = kept::W(Vec::new());
+    kept::Part::put(&sound, &mut w);
+    let _ = kept::write(path, "sourcer", w.0);
 }

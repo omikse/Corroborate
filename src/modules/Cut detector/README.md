@@ -101,6 +101,11 @@ the strongest among equals.
   it read changed. ▶ in its top right corner runs it and its SOURCERs when they are not up to
   date. Its thresholds and switches only change what is shown: they do not make it stale (the
   Audio match taking its pieces turns stale when the pieces change).
+- Kept: its scan (lanes, marks, filmstrip: about 10 MB for 44 minutes) is kept in the project's
+  `cache\`, under what it read (the recording's and the compared recordings' size and print, and
+  whether picture and sound are wired). Opening the project loads it at once (teal dot, nothing
+  read, not even its SOURCER's sound); a changed file reads again. Run again (right-click) reads
+  anew; Forget kept result deletes it.
 - The filmstrip (a picture a second; a long recording's pictures go into one texture in rows, as
   a texture has a largest side), the waveform (the source's), then the lanes: a lane's curve,
   its marks (strong when over the threshold) and its threshold as a dashed line. Drag the

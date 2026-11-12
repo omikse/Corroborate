@@ -131,6 +131,12 @@ long it took, or failed when fewer than two recordings could be read. Stale when
 clock or a piece changed; ▶ in its top right corner runs it and whatever of its needs is not up to
 date. A change to one SOURCER runs only that SOURCER again, then the match.
 
+Kept: what it found (links, events, quality, each recording's stage) is kept in the project's
+`cache\`, under each recording's name, clock, file (size and print) and piece. Opening the project
+loads it (teal dot); a match whose pieces are back to ones it worked out before loads instead of
+matching. The fingerprints themselves are not kept yet: a match on new pieces fingerprints every
+recording again.
+
 Limits now: files only (a stream or microphone wired in is named in the status and left out);
 each file is decoded again here, and all are matched once their decoding is done, not while
 the sources play.

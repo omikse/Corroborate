@@ -134,20 +134,42 @@ pub fn flush(r: &mut EnfRun) {
     if let Some(f) = s.enf.nominal {
         s.status = format!("{f:.0} Hz grid, {} runs", s.enf.segments.len());
     }
-    // Blind place: a clear match puts the recording in that grid's area at that time.
-    if let (Ok(d), None) = (&dated, &r.job.place) {
-        if let Some(a) = areas.iter().find(|a| a.id == d.best.grid).filter(|_| d.confirmed) {
-            let mut m = a.mask_at(Some(d.start()));
-            let mut note = format!("hum matches the {} grid log ({}) at {}", a.name, a.id, timebase::fmt_utc(d.start()));
-            if let Some((p, label)) = &r.job.prior {
-                m = m.and(p);
-                note = format!("{note}; limited to {label}");
-            }
-            s.enf.area = Some(Arc::new(m));
-            s.enf.area_note = note;
-        }
+    if let Ok(d) = &dated {
+        blind_place(r.job, areas.iter().copied().find(|a| a.id == d.best.grid), d, &mut s.enf);
     }
     s.enf.dated = Some(dated);
+}
+
+/// Blind place: with no place wired, a clear match puts the recording in that grid's area `a`
+/// at that time.
+fn blind_place(job: &EnfJob, a: Option<&SyncArea>, d: &Dated, enf: &mut EnfState) {
+    let Some(a) = a.filter(|_| d.confirmed && job.place.is_none()) else { return };
+    let mut m = a.mask_at(Some(d.start()));
+    let mut note = format!("hum matches the {} grid log ({}) at {}", a.name, a.id, timebase::fmt_utc(d.start()));
+    if let Some((p, label)) = &job.prior {
+        m = m.and(p);
+        note = format!("{note}; limited to {label}");
+    }
+    enf.area = Some(Arc::new(m));
+    enf.area_note = note;
+}
+
+/// A kept result loaded into `s` (the hum track and its dating, `kept.rs`): the signal quality
+/// and the area are worked out again from them, the grid map and the wired location, as `push`
+/// and `flush` do.
+pub fn restore(job: &EnfJob, s: &mut runtime::NodeState) {
+    if !s.enf.points.is_empty() {
+        s.enf.quality = Some(quality(&s.enf.points));
+    }
+    if let Some(f) = s.enf.nominal {
+        let (a, note) = area(f, job);
+        s.enf.area = a.map(Arc::new);
+        s.enf.area_note = note;
+    }
+    if let Some(Ok(d)) = s.enf.dated.clone() {
+        let a = job.grid.as_ref().ok().and_then(|g| g.areas.iter().find(|a| a.id == d.best.grid));
+        blind_place(job, a, &d, &mut s.enf);
+    }
 }
 
 /// The area on the node's location output.

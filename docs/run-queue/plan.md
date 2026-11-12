@@ -1,7 +1,7 @@
 # Running, the queue, and keeping results
 
 Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions). Stages 1
-(show it) and 2 (the queue) are built; stages 3 and 4 are not. The mockup: [mockup.html](mockup.html) (open it in a
+(show it), 2 (the queue) and 3 (keeping results) are built; stage 4 (programs) is not. The mockup: [mockup.html](mockup.html) (open it in a
 browser; it runs two made-up projects, Simple and Difficult, so every state can be seen).
 
 ## The question it answers
@@ -200,6 +200,26 @@ download is never treated as live (22f9f14).
 3. **Keeping results.** Keys and `cache\`, the Cut detector's scan and the SOURCER's decoded audio
    first, then Audio match and ENF; the kept state; Run again; Forget. Test: open the 44 minute
    project again, the Cut detector is there with no read; change the file, it reads again.
+   **Built** (2026-11-12): `kept.rs` (kept keys, the files, each job's parts) and the queue's side
+   in `queue.rs`. A kept key in words: kind, method version (`SOURCER_V`, `CUT_V`, `MATCH_V`,
+   `ENF_V`), what it reads (a file by size and print, a web video by its link: not by its copy's
+   print, so a download is not decoded twice), its settings; FNV-1a of it names the file in
+   `<project>\cache\` (an untitled project: `cache\` next to the program). Kept: the SOURCER's
+   sound (16 bit) with the file it opened, its anchor and ffprobe's view; the Cut detector's scan;
+   the Audio match's result; the ENF's hum track with its dating. Written on a thread once a job
+   ends done. A Cut detector, ENF or Audio match whose kept file is there loads it when asked
+   (the match once its pieces are known), a SOURCER reads its kept sound when it runs (feeding its
+   riders, no decode turn). The project opening loads all of it, stopped. Kept is a teal dot,
+   "kept: loaded from cache\". The SOURCER's in-memory key now has its file's print, so a changed
+   file is stale. Run again (top bar: all; right-click: one node) works out anew without kept
+   results; Forget kept result (right-click), Forget all kept (under the queue list, with the kept
+   size). Tested in `kept_tests.rs` on the 12 s clip: run, kept files, opened again (all kept, the
+   SOURCER read its kept sound, the Cut detector read nothing, Run runs nothing), the clip changed
+   (its SOURCER, the Cut detector and the match read again, the copy and the ENF stay kept), Run
+   again, Forget. Not yet: Planes and plugins are not kept (plugins: stage 4, `keep = true`); the
+   Audio match keeps its result, not each recording's fingerprints; the ENF keeps its hum track
+   with its dating, not alone, and the grid log store is not in its key; Play still does not queue
+   the sound it needs; not tried on the 44 minute project itself (the test uses the clip).
 4. **Programs.** `keep = true` in a plugin's manifest; live sources and what reads them as live
    jobs in the queue.
 

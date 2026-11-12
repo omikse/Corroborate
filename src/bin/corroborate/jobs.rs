@@ -33,6 +33,8 @@ pub struct Step {
 #[derive(Clone, Debug, PartialEq)]
 pub enum End {
     Done,
+    /// Loaded from its kept result (`kept.rs`), not worked out again.
+    Kept,
     Failed(String),
     Cancelled,
 }
@@ -115,12 +117,19 @@ pub enum JobState {
     Queued,
     Working,
     Done,
+    /// Loaded from its kept result, not worked out again.
+    Kept,
     Failed,
     Cancelled,
     Live,
 }
 
 impl JobState {
+    /// Done, in this session or before (kept): its result is there.
+    pub fn has_result(self) -> bool {
+        matches!(self, JobState::Done | JobState::Kept)
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             JobState::NotRun => "not run",
@@ -128,6 +137,7 @@ impl JobState {
             JobState::Queued => "queued",
             JobState::Working => "working",
             JobState::Done => "done",
+            JobState::Kept => "kept",
             JobState::Failed => "failed",
             JobState::Cancelled => "cancelled",
             JobState::Live => "live",
@@ -142,6 +152,7 @@ impl JobState {
             JobState::Queued => Color32::from_rgb(0x8a, 0x90, 0x99),
             JobState::Working => Color32::from_rgb(0xe0, 0xc8, 0x5a),
             JobState::Done => Color32::from_rgb(0x8c, 0xdc, 0x6e),
+            JobState::Kept => Color32::from_rgb(0x6c, 0xc0, 0xa8),
             JobState::Failed => Color32::from_rgb(0xe0, 0x52, 0x4f),
             JobState::Cancelled => Color32::from_rgb(0x9a, 0x7a, 0x7a),
             JobState::Live => Color32::from_rgb(0xff, 0x5a, 0x5a),
@@ -177,6 +188,7 @@ impl JobView {
                 Some(t) => format!("done in {}", took_text(t)),
                 None => w.into(),
             },
+            JobState::Kept => "kept: loaded from cache\\, not worked out again".into(),
             JobState::NotRun => "not run: Run or ▶ starts it".into(),
             JobState::Stale => "stale: changed since it ran".into(),
             _ if self.why.is_empty() => w.into(),
@@ -200,6 +212,7 @@ pub fn view(s: &NodeState) -> JobView {
     } else {
         match &p.end {
             Some(End::Done) => JobState::Done,
+            Some(End::Kept) => JobState::Kept,
             Some(End::Failed(_)) => JobState::Failed,
             Some(End::Cancelled) => JobState::Cancelled,
             None if s.done => JobState::Done,
@@ -274,7 +287,7 @@ impl App {
             // Told to stop: it is ending.
             v.state = JobState::Cancelled;
             v.why.clear();
-        } else if matches!(v.state, JobState::Done | JobState::Failed | JobState::Cancelled) && r.ran.is_some() && r.ran != self.queue.keys.get(&i).copied() && self.queue.keys.contains_key(&i) {
+        } else if matches!(v.state, JobState::Done | JobState::Kept | JobState::Failed | JobState::Cancelled) && r.ran.is_some() && r.ran != self.queue.keys.get(&i).copied() && self.queue.keys.contains_key(&i) {
             v.state = JobState::Stale;
         }
         Some(v)
@@ -291,7 +304,7 @@ impl App {
     pub(crate) fn queue_counts(&self) -> String {
         let jobs = self.jobs();
         let count = |s: JobState| jobs.iter().filter(|(_, j)| j.state == s).count();
-        let order = [JobState::Live, JobState::Working, JobState::Queued, JobState::Stale, JobState::Failed, JobState::Cancelled, JobState::Done];
+        let order = [JobState::Live, JobState::Working, JobState::Queued, JobState::Stale, JobState::Failed, JobState::Cancelled, JobState::Done, JobState::Kept];
         let parts: Vec<String> = order.iter().filter_map(|&s| (count(s) > 0).then(|| format!("{} {}", count(s), s.word()))).collect();
         if parts.is_empty() { "nothing run".into() } else { parts.join(" · ") }
     }
@@ -307,6 +320,8 @@ impl App {
         let mut open = true;
         let mut moving = false;
         let mut act: Option<(NodeId, bool)> = None;
+        let cache = self.cache_dir();
+        let mut forget = false;
         egui::Window::new("Queue").open(&mut open).resizable(true).default_width(420.0).default_pos(Pos2::new(220.0, 60.0)).show(ctx, |ui| {
             if jobs.is_empty() {
                 ui.label(egui::RichText::new("no nodes do work here").color(DIM));
@@ -341,7 +356,21 @@ impl App {
                     ui.end_row();
                 }
             });
+            // How much is kept in the project's cache\ folder.
+            if let Some(dir) = &cache {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let n = crate::kept::size(dir);
+                    ui.label(egui::RichText::new(format!("kept: {}", crate::kept::size_text(n))).color(DIM)).on_hover_text(dir.display().to_string());
+                    if n > 0 && ui.small_button("Forget all kept").on_hover_text("delete every kept result of this project (cache\\): they are worked out again when they run").clicked() {
+                        forget = true;
+                    }
+                });
+            }
         });
+        if forget {
+            self.forget_all_kept();
+        }
         if moving {
             ctx.request_repaint();
         }

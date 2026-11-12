@@ -51,7 +51,17 @@ The nodes reading its sound as it decodes (ENF, Planes, plugins) run with it: as
 them runs the SOURCER again, feeding the ones queued (the others keep their results); they wait
 for it there ("for 'phone 3' (download 34%)") and fail with it ("needs 'phone 3', which failed").
 A Cut detector or an Audio match after it starts once its run is done, and reads its decoded sound
-(and its downloaded copy). A change to its input makes it and what follows stale.
+(and its downloaded copy). A change to its input, or to the file itself (its size and print), makes
+it and what follows stale.
+
+Kept (`src/bin/corroborate/kept.rs`): once it has decoded a file or a web video that is not live,
+its sound (16 kHz, 16 bit, about 85 MB for 44 minutes) is kept in the project's `cache\`, with the
+file it opened, its time anchor and ffprobe's view of it. Opening the project reads it back (the
+waveform, the sound for playing and for the nodes after it; nothing decodes), and a run reads it
+instead of decoding, feeding the ENF, Planes or plugins on it (its step is then "read the kept
+sound", its dot teal). A file is known by its size and print, a web video by its link; two
+SOURCERs on one file share its kept sound. A microphone or a live stream is never kept. Run again
+decodes anew.
 
 On the canvas: the two boxes, then (once there is a source) status and UTC clock, the waveform (the whole recording, or the last 30 s when live;
 hover it to read the time), and for video a viewer with one small frame a second (hover the waveform

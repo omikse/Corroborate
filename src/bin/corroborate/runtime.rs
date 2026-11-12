@@ -91,12 +91,15 @@ pub struct Job {
     pub clock: String,
     /// Where a video from the web is downloaded: the project's recordings\ folder.
     pub downloads: std::path::PathBuf,
+    /// Its kept sound (`kept::Sound`): read from there instead of downloading and decoding.
+    pub from_kept: Option<std::path::PathBuf>,
 }
 
 /// The steps of a source's run, and of the nodes reading its sound.
 const DOWNLOAD: &str = "download";
 const DECODE: &str = "decode";
 const READ: &str = "read the sound";
+const KEPT: &str = "read the kept sound";
 
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -112,6 +115,7 @@ pub fn start(job: Job) {
     // The steps: a web page's download, then the decode; the nodes it feeds read the sound as it
     // comes (they wait while it downloads or waits for its turn).
     let web = is_web(&job.input);
+    let kept = job.from_kept.is_some();
     for (k, s) in all_states(&job).into_iter().enumerate() {
         let mut s = s.lock().unwrap();
         s.reset();
@@ -121,15 +125,27 @@ pub fn start(job: Job) {
         s.source_label = job.label.clone();
         s.source_key = key.clone();
         s.status = "starting".into();
-        s.progress = if k == 0 { Progress::new(if web { vec![DOWNLOAD, DECODE] } else { vec![DECODE] }) } else { Progress::new([READ]) };
+        s.progress = if k == 0 { Progress::new(source_steps(web, kept)) } else { Progress::new([READ]) };
         s.progress.waits = match k {
-            0 if live => None,
+            0 if live || kept => None,
+            _ if kept => Some(format!("for '{}'", job.label)),
             0 if web => Some(crate::jobs::download_waits()),
             0 => Some(crate::jobs::turn_waits()),
             _ => Some(format!("for '{}'", job.label)),
         };
     }
     thread::spawn(move || run(job, run_id));
+}
+
+/// The source's steps: a web page's download, the decode, or reading the kept sound.
+fn source_steps(web: bool, kept: bool) -> Vec<&'static str> {
+    if kept {
+        vec![KEPT]
+    } else if web {
+        vec![DOWNLOAD, DECODE]
+    } else {
+        vec![DECODE]
+    }
 }
 
 /// A web page yt-dlp resolves (and downloads, when it is not live).
@@ -146,6 +162,15 @@ fn all_states(job: &Job) -> Vec<Shared> {
 }
 
 fn run(job: Job, run_id: u64) {
+    // The kept sound, when there is one and it reads (else it is decoded as usual).
+    let kept = job.from_kept.as_ref().and_then(|p| crate::kept::read(p, "sourcer")).and_then(|b| <crate::kept::Sound as crate::kept::Part>::get(&mut crate::kept::R::new(&b)));
+    if job.from_kept.is_some() && kept.is_none() {
+        let mut s = job.source.lock().unwrap();
+        if s.run_id == run_id {
+            s.progress = Progress::new(source_steps(is_web(&job.input), false));
+            s.progress.waits = Some(crate::jobs::turn_waits());
+        }
+    }
     let mut live = matches!(job.input, Input::Mic(_));
     let key = job.input.key();
     let web = is_web(&job.input);
@@ -171,6 +196,7 @@ fn run(job: Job, run_id: u64) {
     };
 
     let ff_input = match &job.input {
+        _ if kept.is_some() => kept.as_ref().unwrap().opened.clone(),
         Input::File(p) => p.clone(),
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
@@ -212,19 +238,23 @@ fn run(job: Job, run_id: u64) {
     };
 
     // Metadata and pictures for the SOURCER's own view and outputs (not for microphones).
-    if !matches!(job.input, Input::Mic(_)) {
+    if let Some(k) = &kept {
+        job.source.lock().unwrap().source.restore_side(k.opened.clone(), k.meta.clone(), k.video, job.stop.clone());
+    } else if !matches!(job.input, Input::Mic(_)) {
         sourcer_node::start_side(ff_input.clone(), key.clone(), live, job.source.clone(), job.stop.clone());
     }
 
     // UTC anchor: file metadata or our recording sidecar for files; for live sources the PC
     // clock at first audio, upgraded to the stream's own capture times when it has them.
     let anchor: SharedAnchor = Default::default();
-    if let Input::File(p) = &job.input {
+    if let Some(k) = &kept {
+        *anchor.lock().unwrap() = k.anchor.clone();
+    } else if let Input::File(p) = &job.input {
         *anchor.lock().unwrap() = timebase::file_anchor(p);
     }
 
     // A recording waits its turn: only so many decode at once (big projects).
-    let _turn = if live {
+    let _turn = if live || kept.is_some() {
         None
     } else {
         set_status(&format!("waiting: {} recordings decode at once", ingest::decoders_at_once()));
@@ -243,26 +273,49 @@ fn run(job: Job, run_id: u64) {
     let mut planes: Vec<_> = job.planes.iter().map(|s| (planes_node::start(s), s.clone())).collect();
     let mut enfs: Vec<_> = job.enfs.iter().map(enf_node::start).collect();
 
-    set_status(if live { "connecting…" } else { "decoding…" });
+    let from_kept = kept.is_some();
+    let step_name = if from_kept { KEPT } else { DECODE };
+    set_status(if live { "connecting…" } else if from_kept { "reading the kept sound…" } else { "decoding…" });
     // How long the recording is, for how far the decode has got.
-    let total = if live || !std::path::Path::new(&ff_input).exists() { None } else { timebase::file_facts(&ff_input).len.filter(|l| *l > 0.0) };
+    let total = match &kept {
+        Some(k) => Some(k.audio.len() as f64 / INPUT_SR).filter(|l| *l > 0.0),
+        None if live || !std::path::Path::new(&ff_input).exists() => None,
+        None => timebase::file_facts(&ff_input).len.filter(|l| *l > 0.0),
+    };
     let part = |secs: f64| total.map_or(-1.0, |l| (secs / l).clamp(0.0, 1.0) as f32);
-    each(&|k, s| s.progress.step(if k == 0 { DECODE } else { READ }, StepState::Working, part(0.0), ""));
+    each(&|k, s| s.progress.step(if k == 0 { step_name } else { READ }, StepState::Working, part(0.0), ""));
     let mut shown = -1i32;
     ingest::LAST_ERROR.lock().unwrap().clear();
-    let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
-        Ok(x) => x,
-        Err(e) => return finish(&job, run_id, Err(e)),
+    // The sound in blocks: ffmpeg's, or the kept sound's (16 bit as kept, and as the others read it).
+    let mut child = None;
+    let blocks: Box<dyn Iterator<Item = (Vec<f32>, Option<Vec<i16>>)>> = match kept {
+        Some(k) => {
+            let a = k.audio;
+            Box::new((0..a.len()).step_by(1600).map(move |i| {
+                let c = &a[i..(i + 1600).min(a.len())];
+                (c.iter().map(|&v| v as f32 / 32767.0).collect(), Some(c.to_vec()))
+            }))
+        }
+        None => {
+            let (c, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
+                Ok(x) => x,
+                Err(e) => return finish(&job, run_id, Err(e)),
+            };
+            if live {
+                timebase::upgrade_from_hls(ff_input.clone(), first, anchor.clone(), 0.0);
+            }
+            child = Some(c);
+            Box::new(rx.into_iter().map(|x| (x, None)))
+        }
     };
-    if live {
-        timebase::upgrade_from_hls(ff_input.clone(), first, anchor.clone(), 0.0);
-    }
 
     let mut buses = job.buses.clone();
     let mut n: u64 = 0;
-    for x in rx {
+    for (x, raw) in blocks {
         if job.stop.load(Ordering::Relaxed) {
-            let _ = child.kill();
+            if let Some(c) = child.as_mut() {
+                let _ = c.kill();
+            }
             break;
         }
         if live && n == 0 {
@@ -278,7 +331,7 @@ fn run(job: Job, run_id: u64) {
         let f = part(audio_s);
         if f >= 0.0 && (f * 200.0) as i32 != shown {
             shown = (f * 200.0) as i32;
-            each(&|k, s| s.progress.step(if k == 0 { DECODE } else { READ }, StepState::Working, f, ""));
+            each(&|k, s| s.progress.step(if k == 0 { step_name } else { READ }, StepState::Working, f, ""));
         }
 
         for (i, feed) in feeds.iter_mut().enumerate() {
@@ -303,13 +356,18 @@ fn run(job: Job, run_id: u64) {
         let mut s = job.source.lock().unwrap();
         s.anchor = an;
         s.audio_s = audio_s;
-        s.source.push_audio(&x);
+        match &raw {
+            Some(r) => s.source.push_i16(r),
+            None => s.source.push_audio(&x),
+        }
         for (_, w) in job.taps.lock().unwrap().iter_mut() {
             w.push(&x);
         }
-        s.status = if live { "live".into() } else { "decoding…".into() };
+        s.status = if live { "live".into() } else if from_kept { "reading the kept sound…".into() } else { "decoding…".into() };
     }
-    let _ = child.wait();
+    if let Some(c) = child.as_mut() {
+        let _ = c.wait();
+    }
     if job.stop.load(Ordering::Relaxed) {
         // Stopped for a restart: the new run owns the shared state; only release what is ours.
         drop(feeds);
@@ -330,10 +388,15 @@ fn run(job: Job, run_id: u64) {
         let e = ingest::LAST_ERROR.lock().unwrap().clone();
         return finish(&job, run_id, Err(format!("no audio came out of ffmpeg{}", if e.is_empty() { String::new() } else { format!(": {e}") })));
     }
-    finish(&job, run_id, Ok(n as f64 / INPUT_SR));
+    finish_as(&job, run_id, Ok(n as f64 / INPUT_SR), from_kept);
 }
 
 fn finish(job: &Job, run_id: u64, r: Result<f64, String>) {
+    finish_as(job, run_id, r, false)
+}
+
+/// The run ended (`kept`: the source read its kept sound; it was not worked out again).
+fn finish_as(job: &Job, run_id: u64, r: Result<f64, String>, kept: bool) {
     let stopped = job.stop.load(Ordering::Relaxed);
     for (k, s) in all_states(job).into_iter().enumerate() {
         let mut s = s.lock().unwrap();
@@ -347,6 +410,7 @@ fn finish(job: &Job, run_id: u64, r: Result<f64, String>) {
             }
             s.progress.finish(match &r {
                 _ if stopped => End::Cancelled,
+                Ok(_) if k == 0 && kept => End::Kept,
                 Ok(_) => End::Done,
                 Err(e) if k == 0 => End::Failed(e.clone()),
                 Err(_) => End::Failed(format!("needs '{}', which failed", job.label)),
@@ -360,6 +424,7 @@ fn finish(job: &Job, run_id: u64, r: Result<f64, String>) {
     s.status = match r {
         Ok(_) if stopped => "stopped".into(),
         Ok(secs) if s.live => format!("stream ended after {secs:.0} s"),
+        Ok(secs) if kept => format!("{secs:.0} s of sound, kept"),
         Ok(secs) => format!("analysed {secs:.0} s of audio"),
         Err(e) => format!("error: {e}"),
     };

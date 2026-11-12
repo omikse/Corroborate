@@ -366,6 +366,7 @@ impl App {
                     self.load_project_text(&text);
                     self.resolve_recordings();
                     self.sync_recordings();
+                    self.load_kept();
                 }
             }
         }
@@ -403,9 +404,10 @@ impl App {
         }
         remember(Some(&path));
         self.last_project_save = Instant::now();
-        // A project opens stopped: Run starts it.
+        // A project opens stopped: Run starts it. What is kept loads (nothing is worked out).
         self.stopped = true;
         self.msg = format!("{} (stopped: Run starts it)", self.msg);
+        self.load_kept();
     }
 
     /// Project → Revert to saved: drops the unsaved changes and opens the project file again.
