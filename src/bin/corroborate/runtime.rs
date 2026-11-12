@@ -108,7 +108,10 @@ fn all_states(job: &Job) -> Vec<Shared> {
 
 fn run(job: Job) {
     let run_id = RUNS.fetch_add(1, Ordering::Relaxed);
-    let mut live = job.input.live();
+    // A link is live only once it is known to be (yt-dlp says so, or a stream URL): while yt-dlp
+    // checks it or downloads a video, nothing treats it as live (no pulsing wires, no playhead
+    // following its audio).
+    let mut live = matches!(job.input, Input::Mic(_));
     let key = job.input.key();
     for s in all_states(&job) {
         let mut s = s.lock().unwrap();

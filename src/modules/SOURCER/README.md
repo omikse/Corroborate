@@ -18,7 +18,9 @@ folder. A project not saved yet has no folder: it downloads into `recordings\` n
 once saved, its next run copies the video from there into its own folder (no download). The folder's
 `downloads.txt` lists each link with its file (by name, so the list holds when the folder moves), so a
 later run (any change upstream or downstream) reads the copy without calling yt-dlp; YouTube links
-match by video id. Delete the file in the project's `recordings\` to download again.
+match by video id. Delete the file in the project's `recordings\` to download again. A link is
+live only once yt-dlp says so: while it checks the link or downloads, the source is not live (its
+wires do not pulse, its playhead does not follow the audio coming in).
 
 When YouTube answers "Sign in to confirm you're not a bot", the SOURCER asks again with the cookies
 of a browser signed in to YouTube (yt-dlp reads them locally: Firefox, then Edge, Chrome, Brave;
