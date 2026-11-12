@@ -149,7 +149,7 @@ fn the_player_plays_a_cut() {
     app.wire(s, "audio", c, "audio");
     app.run();
     assert!(d.wait_until(300.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "read");
-    let prog = d.app().nodes[c].state.lock().unwrap().cut_progress.clone();
+    let prog = d.app().nodes[c].state.lock().unwrap().progress.clone();
     println!("steps {:?}", prog.steps.iter().map(|s| (s.name.clone(), s.state)).collect::<Vec<_>>());
     assert!(prog.steps.len() >= 4 && prog.steps.iter().all(|s| s.state == cut_detector_node::StepState::Done), "{prog:?}");
     assert!(prog.took.is_some());
@@ -418,7 +418,7 @@ fn a_long_video() {
     app.wire(s, "audio", c, "audio");
     app.run();
     let t0 = Instant::now();
-    d.wait_until(20.0, |a| a.nodes[c].state.lock().unwrap().cut_progress.steps.iter().any(|s| s.frac > 0.05));
+    d.wait_until(20.0, |a| a.nodes[c].state.lock().unwrap().progress.steps.iter().any(|s| s.frac > 0.05));
     d.shot("cut_long_running");
     assert!(d.wait_until(1800.0, |a| a.nodes[c].state.lock().unwrap().cut.is_some()), "read: {}", d.app().nodes[c].state.lock().unwrap().status);
     println!("read in {:.0} s", t0.elapsed().as_secs_f64());

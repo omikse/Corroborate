@@ -133,7 +133,7 @@ impl App {
 }
 
 /// What kind of source the text is, for the node's label line.
-fn kind_of(text: &str) -> &'static str {
+pub(crate) fn kind_of(text: &str) -> &'static str {
     let t = text.trim().to_lowercase();
     if t.is_empty() {
         "file, YouTube link, stream URL or microphone"
@@ -152,8 +152,9 @@ fn kind_of(text: &str) -> &'static str {
 
 /// A direct media URL, and whether it is live. Web pages go through yt-dlp, which says both;
 /// direct URLs are live unless they end in a file extension (an mp3 on a server is a recording).
-/// A video that is not live is downloaded into the folder `dir` (the project's recordings\).
-pub fn resolve(url: &str, dir: &Path) -> Result<(String, bool), String> {
+/// A video that is not live is downloaded into the folder `dir` (the project's recordings\),
+/// telling `report` how far (0 to 1); `stop` ends the download.
+pub fn resolve(url: &str, dir: &Path, report: &dyn Fn(f32), stop: &AtomicBool) -> Result<(String, bool), String> {
     if !kind_of(url).contains("yt-dlp") {
         let path = url.to_lowercase();
         let file = DIRECT.iter().filter(|e| **e != ".m3u8").any(|e| path.split('?').next().unwrap_or("").ends_with(e));
@@ -163,7 +164,7 @@ pub fn resolve(url: &str, dir: &Path) -> Result<(String, bool), String> {
     if let Some(p) = downloaded(url, dir) {
         return Ok((p, false));
     }
-    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url])?;
+    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "ba/b", "--print", "is_live", "--print", "urls", url], &|_| {}, stop)?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
     let is_live = lines.next().map(str::trim) == Some("True");
@@ -172,7 +173,7 @@ pub fn resolve(url: &str, dir: &Path) -> Result<(String, bool), String> {
         // Not live: YouTube refuses its direct links to ffmpeg (403), so yt-dlp downloads the
         // video into the project's recordings\ and it is read as a file. The copy stays there as
         // evidence.
-        Some(_) if out.status.success() => download(url, dir).map(|p| (p, false)),
+        Some(_) if out.status.success() => download(url, dir, report, stop).map(|p| (p, false)),
         _ => Err(ytdlp_error("yt-dlp", &out.stderr, "no URL returned")),
     }
 }
@@ -199,10 +200,8 @@ static COOKIE_BROWSER: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex
 /// Run yt-dlp (no window) with the user's extra options. When YouTube asks to sign in ("not a
 /// bot") and no options are set, try again with the cookies of the signed-in browsers (Firefox,
 /// Edge, Chrome, Brave: yt-dlp reads them locally) and keep the first that works.
-fn run_ytdlp(args: &[&str]) -> Result<std::process::Output, String> {
-    let run = |extra: &[String]| {
-        corroborate::no_window(&mut std::process::Command::new("yt-dlp")).args(extra).args(args).output().map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))
-    };
+fn run_ytdlp(args: &[&str], report: &dyn Fn(f32), stop: &AtomicBool) -> Result<std::process::Output, String> {
+    let run = |extra: &[String]| ytdlp_call(extra, args, report, stop);
     let extra = ytdlp_extra();
     let known = *COOKIE_BROWSER.lock().unwrap();
     let first = match (extra.is_empty(), known) {
@@ -223,6 +222,79 @@ fn run_ytdlp(args: &[&str]) -> Result<std::process::Output, String> {
     Ok(first)
 }
 
+/// What yt-dlp's progress lines start with (`PROGRESS_TEMPLATE`).
+const PROGRESS_MARK: &str = "corroborate-progress";
+
+/// Its progress as a line of bytes downloaded, the total, and the total's estimate (raw numbers,
+/// no colours; "NA" when not known).
+const PROGRESS_TEMPLATE: &str = "download:corroborate-progress %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s";
+
+/// How far a download is (0 to 1) from one of yt-dlp's progress lines; None for other lines.
+pub(crate) fn progress_of(line: &str) -> Option<f32> {
+    let rest = line.split_once(PROGRESS_MARK)?.1;
+    let mut n = rest.split_whitespace().map(|w| w.parse::<f64>().ok());
+    let got = n.next()??;
+    let total = n.next().flatten().or_else(|| n.next().flatten()).filter(|t| *t > 0.0)?;
+    Some((got / total).clamp(0.0, 1.0) as f32)
+}
+
+/// One yt-dlp call (no window), its progress lines read as they come (on either stream) and told
+/// to `report`; `stop` ends it.
+fn ytdlp_call(extra: &[String], args: &[&str], report: &dyn Fn(f32), stop: &AtomicBool) -> Result<std::process::Output, String> {
+    use std::io::BufRead;
+    let mut child = corroborate::no_window(&mut std::process::Command::new("yt-dlp"))
+        .args(extra)
+        .args(["--progress", "--newline", "--progress-template", PROGRESS_TEMPLATE])
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run yt-dlp (is it installed?): {e}"))?;
+    // Each stream on a thread of its own: (from stderr, line).
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+    let out = child.stdout.take().ok_or("no yt-dlp output")?;
+    let err = child.stderr.take().ok_or("no yt-dlp errors stream")?;
+    let pipe = |r: Box<dyn std::io::Read + Send>, is_err: bool| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(r).split(b'\n') {
+                let Ok(line) = line else { break };
+                if tx.send((is_err, line)).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let threads = [pipe(Box::new(out), false), pipe(Box::new(err), true)];
+    drop(tx);
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            let _ = child.kill();
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok((is_err, line)) => match progress_of(&String::from_utf8_lossy(&line)) {
+                Some(f) => report(f),
+                None => {
+                    let to = if is_err { &mut stderr } else { &mut stdout };
+                    to.extend_from_slice(&line);
+                    to.push(b'\n');
+                }
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    for t in threads {
+        let _ = t.join();
+    }
+    let status = child.wait().map_err(|e| format!("yt-dlp: {e}"))?;
+    if stop.load(Ordering::Relaxed) {
+        return Err("stopped".into());
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 /// yt-dlp's last error line; when YouTube asks to sign in, how to give yt-dlp the cookies.
 fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
     let e = String::from_utf8_lossy(stderr);
@@ -239,10 +311,10 @@ fn ytdlp_error(what: &str, stderr: &[u8], none: &str) -> String {
 
 /// Download a video (one file with picture and sound, at most 480 lines; sound only when there is
 /// none) with yt-dlp to `<dir>\<site> <id>.<ext>`.
-fn download(url: &str, dir: &Path) -> Result<String, String> {
+fn download(url: &str, dir: &Path, report: &dyn Fn(f32), stop: &AtomicBool) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
     let template = dir.join("%(extractor)s %(id)s.%(ext)s").to_string_lossy().into_owned();
-    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o", &template, url])?;
+    let out = run_ytdlp(&["--no-warnings", "--no-playlist", "-f", "b[height<=480]/ba/b", "--print", "after_move:filepath", "-o", &template, url], report, stop)?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(p) if out.status.success() && std::path::Path::new(p.trim()).exists() => {

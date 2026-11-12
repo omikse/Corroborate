@@ -139,6 +139,11 @@ pub fn decoders_at_once() -> usize {
 
 static DECODING: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
+/// How many turns to decode are taken now.
+pub fn decoding_now() -> usize {
+    *DECODING.0.lock().unwrap()
+}
+
 /// A turn to decode a recording, given back when dropped.
 pub struct DecodeTurn(());
 

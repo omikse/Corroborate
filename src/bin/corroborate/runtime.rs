@@ -4,6 +4,7 @@
 //! keeps the shared state the GUI reads.
 
 use crate::enf_node::{self, EnfJob, EnfState};
+use crate::jobs::{End, Progress, StepState};
 use crate::planes_node::{self, PlanesState};
 use crate::plugin_node::{self, PluginJob, PluginState};
 use crate::sourcer_node;
@@ -40,8 +41,8 @@ pub struct NodeState {
     pub found: Option<std::sync::Arc<crate::audio_match_node::Found>>,
     /// Cut detector: what its run found in the recording.
     pub cut: Option<std::sync::Arc<crate::cut_detector_node::Scan>>,
-    /// Cut detector: its run's steps and how far each has got.
-    pub cut_progress: crate::cut_detector_node::Progress,
+    /// Every job's run: its steps and how far each has got, what it waits for, how it ended.
+    pub progress: crate::jobs::Progress,
     /// What a program sent on each of its outputs (the data bus), and a count of the changes.
     pub outbox: Vec<(&'static str, corroborate::data::Data)>,
     pub outbox_rev: u64,
@@ -92,10 +93,47 @@ pub struct Job {
     pub downloads: std::path::PathBuf,
 }
 
+/// The steps of a source's run, and of the nodes reading its sound.
+const DOWNLOAD: &str = "download";
+const DECODE: &str = "decode";
+const READ: &str = "read the sound";
+
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Starts a source's run: its state and the states of what it feeds say so at once (queued),
+/// then a thread of its own does the work.
 pub fn start(job: Job) {
-    thread::spawn(move || run(job));
+    let run_id = RUNS.fetch_add(1, Ordering::Relaxed);
+    // A link is live only once it is known to be (yt-dlp says so, or a stream URL): while yt-dlp
+    // checks it or downloads a video, nothing treats it as live (no pulsing wires, no playhead
+    // following its audio).
+    let live = matches!(job.input, Input::Mic(_));
+    let key = job.input.key();
+    // The steps: a web page's download, then the decode; the nodes it feeds read the sound as it
+    // comes (they wait while it downloads or waits for its turn).
+    let web = is_web(&job.input);
+    for (k, s) in all_states(&job).into_iter().enumerate() {
+        let mut s = s.lock().unwrap();
+        s.reset();
+        s.run_id = run_id;
+        s.running = true;
+        s.live = live;
+        s.source_label = job.label.clone();
+        s.source_key = key.clone();
+        s.status = "starting".into();
+        s.progress = if k == 0 { Progress::new(if web { vec![DOWNLOAD, DECODE] } else { vec![DECODE] }) } else { Progress::new([READ]) };
+        s.progress.waits = match k {
+            0 if web || live => None,
+            0 => Some(crate::jobs::turn_waits()),
+            _ => Some(format!("for '{}'", job.label)),
+        };
+    }
+    thread::spawn(move || run(job, run_id));
+}
+
+/// A web page yt-dlp resolves (and downloads, when it is not live).
+fn is_web(input: &Input) -> bool {
+    matches!(input, Input::Url(u) if sourcer_node::kind_of(u).contains("yt-dlp"))
 }
 
 fn all_states(job: &Job) -> Vec<Shared> {
@@ -106,32 +144,48 @@ fn all_states(job: &Job) -> Vec<Shared> {
     v
 }
 
-fn run(job: Job) {
-    let run_id = RUNS.fetch_add(1, Ordering::Relaxed);
-    // A link is live only once it is known to be (yt-dlp says so, or a stream URL): while yt-dlp
-    // checks it or downloads a video, nothing treats it as live (no pulsing wires, no playhead
-    // following its audio).
+fn run(job: Job, run_id: u64) {
     let mut live = matches!(job.input, Input::Mic(_));
     let key = job.input.key();
-    for s in all_states(&job) {
-        let mut s = s.lock().unwrap();
-        s.reset();
-        s.run_id = run_id;
-        s.running = true;
-        s.live = live;
-        s.source_label = job.label.clone();
-        s.source_key = key.clone();
-        s.status = "starting".into();
-    }
+    let web = is_web(&job.input);
     let set_status = |text: &str| job.source.lock().unwrap().status = text.to_string();
+    // Write into every state of this run (not one a newer run took over).
+    let each = |f: &dyn Fn(usize, &mut NodeState)| {
+        for (k, s) in all_states(&job).into_iter().enumerate() {
+            let mut s = s.lock().unwrap();
+            if s.run_id == run_id {
+                f(k, &mut s);
+            }
+        }
+    };
+    // The source's step; what the others wait for follows it.
+    let source_step = |name: &str, st: StepState, frac: f32| {
+        each(&|k, s| {
+            if k == 0 {
+                s.progress.step(name, st, frac, "");
+            } else if s.progress.waits.is_some() {
+                s.progress.waits = Some(format!("for '{}' ({name}{})", job.label, if frac >= 0.0 { format!(" {:.0}%", frac * 100.0) } else { String::new() }));
+            }
+        })
+    };
 
     let ff_input = match &job.input {
         Input::File(p) => p.clone(),
         Input::Mic(d) => format!("dshow:{d}"),
         Input::Url(u) => {
             set_status("yt-dlp: checking the link, downloading the audio if it is not live…");
-            match sourcer_node::resolve(u, &job.downloads) {
+            if web {
+                source_step(DOWNLOAD, StepState::Working, -1.0);
+            }
+            let report = |f: f32| {
+                set_status(&format!("yt-dlp: downloading {:.0}%", f * 100.0));
+                source_step(DOWNLOAD, StepState::Working, f);
+            };
+            match sourcer_node::resolve(u, &job.downloads, &report, &job.stop) {
                 Ok((r, is_live)) => {
+                    if web {
+                        source_step(DOWNLOAD, StepState::Done, 1.0);
+                    }
                     // A video that is not live is read as a recording: as fast as it decodes.
                     live = is_live;
                     for s in all_states(&job) {
@@ -161,6 +215,8 @@ fn run(job: Job) {
         None
     } else {
         set_status(&format!("waiting: {} recordings decode at once", ingest::decoders_at_once()));
+        let w = crate::jobs::turn_waits();
+        each(&|k, s| s.progress.waits = Some(if k == 0 { w.clone() } else { format!("for '{}' ({w})", job.label) }));
         match ingest::decode_turn(&job.stop) {
             Some(t) => Some(t),
             None => return finish(&job, run_id, Ok(0.0)),
@@ -175,6 +231,11 @@ fn run(job: Job) {
     let mut enfs: Vec<_> = job.enfs.iter().map(enf_node::start).collect();
 
     set_status(if live { "connecting…" } else { "decoding…" });
+    // How long the recording is, for how far the decode has got.
+    let total = if live || !std::path::Path::new(&ff_input).exists() { None } else { timebase::file_facts(&ff_input).len.filter(|l| *l > 0.0) };
+    let part = |secs: f64| total.map_or(-1.0, |l| (secs / l).clamp(0.0, 1.0) as f32);
+    each(&|k, s| s.progress.step(if k == 0 { DECODE } else { READ }, StepState::Working, part(0.0), ""));
+    let mut shown = -1i32;
     ingest::LAST_ERROR.lock().unwrap().clear();
     let (mut child, rx, first) = match ingest::spawn_ffmpeg_logged(&ff_input, INPUT_SR as u32, None) {
         Ok(x) => x,
@@ -200,6 +261,12 @@ fn run(job: Job) {
         n += x.len() as u64;
         let an = anchor.lock().unwrap().clone();
         let audio_s = n as f64 / INPUT_SR;
+        // How far, every half percent.
+        let f = part(audio_s);
+        if f >= 0.0 && (f * 200.0) as i32 != shown {
+            shown = (f * 200.0) as i32;
+            each(&|k, s| s.progress.step(if k == 0 { DECODE } else { READ }, StepState::Working, f, ""));
+        }
 
         for (i, feed) in feeds.iter_mut().enumerate() {
             if feed.as_ref().is_some_and(|tx| !plugin_node::feed(tx, &x, live, &job.plugins[i].state)) {
@@ -255,11 +322,22 @@ fn run(job: Job) {
 
 fn finish(job: &Job, run_id: u64, r: Result<f64, String>) {
     let stopped = job.stop.load(Ordering::Relaxed);
-    for s in all_states(job) {
+    for (k, s) in all_states(job).into_iter().enumerate() {
         let mut s = s.lock().unwrap();
         if s.run_id == run_id {
             s.running = false;
             s.done = true;
+            for st in &mut s.progress.steps {
+                if st.state == StepState::Working {
+                    st.state = if r.is_ok() && !stopped { StepState::Done } else { StepState::Failed };
+                }
+            }
+            s.progress.finish(match &r {
+                _ if stopped => End::Cancelled,
+                Ok(_) => End::Done,
+                Err(e) if k == 0 => End::Failed(e.clone()),
+                Err(_) => End::Failed(format!("needs '{}', which failed", job.label)),
+            });
         }
     }
     let mut s = job.source.lock().unwrap();

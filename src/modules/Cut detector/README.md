@@ -96,7 +96,9 @@ the strongest among equals.
   keyframes, sound, level and noise, each compare), each with a dot: grey waiting, yellow working
   (with how far, in percent and a bar, or a moving block when that is not known), green done, red
   failed (hover for why). Once all are done: how long it took, how many cuts are on, how many
-  pieces.
+  pieces. The state dot before its name says the same in one dot: queued while it waits for the
+  SOURCER's download ("for 'phone 3' (download 34%)") or a turn to decode, working, done, failed
+  (nothing wired, nothing read), cancelled by Stop.
 - The filmstrip (a picture a second; a long recording's pictures go into one texture in rows, as
   a texture has a largest side), the waveform (the source's), then the lanes: a lane's curve,
   its marks (strong when over the threshold) and its threshold as a dashed line. Drag the

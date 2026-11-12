@@ -37,6 +37,8 @@ pub struct Scan {
 /// with the run it was on before this one (the source's decoded audio is this run's once its run
 /// differs and is done).
 pub struct Job {
+    /// The source node's name (what the run waits for, in words).
+    pub name: String,
     pub path: String,
     /// A video from the web whose copy its SOURCER is still downloading into `downloads`: the
     /// run waits for it (`path` is then empty).
@@ -59,32 +61,7 @@ pub struct Other {
     pub source: Option<(Shared, u64)>,
 }
 
-/// Where a step of a run is.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum StepState {
-    Waiting,
-    Working,
-    Done,
-    Failed,
-}
-
-/// One step of a run: its name, where it is, how far (0 to 1; below 0 when not known) and what
-/// went wrong.
-#[derive(Clone, Debug)]
-pub struct Step {
-    pub name: String,
-    pub state: StepState,
-    pub frac: f32,
-    pub note: String,
-}
-
-/// A run's steps, when it started and how long it took once it ended.
-#[derive(Clone, Debug, Default)]
-pub struct Progress {
-    pub steps: Vec<Step>,
-    pub started: Option<std::time::Instant>,
-    pub took: Option<f64>,
-}
+pub use crate::jobs::{Progress, StepState};
 
 /// The steps of a run, by name.
 const DOWNLOAD: &str = "download";
@@ -95,13 +72,15 @@ const LEVELS: &str = "level and noise";
 
 /// The file of a video from the web once its SOURCER has a copy in `dir`: waits while the
 /// SOURCER's run downloads it.
-fn wait_copy(url: &str, dir: &std::path::Path, source: &Option<(Shared, u64)>, stop: &AtomicBool) -> Result<String, String> {
+/// `waiting` is told what it waits for ("for 'phone 3' (download 34%)").
+fn wait_copy(url: &str, dir: &std::path::Path, source: &Option<(Shared, u64)>, name: &str, stop: &AtomicBool, waiting: &dyn Fn(String)) -> Result<String, String> {
     loop {
         if stop.load(Ordering::Relaxed) {
             return Err("stopped".into());
         }
         let ended = source.as_ref().map(|(st, before)| {
             let s = st.lock().unwrap();
+            waiting(crate::jobs::waits_for(name, &s));
             (s.run_id != *before && s.live, s.run_id != *before && s.done && !s.running, s.status.clone())
         });
         if let Some(p) = sourcer_node::listed(url, dir) {
@@ -142,7 +121,9 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
     let job = match job {
         Ok(j) => j,
         Err(e) => {
-            state.lock().unwrap().status = e;
+            let mut s = state.lock().unwrap();
+            s.progress.finish(crate::jobs::End::Failed(e.clone()));
+            s.status = e;
             return;
         }
     };
@@ -161,13 +142,31 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
             names.push(LEVELS.into());
         }
         names.extend(job.compare.iter().map(|o| format!("compare: {}", o.name)));
-        let steps = names.into_iter().map(|name| Step { name, state: StepState::Waiting, frac: -1.0, note: String::new() }).collect();
         let mut s = state.lock().unwrap();
         s.running = true;
         s.status = "waiting for its turn to decode…".into();
-        s.cut_progress = Progress { steps, started: Some(std::time::Instant::now()), took: None };
+        s.progress = Progress::new(names);
+        // First it waits for the download, or for a turn to decode the picture.
+        if job.url.is_some() {
+            s.progress.waits = Some(format!("for '{}'", job.name));
+        } else if job.video {
+            s.progress.waits = Some(crate::jobs::turn_waits());
+        }
     }
     std::thread::spawn(move || {
+        work(&state, run, &job, &stop);
+        // Ended without saying how: stopped (or a newer run has it).
+        let mut s = state.lock().unwrap();
+        if s.run_id == run && s.running {
+            s.running = false;
+            s.progress.finish(if stop.load(Ordering::Relaxed) { crate::jobs::End::Cancelled } else { crate::jobs::End::Failed("ended without a result".into()) });
+        }
+    });
+}
+
+/// The run itself (`start`'s thread).
+fn work(state: &Shared, run: u64, job: &Job, stop: &Arc<AtomicBool>) {
+    {
         let set = |f: &dyn Fn(&mut runtime::NodeState)| {
             let mut s = state.lock().unwrap();
             if s.run_id == run && !stop.load(Ordering::Relaxed) {
@@ -175,29 +174,21 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
             }
         };
         // A step's state, how far it has got, and what went wrong.
-        let step = |name: &str, st: StepState, frac: f32, note: &str| {
-            set(&|s| {
-                if let Some(k) = s.cut_progress.steps.iter_mut().find(|k| k.name == name) {
-                    k.state = st;
-                    k.frac = frac;
-                    k.note = note.to_string();
-                }
-            })
-        };
-        let end = |summary: String| {
+        let step = |name: &str, st: StepState, frac: f32, note: &str| set(&|s| s.progress.step(name, st, frac, note));
+        let waits = |w: String| set(&|s| s.progress.waits = Some(w.clone()));
+        let end = |summary: String, failed: bool| {
             set(&|s| {
                 s.status = summary.clone();
                 s.running = false;
                 s.done = true;
-                s.cut_progress.took = s.cut_progress.started.map(|t| t.elapsed().as_secs_f64());
+                s.progress.finish(if failed { crate::jobs::End::Failed(summary.clone()) } else { crate::jobs::End::Done });
             })
         };
         let path = match &job.url {
             None => job.path.clone(),
             Some(url) => {
-                step(DOWNLOAD, StepState::Working, -1.0, "");
                 set(&|s| s.status = "waiting for the SOURCER to download the video…".into());
-                match wait_copy(url, &job.downloads, &job.source, &stop) {
+                match wait_copy(url, &job.downloads, &job.source, &job.name, stop, &|w| waits(w)) {
                     Ok(p) => {
                         step(DOWNLOAD, StepState::Done, 1.0, &p);
                         p
@@ -205,7 +196,7 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
                     Err(e) if e == "stopped" => return,
                     Err(e) => {
                         step(DOWNLOAD, StepState::Failed, 0.0, &e);
-                        return end(e);
+                        return end(e, true);
                     }
                 }
             }
@@ -215,7 +206,8 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
         let part = |secs: f64| total.map_or(-1.0, |l| (secs / l).clamp(0.0, 1.0) as f32);
         let mut scan = Scan { path: path.clone(), ..Default::default() };
         if job.video {
-            let turn = corroborate::ingest::decode_turn(&stop);
+            waits(crate::jobs::turn_waits());
+            let turn = corroborate::ingest::decode_turn(stop);
             if turn.is_none() {
                 return;
             }
@@ -286,7 +278,7 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
                             set(&|s| s.status = format!("comparing with {}…", o.name));
                             let theirs = match &o.url {
                                 None => o.path.clone(),
-                                Some(u) => match wait_copy(u, &job.downloads, &o.source, &stop) {
+                                Some(u) => match wait_copy(u, &job.downloads, &o.source, &o.name, stop, &|_| {}) {
                                     Ok(p) => p,
                                     Err(e) if e == "stopped" => return,
                                     Err(e) => {
@@ -323,10 +315,10 @@ pub fn start(state: Shared, job: Result<Job, String>, stop: Arc<AtomicBool>) {
             scan.frame_s = 1.0 / 30.0;
         }
         let summary = if scan.notes.is_empty() { format!("{} lanes read", scan.lanes.len()) } else { scan.notes.join("; ") };
-        end(summary);
+        end(summary, scan.lanes.is_empty());
         let scan = Arc::new(scan);
         set(&|s| s.cut = Some(scan.clone()));
-    });
+    }
 }
 
 /// The node's cuts and pieces now.
@@ -523,7 +515,7 @@ impl App {
                 compare.push(Other { key, name: rec_name(self, f), path: p, url, source: before.get(&f).map(|&r| (self.nodes[f].state.clone(), r)) });
             }
         }
-        Ok(Job { path, url, downloads, video, audio, source, compare })
+        Ok(Job { name: self.node_name(src), path, url, downloads, video, audio, source, compare })
     }
 
     /// The file SOURCER `f` reads: a file, or the copy of a video from the web in `dir` (with
@@ -1074,7 +1066,7 @@ impl crate::look::NodeLook for Look {
         // what is missing.
         let (status, prog, running) = {
             let s = app.nodes[i].state.lock().unwrap();
-            (s.status.clone(), s.cut_progress.clone(), s.running)
+            (s.status.clone(), s.progress.clone(), s.running)
         };
         let mut act: Option<Act> = None;
         {
@@ -1133,7 +1125,7 @@ impl crate::look::NodeLook for Look {
                 let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
                 match (prog.took, prog.started) {
                     (Some(took), _) => {
-                        put(None, format!("done in {}", took_text(took)), DONE, None);
+                        put(None, format!("done in {}", crate::jobs::took_text(took)), DONE, None);
                         put(None, format!("{on} of {} on · {}", plural(v.cuts.len(), "cut"), plural(v.pieces.len(), "piece")), TEXT, None);
                     }
                     (None, Some(t0)) => {
@@ -1559,11 +1551,6 @@ impl crate::look::NodeLook for Look {
             None => {}
         }
     }
-}
-
-/// How long a run took: seconds with a tenth under a minute, else minutes and seconds.
-fn took_text(s: f64) -> String {
-    if s < 60.0 { format!("{s:.1} s") } else { sourcer_node::fmt_secs(s) }
 }
 
 /// How `n` filmstrip pictures go into one texture whose sides are at most `max_side` pixels:

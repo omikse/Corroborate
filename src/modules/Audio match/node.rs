@@ -36,6 +36,12 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::thread;
 
+use crate::jobs::StepState;
+
+/// The steps of a run, by name.
+const FINGERPRINT: &str = "decode and fingerprint";
+const MATCH: &str = "match";
+
 /// How far one wired recording has got in a run.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stage {
@@ -975,12 +981,17 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
         }
     };
     if files.len() < 2 {
-        set(&|s| s.status = format!("wire two recordings or more{note}"));
+        set(&|s| {
+            s.status = format!("wire two recordings or more{note}");
+            s.progress.finish(crate::jobs::End::Failed(s.status.clone()));
+        });
         return;
     }
     set(&|s| {
         s.running = true;
         s.status = format!("waiting for {} recordings to decode…", files.len());
+        s.progress = crate::jobs::Progress::new([FINGERPRINT, MATCH]);
+        s.progress.waits = Some(format!("for its {} recordings to decode", files.len()));
     });
     let stop2 = stop.clone();
     thread::spawn(move || {
@@ -996,6 +1007,7 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
             if s.run_id == run {
                 s.running = false;
                 s.status = "stopped".into();
+                s.progress.finish(crate::jobs::End::Cancelled);
             }
         };
         // A core per recording at a time: each waits for its source's audio (or decodes the
@@ -1033,6 +1045,8 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             let audio = audio.map(|a| piece_of(a, w.range)).and_then(|a| if a.is_empty() { Err("the piece has no sound".to_string()) } else { Ok(a) });
                             if audio.is_ok() {
                                 stage(Stage::Fingerprinting);
+                                let n = ready.load(Ordering::Relaxed);
+                                set(&|s| s.progress.step(FINGERPRINT, StepState::Working, n as f32 / files.len() as f32, ""));
                             }
                             let clip = audio.map(Clip::new);
                             stage(match &clip {
@@ -1041,7 +1055,12 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                             });
                             done.push((k, clip));
                             let n = ready.fetch_add(1, Ordering::Relaxed) + 1;
-                            set(&|s| s.status = format!("fingerprinted {n} of {} recordings…", files.len()));
+                            set(&|s| {
+                                s.status = format!("fingerprinted {n} of {} recordings…", files.len());
+                                if s.progress.waits.is_none() {
+                                    s.progress.step(FINGERPRINT, StepState::Working, n as f32 / files.len() as f32, "");
+                                }
+                            });
                         }
                         done
                     })
@@ -1069,7 +1088,11 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
                 Err(e) => errors.push(format!("{}: {e}", w.label)),
             }
         }
-        set(&|s| s.status = format!("matching {} pairs…", clips.len() * clips.len().saturating_sub(1) / 2));
+        set(&|s| {
+            s.status = format!("matching {} pairs…", clips.len() * clips.len().saturating_sub(1) / 2);
+            s.progress.step(FINGERPRINT, StepState::Done, 1.0, "");
+            s.progress.step(MATCH, StepState::Working, -1.0, "");
+        });
         let refs: Vec<&Clip> = clips.iter().collect();
         let found = audio_match::match_all(&refs);
         if stop2.load(Ordering::Relaxed) {
@@ -1083,6 +1106,8 @@ pub fn start(state: Shared, files: Vec<Wired>, other: Vec<String>, stop: Arc<Ato
             s.status = format!("{}{note}", r.status);
             s.running = false;
             s.done = true;
+            s.progress.step(MATCH, StepState::Done, 1.0, "");
+            s.progress.finish(if clips.len() < 2 { crate::jobs::End::Failed(s.status.clone()) } else { crate::jobs::End::Done });
         });
     });
 }

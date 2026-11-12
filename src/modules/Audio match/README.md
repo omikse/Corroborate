@@ -121,6 +121,12 @@ and the findings on the Jiku Mobile Video Dataset (50 phones at one event: 95 % 
 truth's spanning-tree edges found, none wrong, moments within 16 ms for 95 %) are in the library
 module `src/audio_match.rs`; the real-data test is `tests/jiku.rs` (`tools/jiku.py` fetches it).
 
+Its state is on the dot before its name and in the queue list: queued while its recordings
+decode (fed pieces: while its Cut detectors read, and failed or cancelled at once when one of them
+fails or is cancelled), then working through two steps, decode and fingerprint (with how many of
+the recordings are done) and match; done with how long it took, or failed when fewer than two
+recordings could be read.
+
 Limits now: files only (a stream or microphone wired in is named in the status and left out);
 each file is decoded again here, and all are matched once their decoding is done, not while
 the sources play.

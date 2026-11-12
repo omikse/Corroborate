@@ -35,12 +35,15 @@ mod recordings_tests;
 mod groups_tests;
 #[cfg(test)]
 mod cut_tests;
+#[cfg(test)]
+mod jobs_tests;
 mod bus;
 mod canvas;
 mod drop_menu;
 mod google_maps;
 mod groups;
 mod evidence;
+mod jobs;
 mod playhead;
 mod sound;
 mod trace;
@@ -267,6 +270,8 @@ struct App {
     /// Stopped: nothing runs until Run (a project opens stopped, so a big one does not start
     /// decoding everything at once). Running, changes restart the graph by themselves.
     stopped: bool,
+    /// The queue list is open (Queue in the top bar).
+    queue_open: bool,
     /// Module manifests by id (looks, ports), read again each second; and when.
     looks: HashMap<&'static str, Arc<corroborate::module_manifest::Manifest>>,
     looks_at: Instant,
@@ -358,6 +363,7 @@ impl App {
             setting_errors: HashMap::new(),
             runs: 0,
             stopped: false,
+            queue_open: false,
             looks: HashMap::new(),
             looks_at: Instant::now(),
             scripts: Default::default(),
@@ -1272,7 +1278,21 @@ impl App {
             let tc = if fade { DIM } else { TEXT };
             let lab = &self.nodes[i].label;
             let lab = if lab.chars().count() > 21 { format!("{}…", lab.chars().take(20).collect::<String>()) } else { lab.clone() };
-            painter.text(head.left_center() + Vec2::new(9.0 * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
+            // A job's state: a dot before its name (turning while queued or working, pulsing
+            // while live); hovering it says the step and how far, what it waits for, or why it
+            // failed.
+            let mut name_x = 9.0;
+            if let Some(job) = self.job_view(i) {
+                let c = head.left_center() + Vec2::new(14.0 * self.zoom, 0.0);
+                let r = jobs::DOT_R * self.zoom;
+                if jobs::draw_dot(&painter, c, r, job.state, ui.input(|i| i.time)) {
+                    ui.ctx().request_repaint();
+                }
+                let hit = Rect::from_center_size(c, Vec2::splat(r * 2.0 + 6.0 * self.zoom));
+                ui.interact(hit, egui::Id::new(("state dot", i)), Sense::hover()).on_hover_text(job.text());
+                name_x = 24.0;
+            }
+            painter.text(head.left_center() + Vec2::new(name_x * self.zoom, 0.0), Align2::LEFT_CENTER, lab, FontId::proportional(13.0 * self.zoom), tc);
             painter.text(head.right_center() - Vec2::new(9.0 * self.zoom, 0.0), Align2::RIGHT_CENTER, if spec.name == groups::GROUP { "group" } else { role_text(spec.role) }, FontId::proportional(10.0 * self.zoom), DIM);
             // The node's own drawing and controls: its look.rhai when it has one (which may call
             // the folder's Rust `Look` as native()), else that `Look`.
@@ -1554,6 +1574,10 @@ impl App {
                 self.msg.clear();
                 self.run();
             }
+            // The queue list: every job's state, step and how far.
+            if bar_button(ui, "Queue", Extra::Count(self.queue_counts()), self.queue_open, true).on_hover_text("every node that does work: what it does, waits for, how long it took").clicked() {
+                self.queue_open = !self.queue_open;
+            }
             ui.separator();
             ui.menu_button("+ Add node", |ui| {
                 let at = Pos2::new(400.0, 300.0) - self.pan;
@@ -1723,6 +1747,7 @@ impl App {
         self.sync_groups();
         self.sync_cut_ports();
         let ctx = ui.ctx().clone();
+        self.queue_window(&ctx);
         self.ask_file_facts(&ctx);
         self.ask_ui(&ctx);
         self.sync_recordings();

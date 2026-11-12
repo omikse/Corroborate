@@ -1,7 +1,7 @@
 # Running, the queue, and keeping results
 
-Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions); nothing
-built. The mockup: [mockup.html](mockup.html) (open it in a
+Status: planned on 2026-11-12 and settled in an interview the same day (see Decisions). Stage 1
+(show it) is built; stages 2 to 4 are not. The mockup: [mockup.html](mockup.html) (open it in a
 browser; it runs two made-up projects, Simple and Difficult, so every state can be seen).
 
 ## The question it answers
@@ -167,6 +167,11 @@ download is never treated as live (22f9f14).
    state dot on job nodes, the queue list (read only), yt-dlp's download percent on the SOURCER.
    No change to how runs start. Test: headless, the states and the list on a project with a link,
    a file, a Cut detector and an Audio match.
+   **Built** (2026-11-12): `jobs.rs` (the progress every job writes, its state, the dot, the queue
+   list), the SOURCER's steps and yt-dlp's percent (`--progress-template`), the Cut detector's and
+   Audio match's waits and ends; Stop shows what had not ended as cancelled. Tested in
+   `jobs_tests.rs` on files (a link would download: its percent is tested on yt-dlp's progress
+   lines). Not yet: programs on the data bus have no dot (stage 4); no stale or kept (stages 2, 3).
 2. **The queue.** Jobs with needs and turns; ▶ on a node runs it and what it needs; Stop and Cancel;
    a change marks stale, Auto queues the stale ones. The ad hoc waits in Audio match and the Cut
    detector go. Test: ▶ on an Audio match fed pieces runs the SOURCERs, then the Cut detector, then

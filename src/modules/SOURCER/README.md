@@ -18,7 +18,9 @@ folder. A project not saved yet has no folder: it downloads into `recordings\` n
 once saved, its next run copies the video from there into its own folder (no download). The folder's
 `downloads.txt` lists each link with its file (by name, so the list holds when the folder moves), so a
 later run (any change upstream or downstream) reads the copy without calling yt-dlp; YouTube links
-match by video id. Delete the file in the project's `recordings\` to download again. A link is
+match by video id. Delete the file in the project's `recordings\` to download again. The download's
+percent (yt-dlp's progress lines) is on the status line, the state dot and the queue list; Stop ends
+the download. A link is
 live only once yt-dlp says so: while it checks the link or downloads, the source is not live (its
 wires do not pulse, its playhead does not follow the audio coming in).
 
@@ -41,6 +43,11 @@ Ports:
   a Map node wired to it). A wired output is always shown, so emptying the source box keeps wires as
   they are.
 - setting `source`: the path, URL or `mic:<device>` in the first box.
+
+The run's steps (download for a web page, then decode, with percent from the file's length) and
+its state are on the dot before its name and in the queue list; the nodes reading its sound (ENF,
+Planes, plugins) wait for it there ("for 'phone 3' (download 34%)") and fail with it ("needs
+'phone 3', which failed").
 
 On the canvas: the two boxes, then (once there is a source) status and UTC clock, the waveform (the whole recording, or the last 30 s when live;
 hover it to read the time), and for video a viewer with one small frame a second (hover the waveform

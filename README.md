@@ -33,9 +33,19 @@ The tool is one movable folder: everything it keeps lives next to the program (i
 In the workbench: right-click (or **+ Add node**) to add nodes, drag from a dot to a dot to wire
 (types must match). Nodes have no windows: each shows its data and controls on the canvas.
 
+Every node that does work (SOURCER, Cut detector, Audio match, ENF, Planes, plugins) has a state
+dot before its name: grey not run, a turning grey ring while queued (waiting for another node or a
+turn to decode), a turning yellow ring while working, green done, red failed, brown cancelled, a
+pulsing red dot while live. Hover it for the step and percent, what it waits for, how long it took
+or why it failed. After Stop, what had not ended shows cancelled at once. (docs/run-queue/plan.md,
+stage 1: running one node, a queue that starts things, and kept results come next.)
+
 The top bar: the project menu (its button is the project's name, with • while it has unsaved
 changes); **▶ Run**, **■ Stop** and **↻ Restart**, always there, Run lit while running and showing
-how many nodes run (Run while running does nothing; Restart starts again); **+ Add node**, which
+how many nodes run (Run while running does nothing; Restart starts again); **Queue**, with counts
+("2 working · 1 queued", after a run "5 done · 1 failed"), which opens the list of every node that
+does work, in the order they started: its state, step and percent (with a bar), what it waits for,
+how long it took or why it failed; **+ Add node**, which
 also has **Live device** (this computer's microphones and capture cards, asked of ffmpeg when it
 opens) and **Value of a type**; **Types**, every data type that travels on wires; **Arrange**; and a warning when recordings are missing or changed,
 which opens their list. Messages are at the bottom of the canvas, over the line of keys.
