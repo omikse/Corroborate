@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Time Node</title>
+<style>
+:root{
+  --canvas:#16181c; --node:#2a2d33; --head:#23262b; --box:#1b1e23; --boxline:#3a3f47; --seam:#101215;
+  --text:#d8dbe0; --dim:#8a9099; --faint:#565c66; --grey:#4a4f58; --add:#3a3f47;
+  --blue:#7db4e6; --red:#e0524f; --violet:#a98be0;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,monospace; --sans:"Inter",system-ui,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--text);font:13px/1.4 var(--sans);padding:32px 16px 48px}
+main{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.stage{overflow-x:auto;padding:8px 0 8px 64px}
+
+/* node */
+.node{position:relative;width:560px;background:var(--node);border:1px solid var(--boxline);border-radius:4px}
+.title{height:30px;display:flex;align-items:center;gap:8px;padding:0 10px;background:var(--head);border-bottom:1px solid var(--seam)}
+.title .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.title .nm span{color:var(--dim)}
+.title .kind{margin-left:auto;color:var(--dim);font-size:11px}
+.body{position:relative;padding:8px 0 10px}
+
+/* one grid for every row: name | sign | fields | error margin | remove */
+.row{display:grid;grid-template-columns:60px 20px 316px 102px 26px;align-items:center;height:26px;margin-bottom:6px;position:relative}
+.hdr{display:grid;grid-template-columns:60px 20px 316px 102px 26px;height:16px;margin-bottom:4px;align-items:center}
+.nmc{padding-left:12px;color:var(--dim);font-size:12px;white-space:nowrap;position:relative}
+.sgc{display:flex;justify-content:center}
+.sign{width:18px;height:18px;padding:0;border:1px solid var(--boxline);background:#30343b;color:var(--text);font:13px/16px var(--mono);text-align:center;cursor:pointer;border-radius:2px}
+.sign.neg{color:#e58a9a}
+.cells{padding-left:8px}
+
+/* the fields: 13 cells on one fixed grid, so every row lines up */
+.fields{display:grid;grid-template-columns:50px 9px 30px 9px 30px 14px 30px 9px 30px 9px 30px 9px 42px;align-items:center;width:301px;height:22px}
+.fields .b{height:22px;background:var(--box);border:1px solid var(--boxline);font:12.5px/20px var(--mono);text-align:center;color:var(--text);font-variant-numeric:tabular-nums}
+.fields .b.z{color:var(--faint)}
+.fields .b.lock{background:#202328;border-color:#2d3138;color:var(--dim)}
+.fields .sep{text-align:center;color:var(--faint);font:12px var(--mono)}
+.fields.fed{outline:1.5px solid var(--red);outline-offset:3px;border-radius:3px}
+.fields.fed.in{outline-color:var(--blue)}
+.flow .frame{fill:none;stroke:var(--blue);stroke-width:1.5}
+.hdr .fields{height:16px}
+.hdr .fields span{font:10px var(--mono);color:var(--faint);text-align:center}
+
+/* error margin column */
+.em{padding-left:28px;position:relative;display:flex;align-items:center}
+.em .b{width:70px;height:22px;background:var(--box);border:1px solid var(--boxline);font:12.5px/20px var(--mono);text-align:right;padding-right:6px;color:var(--text)}
+.em .b.lock{background:#202328;border-color:#2d3138;color:var(--dim)}
+.em .b.z{color:var(--faint)}
+.em sup{position:absolute;right:2px;top:2px;font:9px var(--mono);color:var(--violet)}
+.emh{font:9.5px var(--mono);color:var(--faint);white-space:nowrap;padding-left:28px;text-align:center}
+.x{text-align:center;color:var(--faint);cursor:pointer;font-size:13px}
+
+/* sockets: circles on the node's edge, wires come in from outside */
+.port{position:absolute;left:-6px;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;border:1.5px solid var(--grey);background:var(--node)}
+.port.in{border-color:var(--blue);background:var(--blue)}
+.port.fed{border-color:var(--red)}
+.port.wait{border:1.5px dashed var(--faint);background:transparent}
+.wire{position:absolute;left:-46px;top:50%;width:40px;height:2px;margin-top:-1px;background:var(--red)}
+.wire.blue{background:var(--blue)}
+.out{position:absolute;right:-6px;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;border:1.5px solid var(--blue);background:var(--blue)}
+.tm{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:12px}
+
+/* + row: one grey strip, the width of the fields */
+.addrow{height:22px;width:301px;background:var(--add);border-radius:3px;text-align:center;line-height:22px;color:var(--text);font-size:12px}
+
+.res{margin-top:14px}
+.res .nmc{color:var(--text)}
+
+/* flow: the output line, and the root sign's bar and hook */
+.flow{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0}
+.flow .glow{fill:none;stroke:var(--blue);stroke-width:6;opacity:.12}
+.flow .main{fill:none;stroke:var(--blue);stroke-width:2;opacity:.85}
+.flow .conn{fill:none;stroke-width:1.6;opacity:.9}
+.root{position:absolute;overflow:visible}
+
+.choices{margin:0;padding-left:28px;color:var(--dim);font-size:13px;line-height:1.55;display:flex;flex-direction:column;gap:4px;max-width:68ch}
+.choices li::marker{color:var(--faint);font:12px var(--mono)}
+.card{background:#1d2025;border:1px solid #2c3036;border-radius:6px;padding:10px 12px;font-size:12.5px;color:var(--dim)}
+.card b{display:block;color:var(--text);font-weight:600;font-size:13px;margin-bottom:3px}
+
+/* ---- style study: salvaged machine (burlap, rust, brass, ink); every texture drawn in code ---- */
+.studyh{margin:18px 0 0;font:15px/1.3 "Special Elite",var(--mono);color:#d9c39a;letter-spacing:.02em}
+.studyp{margin:-14px 0 0;color:var(--dim);font-size:12.5px;max-width:68ch}
+.steam{
+  --node:#b39a6c; --head:#5e341c; --box:#ecdcb8; --boxline:#3b2716; --seam:#2a1a0e;
+  --text:#2a1b10; --dim:#5a4430; --faint:#8a7454; --grey:#6a5038; --add:#8f7650;
+  --blue:#2f7d7a; --red:#9e3519; --violet:#6b3f73;
+  --type:"Special Elite","Courier New",var(--mono);
+  --noise:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .22 0 0 0 0 .14 0 0 0 0 .07 0 0 0 .45 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  --rust:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='60'><filter id='r'><feTurbulence type='fractalNoise' baseFrequency='.06 .35' numOctaves='3' seed='7' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .78 0 0 0 0 .38 0 0 0 0 .14 0 0 0 1.4 -.55'/></filter><rect width='100%' height='100%' filter='url(%23r)'/></svg>");
+  color:var(--text);
+  background:radial-gradient(ellipse 70% 80% at 50% 45%,#3b2a1b 0%,#1d140d 60%,#0d0906 100%);
+  border-radius:8px;box-shadow:inset 0 0 60px rgba(0,0,0,.7)
+}
+.steam .stage{padding:34px 16px 34px 70px}
+/* burlap body: a woven grid under a grain */
+.steam .node{border:2px solid var(--seam);border-radius:7px;
+  background-color:var(--node);
+  background-image:var(--noise),
+    repeating-linear-gradient(0deg,rgba(70,45,20,.16) 0 1px,transparent 1px 3px),
+    repeating-linear-gradient(90deg,rgba(70,45,20,.13) 0 1px,transparent 1px 3px);
+  box-shadow:0 10px 28px rgba(0,0,0,.65),inset 0 0 22px rgba(60,35,15,.45)}
+/* an inked outline that wobbles a little, as if drawn by hand */
+.steam .node::after{content:"";position:absolute;inset:-5px;border:1.5px solid #20140a;border-radius:9px;filter:url(#ink);pointer-events:none}
+/* rusty plate with four rivets */
+.steam .title{height:32px;padding:0 22px;border-bottom:2px solid var(--seam);color:#f1e3c3;font-family:var(--type);
+  background:
+    radial-gradient(circle at 9px 8px,#f2cf86 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    radial-gradient(circle at 9px 24px,#f2cf86 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    radial-gradient(circle at calc(100% - 9px) 8px,#f2cf86 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    radial-gradient(circle at calc(100% - 9px) 24px,#f2cf86 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    var(--rust),linear-gradient(#7b4526,#4b2814);border-radius:5px 5px 0 0}
+.steam .title .nm span,.steam .title .kind{color:#d4b98a}
+.steam .nmc{font-family:var(--type);color:var(--text);font-size:12px}
+.steam .hdr .fields span,.steam .emh{font-family:var(--type);color:var(--dim)}
+/* paper boxes, ink numbers (numbers stay monospace, for reading) */
+.steam .fields .b,.steam .em .b{background:var(--box) var(--noise);border:1px solid var(--boxline);color:var(--text);border-radius:2px;box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+.steam .fields .b.z,.steam .em .b.z{color:#a8916b}
+.steam .fields .b.lock,.steam .em .b.lock{background:#c3ab7e var(--noise);border-color:#6a5038;color:#5a4430;box-shadow:none}
+.steam .fields .sep{color:var(--dim)}
+/* fed frames are sewn seams */
+.steam .fields.fed{outline:1.6px dashed var(--red);outline-offset:3px}
+.steam .fields.fed.in{outline-color:var(--blue)}
+/* brass sign buttons */
+.steam .sign{border:1px solid #3b2716;border-radius:50%;color:#2a1b10;font-weight:700;
+  background:radial-gradient(circle at 35% 30%,#fbe3a4,#c99a45 55%,#6e4a18)}
+.steam .sign.neg{color:#7e1f0c}
+.steam .x{color:#6a5038}
+/* sockets: brass buttons; the waiting one an empty sewn eyelet */
+.steam .port{width:12px;height:12px;margin-top:-6px;left:-7px;border:2px solid #3b2716;
+  background:radial-gradient(circle at 35% 30%,#fbe3a4,#c99a45 55%,#6e4a18)}
+.steam .port.in{border-color:var(--blue)}
+.steam .port.fed{border-color:var(--red)}
+.steam .port.wait{border:1.5px dashed #e3cd9c;background:radial-gradient(circle,#e3cd9c 0 1.5px,#3b2716 2px)}
+.steam .em sup{color:#5a2a66;font-weight:700}
+/* wires outside the node are stitched thread */
+.steam .wire{height:2px;background:repeating-linear-gradient(90deg,var(--red) 0 5px,transparent 5px 8px)}
+.steam .wire.blue{background:repeating-linear-gradient(90deg,var(--blue) 0 5px,transparent 5px 8px)}
+/* the output socket is a little lamp */
+.steam .out{width:12px;height:12px;margin-top:-6px;right:-7px;border:2px solid #3b2716;
+  background:radial-gradient(circle at 40% 35%,#fff4c8,#ffbf55 50%,#b0651b);animation:lamp 3.2s ease-in-out infinite}
+@keyframes lamp{0%,100%{box-shadow:0 0 5px 2px rgba(255,186,90,.45)}50%{box-shadow:0 0 14px 6px rgba(255,186,90,.85)}}
+.steam .tm{font-family:var(--type);right:16px}
+/* + row: a stitched patch */
+.steam .addrow{background:var(--add) var(--noise);color:#f1e3c3;font-family:var(--type);outline:1.5px dashed #f1e3c3;outline-offset:-4px;border:1px solid var(--seam)}
+.steam .res .nmc{font-weight:700}
+/* lines: thread, slightly wobbly */
+.steam .flow,.steam .root{filter:url(#ink)}
+.steam .flow .conn{stroke-dasharray:5 3;stroke-linecap:round;stroke-width:2}
+.steam .flow .frame{stroke-dasharray:5 3;stroke-width:1.8}
+.steam .flow .glow{stroke:#ffbf55;opacity:.25}
+.steam .flow .main{stroke-width:2.2}
+.steam .root path{stroke-width:2}
+@media (prefers-reduced-motion:reduce){.steam .out{animation:none}}
+.flow .twist{display:none}
+
+/* ---- style study 2: brass odometer panel ---- */
+.brass{
+  --node:#6e4a26; --head:#a8823f; --boxline:#2a1a0c; --seam:#1c1208;
+  --text:#2a1a0c; --dim:#e8cf96; --faint:#7d6440; --blue:#4f86b8; --red:#b8443a; --violet:#3a2410;
+  --type:"Special Elite","Courier New",var(--mono);
+  --grain:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='.045' numOctaves='4' seed='11' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .55 0 0 0 0 .25 0 0 0 0 .08 0 0 0 1.6 -.6'/></filter><rect width='100%' height='100%' filter='url(%23g)'/></svg>");
+  --fine:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .1 0 0 0 0 .06 0 0 0 0 .02 0 0 0 .5 0'/></filter><rect width='100%' height='100%' filter='url(%23f)'/></svg>");
+  position:relative;overflow:hidden;border-radius:8px;color:var(--dim);
+  background:var(--fine),radial-gradient(ellipse 75% 85% at 50% 45%,#3a2c1c 0%,#1b130b 65%,#0b0805 100%);
+  box-shadow:inset 0 0 70px rgba(0,0,0,.75)
+}
+.brass .stage{position:relative;z-index:1;padding:40px 16px 40px 76px}
+.brass .gear{position:absolute;z-index:0;fill:none;stroke:#6b4f2c;opacity:.55;animation:turn 40s linear infinite}
+.brass .gear.ccw{animation-direction:reverse;animation-duration:28s}
+@keyframes turn{to{transform:rotate(360deg)}}
+/* riveted rusty plate */
+.brass .node{border:2px solid var(--seam);border-radius:6px;
+  background:
+    radial-gradient(circle at 8px calc(100% - 8px),#f0cf8a 0 1.8px,#6e4a18 2.6px,#1c1208 3.4px,transparent 3.8px),
+    radial-gradient(circle at calc(100% - 8px) calc(100% - 8px),#f0cf8a 0 1.8px,#6e4a18 2.6px,#1c1208 3.4px,transparent 3.8px),
+    var(--grain),var(--fine),linear-gradient(160deg,#9a7444,#6a4624 45%,#4e321a);
+  box-shadow:0 12px 30px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,220,150,.18),inset 0 0 26px rgba(30,15,5,.6)}
+/* brass strip for the title */
+.brass .title{height:32px;padding:0 22px;border-bottom:2px solid var(--seam);border-radius:4px 4px 0 0;color:#2a1a0c;font-family:var(--type);
+  background:
+    radial-gradient(circle at 9px 50%,#fff0c0 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    radial-gradient(circle at calc(100% - 9px) 50%,#fff0c0 0 1.6px,#7a5420 2.4px,#2a1a0e 3.2px,transparent 3.6px),
+    var(--fine),linear-gradient(#e2c07a,#b48a45 55%,#8a6430);box-shadow:inset 0 1px 0 rgba(255,245,210,.6)}
+.brass .title .nm span,.brass .title .kind{color:#4a3018}
+/* engraved brass name plates */
+.brass .nmc{padding-left:0;margin-left:6px;width:50px;height:20px;display:flex;align-items:center;justify-content:center;padding-top:2px;font:11.5px var(--type);color:#2a1a0c;
+  border:1px solid #2a1a0c;border-radius:3px;background:var(--fine),linear-gradient(#ead08e,#b78d48 60%,#8d6631);box-shadow:inset 0 1px 0 rgba(255,245,210,.6),0 1px 2px rgba(0,0,0,.6)}
+.brass .row .nmc:empty{visibility:hidden}
+.brass .hdr .fields span,.brass .emh{font-family:var(--type);color:#f0d9a0;text-shadow:0 1px 1px #000}
+/* the fields sit in a dark recessed window; each box is an odometer drum */
+.brass .fields:not(.hdr .fields){background:#140d06;border-radius:3px;box-shadow:0 0 0 3px #140d06,inset 0 2px 4px #000}
+.brass .fields .b,.brass .em .b{border:1px solid #1a1007;border-radius:2px;color:#1e1308;font-weight:700;
+  background:linear-gradient(#4a3418,#c9a66a 22%,#f6e7c4 50%,#c9a66a 78%,#4a3418);
+  box-shadow:inset 1px 0 0 rgba(0,0,0,.4),inset -1px 0 0 rgba(0,0,0,.4)}
+.brass .fields .b.z,.brass .em .b.z{color:#7a6038}
+.brass .fields .b.lock,.brass .em .b.lock{color:#3b2a14;background:linear-gradient(#2e2010,#8d7046 22%,#b89c6c 50%,#8d7046 78%,#2e2010)}
+.brass .fields .sep{color:#8d6a35;font-weight:700}
+.brass .fields.fed{outline:2px solid var(--red);outline-offset:3px;border-radius:4px}
+.brass .node{--low:14}
+.brass .fields.fed.in{outline-color:var(--blue)}
+.brass .em .b{text-align:center;padding-right:0}
+.brass .em sup{color:#f0d9a0;text-shadow:0 1px 1px #000}
+/* sign: a brass toggle */
+.brass .sign{width:18px;height:18px;border:1px solid #1c1208;border-radius:50%;color:#2a1a0c;font-weight:700;
+  background:radial-gradient(circle at 35% 30%,#fff0c0,#c99a45 50%,#5a3a12);box-shadow:0 1px 2px rgba(0,0,0,.7)}
+.brass .sign.neg{color:#7e1f0c}
+.brass .x{color:#e8cf96;text-shadow:0 1px 1px #000}
+/* sockets: brass rings with a dark hole */
+.brass .port{width:14px;height:14px;margin-top:-7px;left:-8px;border:2px solid #1c1208;
+  background:radial-gradient(circle,#0c0804 0 2.5px,#6e4a18 3px,#f0cf8a 4.5px,#9a6e30 6px)}
+.brass .port.in{box-shadow:0 0 0 2px var(--blue)}
+.brass .port.fed{box-shadow:0 0 0 2px var(--red)}
+.brass .port.wait{border:1.5px dashed #e8cf96;background:radial-gradient(circle,#0c0804 0 2.5px,transparent 3px)}
+/* outside wires: twisted cable */
+.brass .wire{height:5px;margin-top:-2.5px;border-radius:3px;background:repeating-linear-gradient(-55deg,var(--red) 0 3px,#6e1d14 3px 5px)}
+.brass .wire.blue{background:repeating-linear-gradient(-55deg,var(--blue) 0 3px,#203f60 3px 5px)}
+/* + row: a brass slot plate */
+.brass .addrow{font-family:var(--type);color:#2a1a0c;border:1px solid #1c1208;background:var(--fine),linear-gradient(#d9b874,#a47c3c 60%,#7d5a28);box-shadow:inset 0 1px 0 rgba(255,245,210,.5)}
+/* Result: drums behind glass, lit */
+.brass .res .fields .b,.brass .res .em .b{color:#2a1505;background:linear-gradient(#5a3e18,#e9c98a 22%,#fff6dc 50%,#e9c98a 78%,#5a3e18)}
+.brass .res .fields{box-shadow:0 0 0 3px #140d06,0 0 18px rgba(255,190,90,.35),inset 0 2px 4px #000}
+.brass .res .nmc{font-weight:700}
+.brass .tm{font-family:var(--type);color:#f0d9a0;text-shadow:0 1px 1px #000;right:16px}
+.brass .out{width:14px;height:14px;margin-top:-7px;right:-8px;border:2px solid #1c1208;
+  background:radial-gradient(circle at 40% 35%,#fff4c8,#ffbf55 50%,#b0651b);animation:lamp 3.2s ease-in-out infinite}
+/* lines: cables inside, a brass frame round Result */
+.brass .flow .conn{stroke-width:4;stroke-linecap:round;opacity:1}
+.brass .flow .twist{display:inline;fill:none;stroke-width:4;stroke-dasharray:3 3;stroke:rgba(0,0,0,.45)}
+.brass .flow .frame{stroke:#d9b874;stroke-width:3.5;filter:drop-shadow(0 1px 1px #000)}
+.brass .flow .glow{stroke:#ffbf55;opacity:.3;stroke-width:8}
+.brass .flow .main{stroke:#d9b874;stroke-width:3}
+.brass .root path{stroke:#f0d9a0;stroke-width:2.2}
+@media (prefers-reduced-motion:reduce){.brass .out,.brass .gear{animation:none}}
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Special+Elite&display=swap">
+</head>
+<body>
+<main>
+  <div class="stage">
+    <div class="node">
+      <svg class="flow"></svg>
+      <div class="title">
+        <span class="nm">Time: end of phone 0… <span>→ start</span></span>
+        <span class="kind">transform</span>
+      </div>
+
+      <div class="body">
+        <!-- root sign over the error margin column -->
+        <svg class="root" style="left:404px;top:27px" width="110" height="115" viewBox="0 0 110 115">
+          <title>root sum of squares: every row's ± squared, added up, and the root taken. A row's sign does not matter here: an uncertainty is never subtracted. √(0² + 0² + 0.020² + 0.005²) = 0.021 s</title>
+          <path d="M4 80 L8 76 L13 104 L19 0 L100 0" fill="none" stroke="var(--text)" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+
+        <div class="hdr">
+          <div></div><div></div>
+          <div class="cells"><div class="fields">
+            <span>year</span><span></span><span>mo</span><span></span><span>day</span><span></span>
+            <span>h</span><span></span><span>min</span><span></span><span>s</span><span></span><span>ms</span>
+          </div></div>
+          <div class="emh">error margin ±</div>
+          <div></div>
+        </div>
+
+        <!-- input: fed from a socket (blue) -->
+        <div class="row">
+          <span class="port in"></span><span class="wire blue"></span>
+          <div class="nmc">input</div>
+          <div></div>
+          <div class="cells"><div class="fields fed in">
+            <div class="b lock" style="grid-column:1">2012</div><div class="sep">-</div><div class="b lock">09</div><div class="sep">-</div><div class="b lock">09</div><div></div>
+            <div class="b lock">12</div><div class="sep">:</div><div class="b lock">25</div><div class="sep">:</div><div class="b lock">34</div><div class="sep">.</div><div class="b lock">000</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div></div>
+        </div>
+
+        <!-- row 1: fed from a socket (red), fields grey -->
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 1</div>
+          <div class="sgc"><button class="sign">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">4</div><div class="sep">:</div><div class="b lock">29</div><div class="sep">.</div><div class="b lock">739</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <!-- row 2: typed by hand, no wire -->
+        <div class="row">
+          <span class="port"></span>
+          <div class="nmc">row 2</div>
+          <div class="sgc"><button class="sign">+</button></div>
+          <div class="cells"><div class="fields">
+            <div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div></div>
+            <div class="b z">0</div><div class="sep">:</div><div class="b z">0</div><div class="sep">:</div><div class="b">1</div><div class="sep">.</div><div class="b">250</div>
+          </div></div>
+          <div class="em"><div class="b">0.020</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <!-- row 3: fed from a socket (red), fields grey -->
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 3</div>
+          <div class="sgc"><button class="sign neg">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">.</div><div class="b lock">080</div>
+          </div></div>
+          <div class="em"><div class="b lock">0.005</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <!-- waiting socket, level with + row -->
+        <div class="row">
+          <span class="port wait"></span>
+          <div class="nmc"></div><div></div>
+          <div class="cells"><div class="addrow">+ row</div></div>
+          <div></div><div></div>
+        </div>
+
+        <!-- result -->
+        <div class="res">
+          <div class="row" style="margin-bottom:0">
+            <span class="out"></span>
+            <div class="nmc">Result</div><div></div>
+            <div class="cells"><div class="fields outf">
+              <div class="b">2012</div><div class="sep">-</div><div class="b">09</div><div class="sep">-</div><div class="b">09</div><div></div>
+              <div class="b">12</div><div class="sep">:</div><div class="b">21</div><div class="sep">:</div><div class="b">05</div><div class="sep">.</div><div class="b">431</div>
+            </div></div>
+            <div class="em"><div class="b">0.021</div></div>
+            <span class="tm">time</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <ol class="choices">
+    <li>One fixed grid for every row (name, sign, fields, error margin, remove), so the header, the rows, + row and Result line up.</li>
+    <li>Each time reads as two groups: the date (year-mo-day) and the clock (h:min:s.ms), with the separators between the boxes.</li>
+    <li>Square, compact boxes, 22 px high.</li>
+    <li>Fields that hold 0 are dimmed, so the real offset stands out; nothing is hidden.</li>
+    <li>The input fed from a socket: a blue wire into a blue frame around its fields, the fields grey and locked.</li>
+    <li>A row fed from a socket: a red wire into a red frame around its fields, its fields and ± grey and locked.</li>
+    <li>A row typed by hand: no wire, no frame, its fields active.</li>
+    <li>Wires drop just under the row's label and pass under the sign button into the frame; no text cuts them.</li>
+    <li>Every row has its sign button, wired or not; a click turns it over.</li>
+    <li>The error margin column is named "error margin ±" and sits apart from the fields, with a wider gap.</li>
+    <li>One root sign spans the error margin column, with ² on each box; hovering it shows the sum, as the node does.</li>
+    <li>+ row is a single grey strip, as wide as the fields.</li>
+    <li>An empty dashed socket waits level with + row; wiring a time into it adds the next row.</li>
+    <li>Result sits in one blue frame around its fields and its ± box, read-only, since the output carries both; the output line leaves that frame, runs under the "time" label, and reaches the socket.</li>
+  </ol>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <filter id="ink"><feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="2.4"/></filter>
+  </svg>
+
+  <h2 class="studyh">Style study: salvaged machine</h2>
+  <p class="studyp">The same node in a rag-doll-and-rust look: burlap body, a rusty riveted title plate, paper boxes with ink numbers, brass buttons for sockets and signs, stitched thread for wires and frames, a lamp on the output, all with a slight hand-drawn wobble. Every texture is drawn in code (noise and gradients), no images. The numbers stay monospace and sharp.</p>
+
+  <div class="steam">
+  <div class="stage">
+    <div class="node">
+      <svg class="flow"></svg>
+      <div class="title">
+        <span class="nm">Time: end of phone 0… <span>→ start</span></span>
+        <span class="kind">transform</span>
+      </div>
+
+      <div class="body">
+        <svg class="root" style="left:404px;top:27px" width="110" height="115" viewBox="0 0 110 115">
+          <title>root sum of squares: every row's ± squared, added up, and the root taken. A row's sign does not matter here: an uncertainty is never subtracted. √(0² + 0² + 0.020² + 0.005²) = 0.021 s</title>
+          <path d="M4 80 L8 76 L13 104 L19 0 L100 0" fill="none" stroke="var(--text)" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+
+        <div class="hdr">
+          <div></div><div></div>
+          <div class="cells"><div class="fields">
+            <span>year</span><span></span><span>mo</span><span></span><span>day</span><span></span>
+            <span>h</span><span></span><span>min</span><span></span><span>s</span><span></span><span>ms</span>
+          </div></div>
+          <div class="emh">error margin ±</div>
+          <div></div>
+        </div>
+
+        <div class="row">
+          <span class="port in"></span><span class="wire blue"></span>
+          <div class="nmc">input</div>
+          <div></div>
+          <div class="cells"><div class="fields fed in">
+            <div class="b lock" style="grid-column:1">2012</div><div class="sep">-</div><div class="b lock">09</div><div class="sep">-</div><div class="b lock">09</div><div></div>
+            <div class="b lock">12</div><div class="sep">:</div><div class="b lock">25</div><div class="sep">:</div><div class="b lock">34</div><div class="sep">.</div><div class="b lock">000</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div></div>
+        </div>
+
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 1</div>
+          <div class="sgc"><button class="sign">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">4</div><div class="sep">:</div><div class="b lock">29</div><div class="sep">.</div><div class="b lock">739</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port"></span>
+          <div class="nmc">row 2</div>
+          <div class="sgc"><button class="sign">+</button></div>
+          <div class="cells"><div class="fields">
+            <div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div></div>
+            <div class="b z">0</div><div class="sep">:</div><div class="b z">0</div><div class="sep">:</div><div class="b">1</div><div class="sep">.</div><div class="b">250</div>
+          </div></div>
+          <div class="em"><div class="b">0.020</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 3</div>
+          <div class="sgc"><button class="sign neg">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">.</div><div class="b lock">080</div>
+          </div></div>
+          <div class="em"><div class="b lock">0.005</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port wait"></span>
+          <div class="nmc"></div><div></div>
+          <div class="cells"><div class="addrow">+ row</div></div>
+          <div></div><div></div>
+        </div>
+
+        <div class="res">
+          <div class="row" style="margin-bottom:0">
+            <span class="out"></span>
+            <div class="nmc">Result</div><div></div>
+            <div class="cells"><div class="fields outf">
+              <div class="b">2012</div><div class="sep">-</div><div class="b">09</div><div class="sep">-</div><div class="b">09</div><div></div>
+              <div class="b">12</div><div class="sep">:</div><div class="b">21</div><div class="sep">:</div><div class="b">05</div><div class="sep">.</div><div class="b">431</div>
+            </div></div>
+            <div class="em"><div class="b">0.021</div></div>
+            <span class="tm">time</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+
+  <h2 class="studyh">Style study 2: brass odometer</h2>
+  <p class="studyp">From the painted reference: a riveted rusty plate, a brass title strip, brass name plates, every box an odometer drum in a dark window, brass ring sockets with twisted cables, and Result lit behind a brass frame. Kept from the real node, where the painting drifted: every row keeps its socket at its own height, the ± column stays one column with its root sign, and Result shows the time as well as the ±.</p>
+
+  <div class="brass">
+    <svg class="gear" style="left:-40px;top:-40px;width:150px;height:150px" viewBox="-50 -50 100 100"><circle r="38" stroke-width="10" stroke-dasharray="7 6"/><circle r="26" stroke-width="3"/><circle r="6" stroke-width="3"/></svg>
+    <svg class="gear ccw" style="right:-30px;bottom:-50px;width:190px;height:190px" viewBox="-50 -50 100 100"><circle r="38" stroke-width="10" stroke-dasharray="6 5"/><circle r="24" stroke-width="3"/><path d="M0 -24V24M-24 0H24" stroke-width="3"/></svg>
+    <svg class="gear" style="right:60px;top:-30px;width:90px;height:90px" viewBox="-50 -50 100 100"><circle r="36" stroke-width="12" stroke-dasharray="8 7"/><circle r="8" stroke-width="3"/></svg>
+  <div class="stage">
+    <div class="node">
+      <svg class="flow"></svg>
+      <div class="title">
+        <span class="nm">Time: end of phone 0… <span>→ start</span></span>
+        <span class="kind">transform</span>
+      </div>
+
+      <div class="body">
+        <svg class="root" style="left:404px;top:27px" width="110" height="115" viewBox="0 0 110 115">
+          <title>root sum of squares: every row's ± squared, added up, and the root taken. A row's sign does not matter here: an uncertainty is never subtracted. √(0² + 0² + 0.020² + 0.005²) = 0.021 s</title>
+          <path d="M4 80 L8 76 L13 104 L19 0 L100 0" fill="none" stroke="var(--text)" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+
+        <div class="hdr">
+          <div></div><div></div>
+          <div class="cells"><div class="fields">
+            <span>year</span><span></span><span>mo</span><span></span><span>day</span><span></span>
+            <span>h</span><span></span><span>min</span><span></span><span>s</span><span></span><span>ms</span>
+          </div></div>
+          <div class="emh">error margin ±</div>
+          <div></div>
+        </div>
+
+        <div class="row">
+          <span class="port in"></span><span class="wire blue"></span>
+          <div class="nmc">input</div>
+          <div></div>
+          <div class="cells"><div class="fields fed in">
+            <div class="b lock" style="grid-column:1">2012</div><div class="sep">-</div><div class="b lock">09</div><div class="sep">-</div><div class="b lock">09</div><div></div>
+            <div class="b lock">12</div><div class="sep">:</div><div class="b lock">25</div><div class="sep">:</div><div class="b lock">34</div><div class="sep">.</div><div class="b lock">000</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div></div>
+        </div>
+
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 1</div>
+          <div class="sgc"><button class="sign">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">4</div><div class="sep">:</div><div class="b lock">29</div><div class="sep">.</div><div class="b lock">739</div>
+          </div></div>
+          <div class="em"><div class="b lock">0</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port"></span>
+          <div class="nmc">row 2</div>
+          <div class="sgc"><button class="sign">+</button></div>
+          <div class="cells"><div class="fields">
+            <div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div class="sep">-</div><div class="b z">0</div><div></div>
+            <div class="b z">0</div><div class="sep">:</div><div class="b z">0</div><div class="sep">:</div><div class="b">1</div><div class="sep">.</div><div class="b">250</div>
+          </div></div>
+          <div class="em"><div class="b">0.020</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port fed"></span><span class="wire"></span>
+          <div class="nmc">row 3</div>
+          <div class="sgc"><button class="sign neg">−</button></div>
+          <div class="cells"><div class="fields fed">
+            <div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div class="sep">-</div><div class="b lock">0</div><div></div>
+            <div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">:</div><div class="b lock">0</div><div class="sep">.</div><div class="b lock">080</div>
+          </div></div>
+          <div class="em"><div class="b lock">0.005</div><sup>2</sup></div>
+          <div class="x">×</div>
+        </div>
+
+        <div class="row">
+          <span class="port wait"></span>
+          <div class="nmc"></div><div></div>
+          <div class="cells"><div class="addrow">+ row</div></div>
+          <div></div><div></div>
+        </div>
+
+        <div class="res">
+          <div class="row" style="margin-bottom:0">
+            <span class="out"></span>
+            <div class="nmc">Result</div><div></div>
+            <div class="cells"><div class="fields outf">
+              <div class="b">2012</div><div class="sep">-</div><div class="b">09</div><div class="sep">-</div><div class="b">09</div><div></div>
+              <div class="b">12</div><div class="sep">:</div><div class="b">21</div><div class="sep">:</div><div class="b">05</div><div class="sep">.</div><div class="b">431</div>
+            </div></div>
+            <div class="em"><div class="b">0.021</div></div>
+            <span class="tm">time</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+</main>
+<script>
+document.querySelectorAll('.node').forEach(function(node){
+  const svg=node.querySelector('.flow');
+  function c(el){const a=el.getBoundingClientRect(),n=node.getBoundingClientRect();
+    const ox=n.left+node.clientLeft, oy=n.top+node.clientTop;
+    return {l:a.left-ox,r:a.right-ox,cx:(a.left+a.right)/2-ox,cy:(a.top+a.bottom)/2-oy};}
+  function draw(){
+    // output line: from Result's ± box to the time socket
+    // every line runs just under the labels, below the sign buttons, never through them
+    const LOW=parseFloat(getComputedStyle(node).getPropertyValue('--low'))||10;
+    // Result's frame wraps its fields and its ± box: the output carries both
+    const resF=c(node.querySelector('.res .fields')), resEm=c(node.querySelector('.res .em .b')), out=c(node.querySelector('.res .out')), y2=resF.cy;
+    const fx0=resF.l-4.5, fx1=resEm.r+4.5;
+    const frame=`<rect class="frame" x="${fx0}" y="${y2-15}" width="${fx1-fx0}" height="30" rx="4"/>`;
+    const d=`M${fx1} ${y2+LOW} H${out.cx-10} L${out.cx} ${y2}`;
+    // each socket-fed group: its wire drops under the label and runs into the frame
+    let conns='';
+    node.querySelectorAll('.fields.fed').forEach(f=>{
+      const p=c(f.closest('.row').querySelector('.port')), fr=c(f);
+      const col=f.classList.contains('in')?'var(--blue)':'var(--red)';
+      const cd=`M${p.cx} ${p.cy} L${p.cx+8} ${p.cy+LOW} H${fr.l-4}`;
+      conns+=`<path class="conn" stroke="${col}" d="${cd}"/><path class="twist" d="${cd}"/>`;
+    });
+    svg.innerHTML=`${frame}<path class="glow" d="${d}"/><path class="main" d="${d}"/>${conns}`;
+  }
+  draw();
+  addEventListener('resize',draw);
+  if(document.fonts) document.fonts.ready.then(draw);
+});
+</script>
+</body>
+</html>
