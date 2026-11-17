@@ -1,6 +1,7 @@
 # Module documentation
 
-Status: planned and settled on 2026-11-17 (see Decisions). Nothing built yet.
+Status: settled on 2026-11-17 (see Decisions). Stage 1 done: the Template module is the guide, the
+ENF link is fixed, and the rules are in [CLAUDE.md](../../CLAUDE.md). Stages 2 and 3 not started.
 
 ## Why
 
@@ -66,6 +67,7 @@ the others link to it.
 | Which types exist, what each carries | the main README's type table | a type's fields: its `type.toml` (format: `src/types.rs`); their JSON: the Template README |
 | What a dot's colour, shape and fill mean | the workbench README (`src/bin/corroborate/README.md`) | |
 | Where code lives | `docs/ARCHITECTURE.md` (a code map) | each file's opening comment |
+| How to work on the repo (commits, docs, tests) | `CLAUDE.md` | |
 | Why it was designed so | `docs/<feature>/plan.md` (dated history) | READMEs link to it |
 | What is built | each README's Status line | the main README does not say |
 
@@ -80,23 +82,21 @@ Duplicates to remove in stages 2–3:
 
 ## Check
 
-A test (`tests/module_docs.rs`): the required sections are there, the Inputs and Outputs
-tables have a row for each port in `module.toml`, relative links work, and the main README's module
-table lists every module folder. It reports only, until
-stage 3, then fails the build.
+Dropped on 2026-11-18: no test checks the READMEs. Whoever changes a module (person or agent)
+keeps its README in step, following [CLAUDE.md](../../CLAUDE.md) and the Template.
 
 ## Stages
 
-1. The guide (`docs/module-docs.md`, about a page, the template above) and the check; fix the ENF link.
+1. The guide (the Template module) and the rules (CLAUDE.md); fix the ENF link. Done.
 2. The thin modules: Grid frequencies (takes over the grid data format), Combine locations, Invert
    location, Result record, Map, Value, Timeline, Metadata, Plugin.
-3. The rest: ENF, Cut detector, Audio match, SOURCER, Planes, ADS-B check, Time. The check then
-   fails the build.
+3. The rest: ENF, Cut detector, Audio match, SOURCER, Planes, ADS-B check, Time.
 
 ## Decisions (2026-11-17)
 
 - Three tables (Inputs, Steps, Outputs) at the core; the guide stays short.
 - Ports written by hand, checked against `module.toml`.
 - One README per module; plans and research stay in `docs/<feature>/plan.md`.
-- The check fails the build once every module follows the layout.
+- ~~The check fails the build once every module follows the layout.~~ Dropped 2026-11-18: a
+  prompt (CLAUDE.md) instead of a test.
 - One home per fact (table above); `module.toml` owns ports and output use cases.
