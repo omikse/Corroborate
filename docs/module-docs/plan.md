@@ -59,24 +59,24 @@ the others link to it.
 | Fact | Lives in | Elsewhere |
 |---|---|---|
 | A port's name, kind, required; an output's about, needs, when, source, status | `module.toml` (the app shows it on hover) | The README's Outputs table adds only From, Error, Tested |
-| What `module.toml` keys mean | `src/module_manifest.rs` (top) | Main README, `docs/plugins.md`, Template link to it |
-| How one node works, what it keeps, its limits | its README | Main README keeps app-wide ideas (canvas, queue, cache, time on wires, the location model) and links |
+| What `module.toml` keys mean | `src/module_manifest.rs` (top) | Template's Making a module and `docs/plugins.md` link to it |
+| How one node works, what it keeps, its limits | its README | The workbench README keeps app-wide behaviour (canvas, queue, cache, projects, playhead) and links |
+| Why the tool exists, its principles | the main README (VISION.md merged into it, 2026-11-17) | nowhere else |
 | Which modules exist | the module folders | Main README's table: links only, checked against the folders |
-| A type's fields | its `type.toml` (format: `src/types.rs`) | Main README explains only the dots |
+| Which types exist, what each carries | the main README's type table | a type's fields: its `type.toml` (format: `src/types.rs`); their JSON: the Template README |
+| What a dot's colour, shape and fill mean | the workbench README (`src/bin/corroborate/README.md`) | |
+| Where code lives | `docs/ARCHITECTURE.md` (a code map) | each file's opening comment |
 | Why it was designed so | `docs/<feature>/plan.md` (dated history) | READMEs link to it |
-| What is built | each README's Status line | VISION.md and ARCHITECTURE.md link to the module list |
+| What is built | each README's Status line | the main README does not say |
 
 Code comments and on-canvas hover texts stay as they are: they describe code or label the UI.
 
 Duplicates to remove in stages 2–3:
-- ENF's "Use cases" table repeats its 16 outputs in `module.toml`: drop it.
-- The main README's Time and Location sections describe Audio match, Time, Timeline, Combine,
-  Invert, Map and its map setup: move what is node-specific to their READMEs.
-- The main README lists what each node keeps; ENF's README too: keep it per module.
-- The main README's module table misses Audio match, Cut detector, Time and Timeline.
-- `module.toml` keys described in the main README and `docs/plugins.md`: replace with a link.
-- VISION.md's "Where it stands" (grid matching "next") and ARCHITECTURE.md's "Implemented so far"
-  (`src/bin/corroborate.rs`) are out of date: link to the module list instead.
+- ENF's "Use cases" table repeats its outputs in `module.toml`: drop it.
+- `module.toml` keys described in `docs/plugins.md`: replace with a link.
+- Done 2026-11-17 with the README/VISION merge: the main README's node-specific Time, Location and
+  map setup moved to their modules, the module table lists every module, ARCHITECTURE.md became a
+  code map, VISION.md was merged into the main README.
 
 ## Check
 

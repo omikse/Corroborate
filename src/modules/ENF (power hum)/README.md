@@ -18,7 +18,7 @@ column (state, grid frequency, hum runs, audio, area).
 Files: `mod.rs` (the detector: name, label, ports), `node.rs` (the node in the workbench: state while
 running, the area its grid frequency allows, its look on the canvas, timeline marks, result file), `plugin.rs` (the same
 detector as a plugin for the old viewer, `enf-plugin.exe`). The default grid map is in its own module:
-[grid_frequencies](../grid_frequencies/README.md).
+[Grid frequencies](<../Grid frequencies (50 or 60 Hz)/README.md>).
 
 ## Detecting the hum
 

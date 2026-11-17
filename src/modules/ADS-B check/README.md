@@ -2,7 +2,7 @@
 
 A test plugin: it checks the planes detector against ADS-B (Automatic Dependent
 Surveillance–Broadcast) flight data. A separate program speaking the plugin protocol
-([docs/plugins.md](../../../../docs/plugins.md)); `main.rs` is all of it.
+([docs/plugins.md](../../../docs/plugins.md)); `main.rs` is all of it.
 
 ADS-B (Automatic Dependent Surveillance–Broadcast) data sets the expectations, and the planes detector
 confirms them. Every aircraft whose closest approach to the site is within 15 km (the detector's own distance

@@ -1,105 +1,86 @@
-# Architecture groundwork
+# Code map
 
-This is the plan for the rewrite on the `rewrite` branch. The concept is in [VISION.md](../VISION.md).
-The old stable version (doppler-view) is tag `v0.1-doppler-live`; this repo no longer touches its copy in `C:\Apps\DopplerOsint`.
+How the code is laid out, for anyone changing it. What the tool is for is in the
+[main README](../README.md); how to use the app is in the [workbench README](../src/bin/corroborate/README.md).
+Each file starts with a comment saying what it holds; this page only says where to look.
 
 ## Layers
 
-1. **Core (Rust library).** Sample streams, time, anchors, typed values with uncertainty and source.
-   No GUI code. Everything that analyses signals lives here or in nodes.
-2. **Nodes.** Each node is a separate program (as plugins are now) with typed inputs and outputs.
-   Crash isolation and any language stay as they are.
-3. **Graph.** Holds nodes and wires. Checks that port types match before running.
-4. **Workspace (viewer).** Timeline with lanes, a window per node, and the evidence trail.
+1. **The library** (`src/`, crate `corroborate`): signal work and the data model, no GUI.
+2. **Modules** (`src/modules/<Label>/`): one folder per node kind, holding its `module.toml`,
+   README, code and data. A built-in module's `node.rs` is what it does in the workbench.
+3. **Types** (`src/types/<id>/type.toml`): what travels on wires.
+4. **The workbench** (`src/bin/corroborate/`): draws the graph and calls into the modules.
+5. **Separate programs**: plugins and the CLI, built from the same crate.
 
-## Core types (to build first)
+Nodes fall into a few roles (`role` in `module.toml`): sources (a file, a stream, a device),
+reference data (grid frequencies, a typed value), detectors (audio or video in, findings out),
+transforms (one kind into another: correcting a time, combining areas), records (the result file)
+and views (Map, Timeline).
 
-- `Stream`: sample source (file replayed at full speed, or live), with a sample rate and an anchor.
-- `Anchor`: a known UTC time for a stream, with its source and uncertainty (for example a stream's
-  own PROGRAM-DATE-TIME, a file's metadata, or an overflight match).
-- `Value<T>`: a result with `value`, `uncertainty`, `source` (which node and which input data).
-- `Event`: a time (with uncertainty) and a label, shown on timeline lanes.
-- `Port`: typed input or output. Kinds: `Audio`, `Video`, `Time`, `Location`, `Track`, `Event`,
-  `Json`. Each port is `required` or `optional`.
+## The library
 
-## Node contract
+| File | Holds |
+|---|---|
+| `data.rs` | the data bus: one value per type and its JSON form |
+| `types.rs` | types as folders: reading `type.toml`, the format at the top |
+| `module_manifest.rs` | `module.toml`: every key, explained at the top |
+| `modules.rs`, `module.rs` | the module list and the interface built-in detectors share (16 kHz mono in, findings out) |
+| `graph.rs` | nodes, typed ports and wires; the checks before anything runs |
+| `core.rs` | values with error and source, port kinds, node roles |
+| `area.rs` | a location as a mask of cells that adds or subtracts |
+| `clock.rs`, `sync.rs` | fitting recordings' offsets and speeds from shared moments (Audio match, ADS-B check) |
+| `audio_match.rs` | which recordings hear the same sound, and the method's measurements |
+| `cuts.rs` | where a recording is cut (Cut detector) |
+| `locate.rs` | a sound's position from its arrival times (TDOA, Time Difference of Arrival) |
+| `ingest.rs`, `timebase.rs`, `sound_out.rs` | reading audio (WAV, ffmpeg), live sources' UTC, playing sound |
+| `plugin.rs` | the plugin protocol ([docs/plugins.md](plugins.md)) with a reader and writers for Rust plugins |
+| `node_layout.rs`, `node_layout/simplex.rs` | Arrange: the layered layout and network simplex |
+| `synth.rs` | synthetic test audio |
 
-A node describes itself in a `hello` line: name, inputs (kind, required or optional), outputs (kind).
-The existing plugin protocol already sends `hello`, `track`, `finding`, `meta` and `view`; the rewrite
-adds typed ports and `Value` fields to these messages.
+## The workbench (`src/bin/corroborate/`)
 
-## Migration order
+| File | Holds |
+|---|---|
+| `main.rs` | the window, the top bar, drawing the graph |
+| `nodes.rs` | the node kinds; the matches on `Kind` only call into each module's `node.rs` |
+| `canvas.rs` | selecting, moving, copying, undo |
+| `groups.rs` | group nodes |
+| `drop_menu.rs`, `types_menu.rs` | the menu for a wire dropped on empty canvas; the Types menu |
+| `look.rs`, `layout.rs`, `script.rs` | how a node looks: its `Look`, `[look]` in `module.toml`, `look.rhai` |
+| `bus.rs` | reading any output as a value of its type |
+| `runtime.rs` | running a graph: decoding sources and feeding what they wire into |
+| `jobs.rs`, `queue.rs`, `kept.rs` | job state, the queue, kept results ([docs/run-queue/plan.md](run-queue/plan.md)) |
+| `evidence.rs`, `trace.rs` | which recording a node's times belong to; a time's trace back along the wires |
+| `playhead.rs`, `sound.rs` | the playheads and playing sound |
+| `project.rs`, `recordings.rs` | projects and their recordings |
+| `google_maps.rs` | Google map tiles for the Map node |
+| `drive.rs`, `cleanup_lab.rs`, `*_tests.rs` | headless tests that drive the app like a user |
 
-1. Core types and `Value` in the library, with tests.
-2. Port the existing modules (planes, ENF, metadata, adsb-check) as nodes using the new types.
-3. Timeline with lanes that read `Event` and `Value` outputs.
-4. Graph wiring and the evidence trail.
-5. Synchronisation node (anchors and shared events into a solver).
+## Programs
 
-## Stack decisions
+| Binary | From | What |
+|---|---|---|
+| `corroborate` | `src/bin/corroborate/main.rs` | the workbench (feature `gui`) |
+| `corroborate-cli` | `src/main.rs` | headless: detectors on a file or stream, synthetic audio, `grid-logs` import |
+| `planes-view` | `src/modules/Planes (Doppler)/view.rs` | the old viewer ([VIEWER.md](<../src/modules/Planes (Doppler)/VIEWER.md>)) |
+| `enf-plugin`, `metadata`, `adsb-check` | their module folders | plugins |
 
-- egui/eframe is 0.36 on this branch (0.37 had no node editor crates yet). Main stays on 0.37.
-- Node editor: wait for egui-snarl or egui_node_editor to support egui 0.36, or patch snarl.
-- Keep the plugin protocol working during the rewrite, so existing plugins still run.
+`examples/bus_echo.rs` is a complete protocol 2 plugin; `tools/` holds `run.ps1` (build and deploy
+to `app\`), `adsb-log.py` and `jiku.py`.
 
-## Node hierarchy
+## Tests
 
-- **Sources** (no inputs): *live* (stream URL, microphone, webcam) and *file* (replayed as a stream).
-  Also *reference* data (flight history, grid frequency, weather), which is timed but not a stream.
-- **Detectors** (audio or video in, timed events or tracks out): aircraft Doppler, hum, bang, flash.
-- **Transforms** (convert kinds): text to location, track to location, flight match.
-- **Solver** (timed events from several streams in, offsets and locations out).
-- **Records** (the result JSON and the evidence trail).
+`tests/`: `synthetic.rs` (detectors on made-up audio), `protest.rs` (sync and TDOA on four made-up
+streams), `cuts.rs`, `jiku.rs` and `jiku_cuts.rs` (the Jiku dataset, fetched by `tools/jiku.py`).
+The workbench's own tests are the `*_tests.rs` files beside its code. Run them with
+`cargo test --profile fast`.
 
-## Timeline rule
+## Decisions that shape the code
 
-Every time says which clock it is on and how sure it is (1 sigma). Each source is a clock, named
-by its node's stable id (`n1`, `n2`, … kept in the project file, never reused; the settings log
-uses it too), or shared by several sources. Times travel on wires only: there is no project-wide
-pool of evidence and no global solve (removed 2026-11-11, [docs/time-on-wires/plan.md](time-on-wires/plan.md)).
-`src/clock.rs` fits clocks for the nodes that measure them, through `sync::solve`: Audio match fits
-each of its groups from its own links (`fit_against`: offsets and drifts in the group's average
-clock, one drift per phone), ADS-B check its matched passes (`solve`). A node gives what it learns
-as time outputs (audio start time, audio end time), each with its error and the trace of where it
-came from.
-
-## Locations always carry a radius
-
-`Location` is a point, a radius in metres and the method that set the radius (GPS, IP, Doppler, shared
-sound, metadata, typed in). Two locations that overlap agree; ones that do not overlap contradict each other.
-
-## Implemented so far
-
-`src/core.rs`: `Value`, `Location` (with distance and overlap), `TimeRef`, `PortKind`,
-`Port` (required or optional), `Role` and `NodeSpec` (connection and readiness checks). Covered by tests.
-
-`src/types.rs`: data types as folders (`src/types/<id>/type.toml`, the tool's `types\`, and a
-module's own `types\<id>.toml`), one shared list; a port's kind is a type's id, and a type's
-colour, flow (value, list, stream) and fields give its dots and the Value node's editor.
-
-## Graph and timeline (in the library)
-
-- `graph.rs`: nodes with typed ports and wires. Rules: kinds must match, an input takes one wire,
-  an output may feed many inputs, no cycles. Also `missing` (required inputs not yet wired), `order`
-  (upstream first) and `trail` (the evidence trail of a node).
-- `timeline.rs`: lanes of items with a `TimeRef` and a `Source`. Absolute items have a UTC window
-  (time ± error), relative items wait for the solver (`unplaced`). `overlapping` lists items whose
-  windows could be the same moment. `strength` is a display choice: narrow margin, strong colour.
-
-- `sync.rs`: the sync solver. Each shared event k heard by stream i gives offset_i + t_ik = T_k (± error,
-  which should include the sound travel spread). Anchors fix streams to UTC; without them the first
-  stream is the reference. Weighted least squares gives every offset with its error; streams with no
-  chain of shared events are reported unsolved; residuals flag wrong matches.
-
-- `locate.rs`: TDOA (Time Difference of Arrival). Arrival times on the shared clock plus recorder
-  positions give the source position and time; recorder radius is added to each arrival error; the
-  result radius is 2 sigma of the worst direction. Three recorders work but cannot be checked.
-- `tests/protest.rs`: four streams, unknown offsets, sync, then a bang located. Flash-synced
-  (1/30 s): radius ~15 m. Synced on sounds from unknown places: radius ~790 m. For locating, sync
-  needs instant events (light) or sounds from known positions; sound-only sync is too coarse.
-
-- `src/bin/corroborate.rs`: the new workbench GUI (`cargo run --release --features gui --bin corroborate`).
-  Now `src/bin/corroborate/`: the node canvas (`canvas.rs`), which clock a node is on and Same
-  clock (`evidence.rs`), a time's trace along the wires (`trace.rs`), the playheads, which
-  recordings follow the real-time one, play and live (`playhead.rs`) and sound (`sound.rs`). See
-  the README's Time section.
+- Times and locations travel only on wires: there is no project-wide pool of evidence and no
+  global solve ([docs/time-on-wires/plan.md](time-on-wires/plan.md)).
+- A module is a folder; dropping one into `app\modules\` adds it while the app runs.
+- Nodes have no windows: each draws itself on the canvas.
+- Settings are the only way the canvas changes processing, and every change is logged.
+- egui/eframe 0.36.
