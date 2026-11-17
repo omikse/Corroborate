@@ -45,9 +45,11 @@ protocol = 2
 /// The example program, copied into a module folder with its module.toml (one folder per test:
 /// tests run at the same time, and a running program's file cannot be replaced).
 fn echo_module(test: &str) -> mm::Manifest {
+    // The profile folder (target\<profile>) holds examples\; the test program sits below it,
+    // deeper with cargo's newer build-dir layout (build\<crate>\<hash>\out\).
     let exe = std::env::current_exe().unwrap();
-    let built = exe.parent().unwrap().parent().unwrap().join("examples").join("bus_echo.exe");
-    assert!(built.exists(), "{} is missing: run `cargo test` (it builds the examples), or `cargo build --example bus_echo`", built.display());
+    let built = exe.ancestors().map(|d| d.join("examples").join("bus_echo.exe")).find(|p| p.exists());
+    let Some(built) = built else { panic!("examples\\bus_echo.exe is missing above {}: run `cargo test` (it builds the examples), or `cargo build --example bus_echo`", exe.display()) };
     let dir = out_dir().join("bus_modules").join(test).join("Bus echo");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(&built, dir.join("bus_echo.exe")).unwrap();
