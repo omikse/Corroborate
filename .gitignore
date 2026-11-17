@@ -14,5 +14,5 @@ doppler-2*/
 app/
 tests/data/
 # grid frequency logs (~55 GB): keep only the download scripts
-src/modules/ENF (power hum)/grid logs/*
-!src/modules/ENF (power hum)/grid logs/*.sh
+src/modules/ENF/grid logs/*
+!src/modules/ENF/grid logs/*.sh
