@@ -30,7 +30,7 @@ can switch any cut on or off (the "no guessing" rule).
 | SOURCER live reading with PC (personal computer) clock time | SOURCER | outages in a live stream: the clock time at the gap is known exactly. |
 | `audio_match::gaps`: where a pair's lag jumps between two links | `src/audio_match.rs` | cut against another recording of the same event: which one lacks a stretch and how long. Shown today only as marks in Audio match's Status column; none on Jiku (unedited phones). |
 | `audio_match::match_pair`, `gcc_phat`, Wang fingerprints (audiofp) | `src/audio_match.rs` | the same comparisons, run per piece. |
-| ENF hum track at 1 s steps (16 s window), its slope rule | `ENF (power hum)/mod.rs` | hum frequency jumps. Hum phase is not computed yet. |
+| ENF hum track at 1 s steps (16 s window), its slope rule | `ENF/mod.rs` | hum frequency jumps. Hum phase is not computed yet. |
 | `clock::fit_against` with phone ids (one speed per device) | `src/clock.rs` | pieces of one file share a device, so they share one clock speed. |
 | Declared but not built: Audio match `edits`, ENF `edits` | their `module.toml` (status "possible") | both say "for the cut detector". |
 | Jiku Mobile Video Dataset GT_090912: 50 phone videos, sync ground truth | `tests/jiku.rs`, `tools/jiku.py` | test: cut and shuffle a real recording, check that the pieces land back where the truth says. |

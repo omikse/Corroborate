@@ -404,7 +404,7 @@ playheads and the `anchor`/`link` types.
    - `links` goes.
    - `migrate_match` (which read `ev.stamp_end` to convert projects older than per-row times)
      goes; such projects are not read any more.
-10. **ENF (power hum):**
+10. **ENF:**
     - `sync recordings` and `clock drift` (links) go.
     - `time of recording` (already a Time) becomes "audio start time", and a new "audio end time"
       comes from the hum's own speed against the grid.

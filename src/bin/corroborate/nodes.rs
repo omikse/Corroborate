@@ -490,7 +490,7 @@ program = \"clap.exe\"
         let heads: Vec<&str> = m.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(heads, ["Sources", "Detectors", "Data", "Plugins", "Output", "Location", "View"]);
         let labels: Vec<&str> = m.iter().flat_map(|(_, e)| e.iter().map(|(l, _)| l.as_str())).collect();
-        for want in ["SOURCER", "Value", "Planes (Doppler)", "ENF (power hum)", "ADS-B check", "Metadata", "Combine locations (all)", "Combine locations (any)", "Invert location", "Map"] {
+        for want in ["SOURCER", "Value", "Planes (Doppler)", "ENF", "ADS-B check", "Metadata", "Combine locations (all)", "Combine locations (any)", "Invert location", "Map"] {
             assert!(labels.contains(&want), "{want} missing from {labels:?}");
         }
     }

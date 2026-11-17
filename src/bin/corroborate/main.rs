@@ -67,7 +67,7 @@ mod audio_match_node;
 mod cut_detector_node;
 #[path = "../../modules/Combine locations/node.rs"]
 mod combine_locations_node;
-#[path = "../../modules/ENF (power hum)/node.rs"]
+#[path = "../../modules/ENF/node.rs"]
 mod enf_node;
 #[path = "../../modules/Grid frequencies (50 or 60 Hz)/node.rs"]
 mod grid_frequencies_node;
@@ -617,11 +617,8 @@ impl App {
         // anchors). Each wire from one is dropped and named.
         const RETIRED: [&str; 7] = ["quality", "clock drift", "same recording", "speed change", "gaps", "links", "anchors"];
         let mut gone: Vec<String> = Vec::new();
-        for (a, mut o, b, i) in wires {
+        for (a, o, b, i) in wires {
             if a < self.nodes.len() && b < self.nodes.len() {
-                if matches!(self.nodes[a].kind, Kind::Enf { .. }) && o == "time of recording" {
-                    o = "audio start time".to_string();
-                }
                 let has = self.graph.nodes()[a].spec.outputs.iter().any(|p| p.name == o);
                 if !has && RETIRED.contains(&o.as_str()) && !matches!(self.nodes[a].kind, Kind::Missing { .. }) {
                     gone.push(format!("{} › {o}", self.node_name(a)));

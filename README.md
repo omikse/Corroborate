@@ -19,7 +19,7 @@ recording, line up many recordings of the same event, and locate what happened i
 Newsrooms and research groups reconstruct events by synchronising hundreds of videos and placing
 every camera on a map, and locate gunshots from the sound in footage. That work is done by expert
 teams, by hand, after the event, over days or weeks. Single techniques exist as separate tools:
-aircraft Doppler geolocation, power-grid hum extraction, sun and shadow angles. General OSINT tools
+aircraft Doppler geolocation, mains hum extraction, sun and shadow angles. General OSINT tools
 connect facts about people, domains and addresses, but do not look inside audio or video at all.
 
 What is missing is one place where these signals work together, on recordings and on live streams,
@@ -150,7 +150,7 @@ Every node is a module: a folder named by its label under `src/modules/` (in the
 | [Time](<src/modules/Time/README.md>) | a time corrected in the open, row by row (a camera's local time, a stamp at the end) |
 | [Audio match](<src/modules/Audio match/README.md>) | recordings of one event lined up by the sounds they share: each one's start and end time, and its drift |
 | [Cut detector](<src/modules/Cut detector/README.md>) | where a recording was cut, and its pieces as recordings of their own |
-| [ENF (power hum)](<src/modules/ENF (power hum)/README.md>) | the mains hum: the area of its grid frequency, its quality, the hum track, and the audio's start time from grid logs |
+| [ENF](src/modules/ENF/README.md) | the mains hum: the area of its grid frequency, its quality, the hum track, and the audio's start time from grid logs |
 | [Grid frequencies (50 or 60 Hz)](<src/modules/Grid frequencies (50 or 60 Hz)/README.md>) | 50/60 Hz zones by region, for ENF |
 | [Planes (Doppler)](<src/modules/Planes (Doppler)/README.md>) | aircraft passes: speed, closest approach, distance |
 | [ADS-B check](<src/modules/ADS-B check/README.md>) | flight data against heard passes, and the audio's start and end time from them |

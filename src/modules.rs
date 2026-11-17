@@ -12,7 +12,7 @@ pub mod audio_match;
 pub mod cut_detector;
 #[path = "modules/Combine locations/mod.rs"]
 pub mod combine_locations;
-#[path = "modules/ENF (power hum)/mod.rs"]
+#[path = "modules/ENF/mod.rs"]
 pub mod enf;
 #[path = "modules/Grid frequencies (50 or 60 Hz)/mod.rs"]
 pub mod grid_frequencies;

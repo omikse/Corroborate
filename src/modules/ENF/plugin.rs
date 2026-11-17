@@ -55,7 +55,7 @@ impl<W: Write> Out<W> {
                     q.harmonic
                 ),
                 (Some(n), None) => format!("{}\nno clear reading in the last second", grid_region(n)),
-                _ => "no clear grid hum (yet)".to_string(),
+                _ => "no clear mains hum (yet)".to_string(),
             };
             self.line(plugin::status(&text));
             // View: 1 Hz around the harmonic in use, sent again when it changes.

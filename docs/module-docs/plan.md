@@ -43,7 +43,7 @@ Add a section only when it is needed: **Use** (what the node shows and what a pe
 A few rules: every Tested cell says what it was tested on, or "not yet"; every outside fact names
 its source; a fact lives in one module and others link to it.
 
-### Example: ENF (power hum), outputs
+### Example: ENF, outputs
 
 | Output | From | Error | Tested |
 |---|---|---|---|

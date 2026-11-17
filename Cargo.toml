@@ -47,7 +47,7 @@ required-features = ["gui"]
 
 [[bin]]
 name = "enf-plugin"
-path = "src/modules/ENF (power hum)/plugin.rs"
+path = "src/modules/ENF/plugin.rs"
 
 [[bin]]
 name = "metadata"

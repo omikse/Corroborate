@@ -1,5 +1,5 @@
-//! The Power hum (ENF) node in the workbench: what it keeps while running, the area its grid
-//! frequency allows, its window, its timeline marks and its part of the result file.
+//! The ENF node in the workbench: what it keeps while running, the area its grid
+//! frequency allows, its look on the canvas, its timeline marks and its part of the result file.
 //! Compiled into the `corroborate` program (see `src/bin/corroborate/main.rs`).
 
 use super::*;
@@ -17,7 +17,8 @@ pub struct EnfState {
     pub nominal: Option<f64>,
     /// The signal quality verdict over all readings so far.
     pub quality: Option<Quality>,
-    /// Where the measured grid frequency is used (AND the location wired in), once decided.
+    /// Where the measured grid frequency is used, once decided (or, after a blind match, the
+    /// matched grid's area).
     pub area: Option<Arc<WorldMask>>,
     /// How that area was reached: regions, data source, contradictions.
     pub area_note: String,
@@ -26,12 +27,12 @@ pub struct EnfState {
     pub dated: Option<Result<Dated, String>>,
 }
 
-/// An ENF node in a run: its state, the grid map wired into it, and the location wired into it (if any).
+/// An ENF node in a run: its state, the grid map chosen in it, and the time and place wired in.
 pub struct EnfJob {
     pub state: Shared,
     pub grid: Result<Arc<GridMap>, String>,
-    pub prior: Option<(WorldMask, String)>,
-    /// The wired time (claimed start of the audio, UTC s, and its error s) and place.
+    /// The wired time (claimed start of the audio, UTC s, and its error s) and place. The place
+    /// only picks which grid logs are searched; joining areas is Combine locations' job.
     pub claimed: Option<(f64, f64)>,
     pub place: Option<WorldMask>,
 }
@@ -47,25 +48,15 @@ pub fn start(job: &EnfJob) -> EnfRun<'_> {
     EnfRun { enf: Enf::new(), job, last: None }
 }
 
-/// Where a measured nominal frequency is used, AND the location wired into the node.
-/// An empty result is kept: it says the hum contradicts that location.
+/// Where a measured nominal frequency is used.
 fn area(nominal: f64, j: &EnfJob) -> (Option<WorldMask>, String) {
     let g = match &j.grid {
         Ok(g) => g,
         Err(e) => return (None, format!("no area: {e}")),
     };
     let names: Vec<&str> = g.regions_for(nominal).iter().map(|r| r.id.as_str()).collect();
-    let mut m = g.mask_for(nominal);
-    let mut note = format!("{nominal:.0} Hz grid: {} (grid data: {})", names.join("; "), g.source);
-    if let Some((p, label)) = &j.prior {
-        m = m.and(p);
-        if m.is_empty() {
-            note = format!("CONTRADICTION: {nominal:.0} Hz hum is not used anywhere in {label}. {note}");
-        } else {
-            note = format!("{note}; limited to {label}");
-        }
-    }
-    (Some(m), note)
+    let note = format!("{nominal:.0} Hz grid: {} (grid data: {})", names.join("; "), g.source);
+    (Some(g.mask_for(nominal)), note)
 }
 
 fn segments(found: Vec<Finding>) -> impl Iterator<Item = EnfSegment> {
@@ -144,14 +135,8 @@ pub fn flush(r: &mut EnfRun) {
 /// at that time.
 fn blind_place(job: &EnfJob, a: Option<&SyncArea>, d: &Dated, enf: &mut EnfState) {
     let Some(a) = a.filter(|_| d.confirmed && job.place.is_none()) else { return };
-    let mut m = a.mask_at(Some(d.start()));
-    let mut note = format!("hum matches the {} grid log ({}) at {}", a.name, a.id, timebase::fmt_utc(d.start()));
-    if let Some((p, label)) = &job.prior {
-        m = m.and(p);
-        note = format!("{note}; limited to {label}");
-    }
-    enf.area = Some(Arc::new(m));
-    enf.area_note = note;
+    enf.area = Some(Arc::new(a.mask_at(Some(d.start()))));
+    enf.area_note = format!("hum matches the {} grid log ({}) at {}", a.name, a.id, timebase::fmt_utc(d.start()));
 }
 
 /// A kept result loaded into `s` (the hum track and its dating, `kept.rs`): the signal quality
@@ -244,7 +229,7 @@ pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data:
                 .collect(),
         )),
         "audio start time" => match &s.enf.dated {
-            Some(Ok(d)) if d.confirmed => Ok(Data::Time { utc: d.start(), error_s: 1.0, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()), recording: clock.to_string() }),
+            Some(Ok(d)) if d.confirmed => Ok(Data::Time { utc: d.start(), error_s: d.error_s, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()), recording: clock.to_string() }),
             Some(Ok(d)) => Err(format!("{}: best {} in {}, not clear enough", d.verdict(), timebase::fmt_utc(d.start()), d.best.grid)),
             Some(Err(e)) => Err(e.clone()),
             None => Err("matched against the grid logs at the end of a file".into()),
@@ -285,13 +270,13 @@ impl App {
             Some(Ok(Data::Location { area, .. })) => Some(area.cells.clone()),
             _ => None,
         };
-        EnfJob { state: self.nodes[i].state.clone(), grid: grid_frequencies_node::load(&path).map(Arc::new), prior: None, claimed, place }
+        EnfJob { state: self.nodes[i].state.clone(), grid: grid_frequencies_node::load(&path).map(Arc::new), claimed, place }
     }
 }
 
 // ---------------------------------------------------------------- on the canvas
 //
-//  ┌ ENF · Electric grid hum ───────────────────────────┐
+//  ┌ ENF ────────────────────────────────────────────────┐
 //  │        ┌──────── Earth map ────────┐  STATUS        │
 //  ● audio  │  (where the grid is used) │  …             │ location ●
 //  │        ├──── hum frequency trace ──┤                │

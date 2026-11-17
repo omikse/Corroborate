@@ -264,7 +264,7 @@ fields!(crate::audio_match_node::Found { links, links_json, same, speed, gaps, q
 fields!(corroborate::modules::enf::EnfPoint { t, hz, nominal, harmonic, snr_db, err_hz, used, ok, reject });
 fields!(corroborate::modules::enf::EnfSegment { id, nominal, harmonic, t_start, t_end, mean_hz, min_hz, max_hz, mean_snr_db, n_points });
 fields!(corroborate::modules::enf::log_match::Candidate { grid, start, rms_hz, offset_hz });
-fields!(corroborate::modules::enf::log_match::Dated { claimed, best, runner_up, searched, readings, confirmed });
+fields!(corroborate::modules::enf::log_match::Dated { claimed, best, runner_up, searched, readings, confirmed, error_s });
 
 impl Part for cuts::Role {
     fn put(&self, w: &mut W) {

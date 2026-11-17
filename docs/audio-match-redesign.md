@@ -207,7 +207,7 @@ Basic Timeline node:
 Not in the basic node: timed events (the Timeline will receive events already in real time, and
 Audio match producing those is later work), confidence and maximum error settings, drag-to-link.
 
-Until events arrive, detector results such as power hum or plane passes have no timeline to appear
+Until events arrive, detector results such as mains hum or plane passes have no timeline to appear
 on. They remain on their own nodes and in the result file.
 
 ## Code changes

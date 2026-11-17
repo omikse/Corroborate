@@ -9,6 +9,12 @@
 //! are three correlations of the patterns (1, r, r²) with (M, L, L²); rms² = S2/k − (S1/k)².
 //! Blocks of the log run in parallel. The best start counts when it is clear: error under
 //! MAX_RMS_HZ and the runner-up (more than 2 min away, or another grid) MIN_MARGIN times worse.
+//!
+//! The start's error comes from how sharp the match is (`start_error`): the rms is worked out
+//! again at the starts up to SHARP_S seconds either side, a parabola is fitted to rms², and the
+//! error is where the misfit grows by one reading's worth of noise, as in a least-squares fit.
+//! Readings 1 s apart share most of their 16 s window, so only one in WIN_S counts as
+//! independent. Starts are whole seconds: that adds 1/√12 s, root-sum-square.
 
 use super::grid_store::{Store, BASE_HZ};
 use super::{sections, EnfPoint, WIN_S};
@@ -28,6 +34,8 @@ pub const MAX_RMS_HZ: f64 = 0.010;
 pub const MIN_MARGIN: f64 = 2.0;
 /// Candidates closer than this (s) are the same match.
 const APART_S: i64 = 120;
+/// How far either side of the best start the misfit is measured to find its sharpness, s.
+const SHARP_S: i64 = 4;
 
 /// One possible start of the audio in one grid's log.
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +185,8 @@ pub struct Dated {
     pub searched: String,
     pub readings: usize,
     pub confirmed: bool,
+    /// The start's error, s (1 sigma), from the match's sharpness (`start_error`).
+    pub error_s: f64,
 }
 
 impl Dated {
@@ -208,20 +218,21 @@ impl Dated {
         if let Some(r) = &self.runner_up {
             v.push(format!("next best {:.2} mHz, ×{:.1} (need ×{MIN_MARGIN:.0}): {} {}", r.rms_hz * 1000.0, self.margin(), fmt_utc(r.start as f64), r.grid));
         }
-        v.push(format!("{} readings, offset {:+.1} mHz", self.readings, self.best.offset_hz * 1000.0));
+        v.push(format!("start ± {:.2} s, {} readings, offset {:+.1} mHz", self.error_s, self.readings, self.best.offset_hz * 1000.0));
         v
     }
 
     pub fn to_json(&self) -> String {
         let c = |c: &Candidate| format!("{{\"grid\":\"{}\",\"start_utc\":\"{}\",\"rms_hz\":{:.6},\"offset_hz\":{:.6}}}", c.grid, fmt_utc(c.start as f64), c.rms_hz, c.offset_hz);
         format!(
-            "{{\"claimed_utc\":{},\"best\":{},\"runner_up\":{},\"searched\":\"{}\",\"readings\":{},\"confirmed\":{}}}",
+            "{{\"claimed_utc\":{},\"best\":{},\"runner_up\":{},\"searched\":\"{}\",\"readings\":{},\"confirmed\":{},\"error_s\":{:.3}}}",
             self.claimed.map_or("null".into(), |t| format!("\"{}\"", fmt_utc(t))),
             c(&self.best),
             self.runner_up.as_ref().map_or("null".into(), c),
             crate::timebase::json_escape(&self.searched),
             self.readings,
-            self.confirmed
+            self.confirmed,
+            self.error_s
         )
     }
 }
@@ -259,7 +270,78 @@ pub fn date(pts: &[EnfPoint], store: &Store, grids: &[String], claimed: Option<(
     let margin = runner_up.as_ref().map_or(f64::INFINITY, |r| r.rms_hz / best.rms_hz);
     let near = claimed.is_none_or(|(c, err)| (best.start as f64 - c).abs() <= err.max(10.0));
     let confirmed = best.rms_hz < MAX_RMS_HZ && margin >= MIN_MARGIN && near;
-    Ok(Dated { claimed: claimed.map(|c| c.0), best, runner_up, searched: spans.join(", "), readings: n, confirmed })
+    let error_s = start_error(pts, &|t, len| store.read(&best.grid, t, len), best.start);
+    Ok(Dated { claimed: claimed.map(|c| c.0), best, runner_up, searched: spans.join(", "), readings: n, confirmed, error_s })
+}
+
+/// The misfit (rms of hum minus smoothed log, mean removed, Hz) with the audio starting at UTC
+/// `start`, as `search` works it out; infinite when too little log is under the readings.
+fn rms_at(rs: &[(usize, f64)], tf: i64, read: &dyn Fn(i64, usize) -> Vec<f64>, start: i64) -> f64 {
+    let w = WIN_S as usize;
+    let p = rs.last().map_or(0, |r| r.0 + 1);
+    let raw = read(start + tf - (w / 2) as i64, p + w);
+    let d: Vec<f64> = rs
+        .iter()
+        .filter_map(|&(t, r)| {
+            let win = &raw[t..t + w];
+            win.iter().all(|v| v.is_finite()).then(|| r - (win.iter().sum::<f64>() / w as f64 - BASE_HZ))
+        })
+        .collect();
+    if d.len() < (rs.len() * 9).div_ceil(10) || d.is_empty() {
+        return f64::INFINITY;
+    }
+    let mean = d.iter().sum::<f64>() / d.len() as f64;
+    (d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / d.len() as f64).sqrt()
+}
+
+/// The error (s, 1 sigma) of the audio starting at UTC `start` in the log `read` gives: a
+/// parabola a + bδ + cδ² fitted to rms² at the starts δ = −SHARP_S..SHARP_S around it; the
+/// misfit summed over the independent readings (n / WIN_S) grows by one noise variance (rms² at
+/// the best) at δ = rms / √(c · n / WIN_S). Root-sum-square with the whole-second step (1/√12 s).
+/// A match with no curvature (flat misfit) is as unsure as the span that counts as one match.
+pub fn start_error(pts: &[EnfPoint], read: &dyn Fn(i64, usize) -> Vec<f64>, start: i64) -> f64 {
+    let (rs, tf) = readings(pts);
+    let step = 1.0 / 12f64.sqrt();
+    let mut xs = Vec::new();
+    for dl in -SHARP_S..=SHARP_S {
+        let r = rms_at(&rs, tf, read, start + dl);
+        if r.is_finite() {
+            xs.push((dl as f64, r * r));
+        }
+    }
+    let best = rms_at(&rs, tf, read, start);
+    let flat = APART_S as f64;
+    if xs.len() < 3 || !best.is_finite() {
+        return flat;
+    }
+    // Least squares for a + bδ + cδ²: the 3×3 normal equations, by Cramer's rule.
+    let mut m = [[0.0f64; 3]; 3];
+    let mut v = [0.0f64; 3];
+    for &(x, y) in &xs {
+        let pw = [1.0, x, x * x];
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] += pw[i] * pw[j];
+            }
+            v[i] += pw[i] * y;
+        }
+    }
+    let det = |a: [[f64; 3]; 3]| a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    let d = det(m);
+    if d.abs() < 1e-300 {
+        return flat;
+    }
+    let mut mc = m;
+    for i in 0..3 {
+        mc[i][2] = v[i];
+    }
+    let c = det(mc) / d;
+    let n_ind = (rs.len() as f64 / WIN_S).max(1.0);
+    if c <= 0.0 {
+        return flat;
+    }
+    let fit = best / (c * n_ind).sqrt();
+    (fit * fit + step * step).sqrt().min(flat)
 }
 
 #[cfg(test)]
@@ -313,5 +395,26 @@ mod tests {
         let mean = d.iter().sum::<f64>() / d.len() as f64;
         let rms = (d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / d.len() as f64).sqrt();
         assert!((rms - c[1].rms_hz).abs() < 1e-6, "{rms} vs {}", c[1].rms_hz);
+    }
+
+    /// A sharp match is sure to about a second; noisier hum makes the start less sure.
+    #[test]
+    fn start_error_from_sharpness() {
+        let (raw, pts, at) = case();
+        let t0 = 1_000_000_000;
+        let read = reader(&raw, t0);
+        let sharp = start_error(&pts, &read, t0 + at as i64);
+        assert!(sharp > 0.28 && sharp < 1.0, "{sharp}");
+        // The same track with 20× the reading noise.
+        let mut seed = 9u64;
+        let noisy: Vec<EnfPoint> = pts
+            .iter()
+            .map(|p| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                EnfPoint { hz: p.hz + 0.01 * (((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5), ..*p }
+            })
+            .collect();
+        let blurred = start_error(&noisy, &read, t0 + at as i64);
+        assert!(blurred > 2.0 * sharp, "{blurred} vs {sharp}");
     }
 }
