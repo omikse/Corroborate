@@ -78,7 +78,15 @@ past events before it is trusted live.
 
 ## Build and run
 
-Rust, plus ffmpeg on `PATH` (yt-dlp for YouTube links).
+What it needs, each on `PATH`:
+
+| Program | What for | Without it | Install (Windows) |
+|---|---|---|---|
+| [Rust](https://rustup.rs) | building the tool | nothing builds | `winget install Rustlang.Rustup` |
+| [ffmpeg](https://ffmpeg.org) (with ffprobe) | opening video and any audio that is not WAV; reading a file's metadata (date, GPS) | only WAV files open; 18 tests fail | `winget install Gyan.FFmpeg` |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | web video links (YouTube and others) | links do not open | `winget install yt-dlp.yt-dlp` |
+
+Open a new terminal after installing, so it sees the new `PATH`.
 
 **run.cmd** (double-click it, or run it from the repository root) builds the current code and
 starts the workbench from `app\`, the tool's own folder. The build is in the window title
@@ -94,6 +102,9 @@ run.cmd --new             # ... start with an empty canvas
 run.cmd -Release          # ... with the full release build (slow); otherwise the fast one
 cargo test --profile fast # same build profile as run.cmd: shares its compiled libraries
 ```
+
+Five workbench tests run the example plugin `examples/bus_echo.rs`; build it first with
+`cargo build --profile fast --example bus_echo`, or they fail saying `bus_echo.exe is missing`.
 
 cargo writes only `target\`; nothing runs from there, so building never waits for an open app.
 Release builds have no console window; debug builds keep it.
