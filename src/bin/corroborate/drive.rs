@@ -350,7 +350,7 @@ fn all_nodes() {
     a.add(Kind::Planes, Pos2::new(460.0, 700.0));
     a.add(Kind::Map, Pos2::new(560.0, 330.0));
     a.add(Kind::InvertLocation, Pos2::new(560.0, 560.0));
-    let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(1050.0, 330.0));
+    let comb = a.add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(1050.0, 330.0));
     a.add(Kind::GridFrequencies { path: String::new() }, Pos2::new(1050.0, 500.0));
     a.add(Kind::Plugin { path: "my-plugin.exe".into() }, Pos2::new(30.0, 560.0));
     let man = a.nodes.iter().position(|n| matches!(n.kind, Kind::Value { .. })).unwrap();
@@ -372,7 +372,7 @@ fn all_nodes() {
     d.h.query_all_by_role(A11y::ComboBox).find(|n| r.contains(n.rect().center())).expect("Combine's mode list").click();
     d.frames(2);
     d.click("any");
-    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: true }), "Combine switched to OR");
+    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: true, .. }), "Combine switched to OR");
     let uid = d.app().nodes[comb].uid.clone();
     assert!(d.app().changes.iter().any(|c| c.node == uid && c.name == "mode" && c.new == "any"), "the change is logged");
     d.shot("all_nodes_edited");
@@ -393,7 +393,7 @@ fn area_timing() {
         let t = Instant::now();
         for _ in 0..20 {
             app.area_cache.borrow_mut().clear();
-            let _ = std::hint::black_box(app.area_from(id).map(|(a, _)| a.allowed().fraction()));
+            let _ = std::hint::black_box(app.area_from(id).map(|(a, _)| a.cells.fraction()));
         }
         println!("{name} {:?}: {:.2} ms", app.area_from(id).map(|(_, n)| n), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
@@ -405,7 +405,7 @@ fn collapse_node() {
     let mut d = Drive::new();
     let a = d.app();
     let man = a.add(place(50.0, 15.0, 100.0), Pos2::new(30.0, 60.0));
-    let comb = a.add(Kind::CombineLocations { any: false }, Pos2::new(400.0, 60.0));
+    let comb = a.add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(400.0, 60.0));
     a.wire(man, "value", comb, "location 1");
     d.frames(3);
     let tall = { let a = d.app(); a.node_rect(a.canvas_origin, comb).height() };
@@ -453,6 +453,63 @@ pub fn gps_clip() -> PathBuf {
     p
 }
 
+/// Combine locations: each wired location is a row with a sign. A click on a row's + takes that
+/// location away; the sign is kept with the project, by the node it comes from. With only −
+/// rows it starts from the whole world. Invert gives everywhere but its input.
+#[test]
+fn combine_adds_and_takes_away() {
+    let mut d = Drive::new();
+    let a = d.app();
+    let big = a.add(place(50.0, 15.0, 1500.0), Pos2::new(30.0, 60.0));
+    let small = a.add(place(50.0, 15.0, 300.0), Pos2::new(30.0, 330.0));
+    let comb = a.add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(460.0, 60.0));
+    let map = a.add(Kind::Map, Pos2::new(900.0, 60.0));
+    a.wire_many(big, "value", comb);
+    a.wire_many(small, "value", comb);
+    a.wire_many(comb, "location", map);
+    d.frames(3);
+    let cells = |app: &App, n: NodeId| app.area_from(n).unwrap().0.cells.clone();
+    let (b, s) = (cells(d.app(), big), cells(d.app(), small));
+    assert_eq!(cells(d.app(), comb), b.and(&s), "both +, all: AND");
+
+    // The second row's sign: + to −.
+    d.h.get_all_by_label("+").nth(1).expect("a + on each row").click();
+    d.frames(3);
+    let a = d.app();
+    assert!(corroborate::modules::combine_locations::is_minus(a.nodes[comb].kind.rows(), &a.nodes[small].uid));
+    let ring = cells(d.app(), comb);
+    assert_eq!(ring, b.and(&s.not()), "the small one taken away");
+    assert!(!ring.is_empty() && ring.and(&s).is_empty());
+    let (_, note) = d.app().area_from(comb).unwrap();
+    assert!(note.contains("without"), "{note}");
+    d.shot("combine_signs");
+
+    // Saved and opened again, the sign stays.
+    let text = d.app().project_text();
+    assert!(text.contains("|minus "), "{text}");
+    let mut back = App::empty();
+    assert!(back.load_project_text(&text));
+    assert_eq!(cells(&back, comb), ring);
+
+    // Both −: the whole world without the big one. Invert of the big one is the same.
+    d.h.get_all_by_label("+").next().expect("the first row's +").click();
+    d.frames(3);
+    assert_eq!(cells(d.app(), comb), b.not());
+    let inv = d.app().add(Kind::InvertLocation, Pos2::new(460.0, 400.0));
+    d.app().wire(big, "value", inv, "location");
+    d.frames(2);
+    assert_eq!(cells(d.app(), inv), b.not());
+
+    // Two + places that do not meet, under all: nothing left.
+    let far = d.app().add(place(-30.0, 140.0, 300.0), Pos2::new(30.0, 600.0));
+    let none = d.app().add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(460.0, 600.0));
+    d.app().wire_many(far, "value", none);
+    d.app().wire_many(small, "value", none);
+    d.frames(3);
+    let (a, note) = d.app().area_from(none).unwrap();
+    assert!(a.cells.is_empty() && note.starts_with("CONTRADICTION"), "{note}");
+}
+
 /// The location panel: a file with GPS in its metadata puts a pin at its place with nothing
 /// wired, framed by itself; an area (a typed place with a radius, through Combine) is tinted.
 /// A Map node takes everything wired into it: a file's GPS as a pin, a typed place, a combined
@@ -462,7 +519,7 @@ fn map_from_metadata() {
     let mut d = Drive::new();
     let s = d.app().add(Kind::Sourcer { input: gps_clip().to_string_lossy().into_owned() }, Pos2::new(40.0, 40.0));
     let v = d.app().add(Kind::Value { ty: "location".into(), rows: vec![("lat".into(), "48.85".into()), ("lon".into(), "2.35".into()), ("radius_km".into(), "300".into())] }, Pos2::new(40.0, 520.0));
-    let comb = d.app().add(Kind::CombineLocations { any: true }, Pos2::new(420.0, 520.0));
+    let comb = d.app().add(Kind::CombineLocations { any: true, rows: Vec::new() }, Pos2::new(420.0, 520.0));
     d.app().wire(v, "value", comb, "location 1");
     let map = d.app().add(Kind::Map, Pos2::new(900.0, 40.0));
     assert_eq!(d.app().map_status(map), "no location wired");

@@ -53,7 +53,7 @@ fn full_project() -> App {
     let plug = a.add(Kind::Plugin { path: r"C:\Tools\my plugin\detect.exe".into() }, Pos2::new(30.0, 760.0));
     let inv = a.add(Kind::InvertLocation, Pos2::new(1050.0, 400.0));
     let map = a.add(Kind::Map, Pos2::new(1300.0, 400.0));
-    let comb = a.add(Kind::CombineLocations { any: true }, Pos2::new(1050.0, 600.0));
+    let comb = a.add(Kind::CombineLocations { any: true, rows: Vec::new() }, Pos2::new(1050.0, 600.0));
     let rec = a.add(Kind::ResultRecord { folder: r"E:\Evidence\case 12".into() }, Pos2::new(1050.0, 40.0));
     a.nodes[src].label = "Field recorder — north gate".into();
     a.nodes[mic].label = "Mic 2".into();

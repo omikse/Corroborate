@@ -1,6 +1,6 @@
-//! Where on Earth something can be: a mask of 1° × 1° cells, starting as the whole world.
-//! Each piece of evidence is a mask of the cells it allows; stacking evidence is AND.
-//! An empty result means the evidence contradicts itself: shown as such, never hidden.
+//! Where on Earth something can be: a mask of 1° × 1° cells. Masks join (AND, OR) and are taken
+//! away from each other; an empty result means the evidence contradicts itself: shown as such,
+//! never hidden.
 //!
 //! Also the grid-frequency map (which cells run on 50 Hz, which on 60 Hz), read from a
 //! swappable JSON file. A cell counts for a frequency when its centre lies inside any region
@@ -117,31 +117,21 @@ impl WorldMask {
     }
 }
 
-/// A location signal: the cells it marks, and whether it adds them (the place is here: drawn
-/// green) or subtracts them (the place is not here: drawn red). Subtract(X) allows the same as
-/// Add(not X); inverting flips add and subtract and keeps the cells.
+/// A location: the cells where something can be. Combining locations (adding, taking away) is
+/// the Combine locations node's job, not the location's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Area {
     pub cells: WorldMask,
-    pub add: bool,
 }
 
 impl Area {
-    pub fn add(cells: WorldMask) -> Self {
-        Self { cells, add: true }
+    pub fn new(cells: WorldMask) -> Self {
+        Self { cells }
     }
 
-    /// The cells still possible under this signal alone.
-    pub fn allowed(&self) -> WorldMask {
-        if self.add {
-            self.cells.clone()
-        } else {
-            self.cells.not()
-        }
-    }
-
+    /// Everywhere this area is not.
     pub fn inverted(&self) -> Area {
-        Area { cells: self.cells.clone(), add: !self.add }
+        Area { cells: self.cells.not() }
     }
 }
 
@@ -323,13 +313,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invert_flips_what_is_allowed() {
+    fn invert_gives_the_rest_of_the_world() {
         let c = WorldMask::circle(50.0, 10.0, 500.0);
-        let a = Area::add(c.clone());
-        assert_eq!(a.allowed(), c);
-        assert_eq!(a.inverted().allowed(), c.not());
+        let a = Area::new(c.clone());
+        assert_eq!(a.inverted().cells, c.not());
         assert_eq!(a.inverted().inverted(), a);
-        assert!(a.allowed().and(&a.inverted().allowed()).is_empty());
+        assert!(a.cells.and(&a.inverted().cells).is_empty());
+        assert!(a.cells.or(&a.inverted().cells).fraction() > 0.999_999);
+        assert!(Area::new(WorldMask::world()).inverted().cells.is_empty());
     }
 
     #[test]

@@ -6,21 +6,17 @@
 //!   and pieces), named by its stable id, unless One recording (right-click on several selected
 //!   sources) gave them one shared id: a label only, saying the files are one recording's parts.
 //!   A node fed audio belongs to the recording of that audio's source.
-//! - Projects saved before stage 4 may hold evidence lines (`anchor|`, `link|`, `off|`,
-//!   `stamp-end|`): they are read, dropped, and counted in a message.
 //!
 //! Project lines: `format|2`, `recording|<node id>|<recording id>`.
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Which sources share a clock, and what an old project held that is no longer read.
+/// Which sources share a clock.
 #[derive(Default)]
 pub struct Evidence {
     /// Source node id → shared recording id (One recording).
     pub share: BTreeMap<String, String>,
-    /// While loading: old evidence lines dropped (anchors, links, switches).
-    pub dropped: (usize, usize, usize),
 }
 
 impl App {
@@ -97,31 +93,17 @@ impl App {
         t
     }
 
-    /// Reads one project line of clocks; an old evidence line is counted and dropped. False when
+    /// Reads one project line of clocks. False when
     /// it is not one.
     pub(crate) fn evidence_line(&mut self, f: &[&str]) -> bool {
         match f {
             ["recording", n, c] => {
                 self.ev.share.insert(n.to_string(), c.to_string());
             }
-            ["format", _] | ["stamp-end", _] => {}
-            ["anchor", ..] => self.ev.dropped.0 += 1,
-            ["link", ..] => self.ev.dropped.1 += 1,
-            ["off", _] => self.ev.dropped.2 += 1,
+            ["format", _] => {}
             _ => return false,
         }
         true
-    }
-
-    /// The message for old evidence lines dropped while loading, if any; resets the count.
-    pub(crate) fn dropped_evidence(&mut self) -> Option<String> {
-        let (a, l, o) = std::mem::take(&mut self.ev.dropped);
-        if a + l + o == 0 {
-            return None;
-        }
-        let n = |k: usize, one: &str, many: &str| (k > 0).then(|| format!("{k} {}", if k == 1 { one } else { many }));
-        let what: Vec<String> = [n(a, "anchor", "anchors"), n(l, "link", "links"), n(o, "evidence switch", "evidence switches")].into_iter().flatten().collect();
-        Some(format!("dropped from the old project: {} (there is no global clock solve any more; a time made by hand is a Value node of type time, wired where it is needed)", what.join(", ")))
     }
 
     /// A node's name, or its module's when it has none.

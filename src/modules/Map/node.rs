@@ -6,8 +6,8 @@
 //!   "Maps"); without them the built-in Blue Marble image is drawn in the same projection. Google's
 //!   satellite and road maps can be switched on (google_maps.rs): one choice for all Map nodes,
 //!   online, so offline at every start and marked while on.
-//! - **Points** (a typed latitude and longitude, a file's GPS) are pins; a click selects the node they come from. **Areas** are their 1° cells, green where
-//!   they add and red where they subtract. New inputs are framed by themselves.
+//! - **Points** (a typed latitude and longitude, a file's GPS) are pins; a click selects the node they come from. **Areas** are their 1° cells. Each input has its own
+//!   colour, for its pin or its area. New inputs are framed by themselves.
 //!
 //! `paint` is the small fixed world map (Robinson over NASA Blue Marble, Natural Earth coastlines)
 //! that other nodes showing an area (Result record, ENF) draw.
@@ -20,9 +20,20 @@ use walkers::{lat_lon, MapMemory, PmTiles, Projector, Tiles};
 const NODE_W: f32 = 360.0;
 const MAP_H: f32 = 240.0;
 
-const PIN: Color32 = Color32::from_rgb(96, 165, 250);
-const KEPT: Color32 = Color32::from_rgba_premultiplied(30, 110, 40, 140);
-const CUT: Color32 = Color32::from_rgba_premultiplied(120, 20, 20, 140);
+/// One colour per input, in the order they are wired (then again from the start).
+const INPUT_COLOURS: [Color32; 6] = [
+    Color32::from_rgb(96, 165, 250),
+    Color32::from_rgb(70, 200, 110),
+    Color32::from_rgb(240, 160, 60),
+    Color32::from_rgb(210, 110, 220),
+    Color32::from_rgb(60, 200, 200),
+    Color32::from_rgb(225, 210, 80),
+];
+
+/// The colour of the `k`th location wired into a map.
+pub fn input_colour(k: usize) -> Color32 {
+    INPUT_COLOURS[k % INPUT_COLOURS.len()]
+}
 
 /// The Map node on the canvas: wider, with the map in it.
 pub struct Look;
@@ -37,13 +48,12 @@ impl crate::look::NodeLook for Look {
     }
 }
 
-/// One line about an area: whether it adds or subtracts, and how much of Earth it leaves.
+/// One line about an area: how much of Earth it covers.
 pub fn area_status(a: &Area) -> String {
-    let al = a.allowed();
-    if al.is_empty() {
+    if a.cells.is_empty() {
         "nothing possible: contradiction".into()
     } else {
-        format!("{} · {:.1} % of Earth possible", if a.add { "adds" } else { "subtracts" }, al.fraction() * 100.0)
+        format!("{:.1} % of Earth", a.cells.fraction() * 100.0)
     }
 }
 
@@ -116,11 +126,10 @@ pub fn paint(p: &egui::Painter, rect: Rect, earth: Option<egui::TextureId>, area
             p.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(44, 48, 54), Stroke::NONE));
         }
     }
-    // The area's cells, tinted over the image: green when it adds, red when it subtracts.
-    // Merged into runs per row: within a row the projection is linear in longitude, so a run is
-    // exactly a trapezoid.
+    // The area's cells, tinted over the image, merged into runs per row: within a row the
+    // projection is linear in longitude, so a run is exactly a trapezoid.
     if let Some(area) = area {
-        let tint = if area.add { KEPT } else { CUT };
+        let tint = input_colour(0).gamma_multiply(0.55);
         let mut mesh = egui::epaint::Mesh::default();
         for r in 0..ROWS {
             let (top, bot) = (90.0 - r as f64, 89.0 - r as f64);
@@ -277,13 +286,13 @@ fn frame_zoom(span_deg: f64, detail: bool) -> f64 {
     (360.0 / (span_deg * 1.6)).log2().clamp(0.0, if detail { 16.0 } else { 4.5 })
 }
 
-/// South, west, north and east of what a location puts on the map, in degrees. An area that only
-/// subtracts, or the whole world (no evidence yet), has nothing to frame.
+/// South, west, north and east of what a location puts on the map, in degrees. The whole world
+/// (no evidence yet) has nothing to frame.
 fn extent(p: &Place) -> Option<[f64; 4]> {
     if let (true, Some(s)) = (p.point, p.site) {
         return Some([s.lat, s.lon, s.lat, s.lon]);
     }
-    if !p.area.add || p.area.cells.fraction() > 0.999 {
+    if p.area.cells.fraction() > 0.999 {
         return None;
     }
     let mut b: Option<[f64; 4]> = None;
@@ -425,7 +434,7 @@ impl App {
         self.map_source_bar(ui, i);
         self.read_map_files(&ctx);
         let (places, _) = self.map_inputs(i);
-        let colours: Vec<(Color32, String)> = places.iter().map(|_| (PIN, String::new())).collect();
+        let colours: Vec<(Color32, String)> = (0..places.len()).map(|k| (input_colour(k), String::new())).collect();
         let online = self.maps.google.live();
         let n_maps = self.maps.tiles.as_ref().map_or(0, |t| t.len());
         let uid = self.nodes[i].uid.clone();
@@ -470,8 +479,8 @@ impl App {
                         paint_earth(&p, proj, tex);
                     }
                 }
-                for pl in places.iter().filter(|pl| !pl.point) {
-                    paint_area(&p, proj, &pl.area);
+                for (pl, (colour, _)) in places.iter().zip(&colours).filter(|(pl, _)| !pl.point) {
+                    paint_area(&p, proj, &pl.area, *colour);
                 }
                 for (pl, (color, group)) in places.iter().zip(&colours) {
                     let Some(s) = pl.site else { continue };
@@ -543,13 +552,13 @@ fn paint_earth(p: &egui::Painter, proj: &Projector, tex: egui::TextureId) {
     p.add(egui::Shape::mesh(mesh));
 }
 
-/// An area's 1° cells, merged into runs per row: green where it adds, red where it subtracts.
-/// A whole-world area (no evidence yet) is not drawn: it says nothing.
-fn paint_area(p: &egui::Painter, proj: &Projector, area: &Area) {
-    if area.add && area.cells.fraction() > 0.999 {
+/// An area's 1° cells in its input's colour, merged into runs per row. A whole-world area (no
+/// evidence yet) is not drawn: it says nothing.
+fn paint_area(p: &egui::Painter, proj: &Projector, area: &Area, colour: Color32) {
+    if area.cells.fraction() > 0.999 {
         return;
     }
-    let tint = if area.add { Color32::from_rgba_unmultiplied(60, 200, 90, 70) } else { Color32::from_rgba_unmultiplied(220, 60, 60, 70) };
+    let tint = colour.gamma_multiply(0.28);
     let mut mesh = egui::epaint::Mesh::default();
     for r in 0..ROWS {
         let (top, bot) = (merc_lat(90.0 - r as f64), merc_lat(89.0 - r as f64));

@@ -172,7 +172,7 @@ fn cleanup_lab_shapes() {
     let i1 = app.add(Kind::InvertLocation, next());
     let i2 = app.add(Kind::InvertLocation, next());
     let i3 = app.add(Kind::InvertLocation, next());
-    let c = app.add(Kind::CombineLocations { any: false }, next());
+    let c = app.add(Kind::CombineLocations { any: false, rows: Vec::new() }, next());
     let map = app.add(Kind::Map, next());
     app.wire(p, "value", i1, "location");
     app.wire(i1, "location", i2, "location");

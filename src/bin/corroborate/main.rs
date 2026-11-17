@@ -657,7 +657,6 @@ impl App {
                 if old_time == 1 { "" } else { "s" }
             ));
         }
-        said.extend(self.dropped_evidence());
         if !said.is_empty() {
             self.msg = said.join("; ");
         }
@@ -702,8 +701,7 @@ impl App {
                 corroborate::data::Data::Location { area, note, .. } => Ok((area, note)),
                 _ => Err("this value is not a location".into()),
             },
-            Kind::ResultRecord { .. } => self.record_area_out(from),
-            Kind::CombineLocations { any } => self.combine_area_out(from, *any),
+            Kind::CombineLocations { any, .. } => self.combine_area_out(from, *any),
             Kind::InvertLocation => self.invert_area_out(from),
             Kind::Module { .. } | Kind::Plugin { .. } => self.outbox_area(from),
             _ => Err("this node gives no area".into()),

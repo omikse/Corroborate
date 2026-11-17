@@ -123,8 +123,8 @@ fn program_on_the_bus() {
         rows.iter_mut().find(|(k, _)| k == "radius_km").unwrap().1 = "1000".into();
     }
     app.area_cache.borrow_mut().clear();
-    let bigger = app.area_from(man).unwrap().0.allowed().fraction();
-    assert!(pump(&mut app, |a| a.area_from(echo).is_ok_and(|(x, _)| (x.allowed().fraction() - bigger).abs() < 1e-9)), "the new place went through");
+    let bigger = app.area_from(man).unwrap().0.cells.fraction();
+    assert!(pump(&mut app, |a| a.area_from(echo).is_ok_and(|(x, _)| (x.cells.fraction() - bigger).abs() < 1e-9)), "the new place went through");
     app.stop_all();
 }
 

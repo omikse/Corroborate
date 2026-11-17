@@ -28,7 +28,7 @@ and views (Map, Timeline).
 | `modules.rs`, `module.rs` | the module list and the interface built-in detectors share (16 kHz mono in, findings out) |
 | `graph.rs` | nodes, typed ports and wires; the checks before anything runs |
 | `core.rs` | values with error and source, port kinds, node roles |
-| `area.rs` | a location as a mask of cells that adds or subtracts |
+| `area.rs` | a location as a mask of 1° cells; the grid-frequency map |
 | `clock.rs`, `sync.rs` | fitting recordings' offsets and speeds from shared moments (Audio match, ADS-B check) |
 | `audio_match.rs` | which recordings hear the same sound, and the method's measurements |
 | `cuts.rs` | where a recording is cut (Cut detector) |

@@ -5,7 +5,7 @@ order = 1
 aliases = ["combine"]
 role = "transform"
 
-# Add node offers it twice: all locations must hold, or any may.
+# Add node offers it twice: all + locations must hold, or any may.
 [[variant]]
 label = "Combine locations (all)"
 mode = "all"
@@ -14,7 +14,8 @@ mode = "all"
 label = "Combine locations (any)"
 mode = "any"
 
-# Grows as it is wired: "location 1", "location 2", …
+# Grows as it is wired: "location 1", "location 2", …; each row has a sign (+ adds, − takes
+# away), kept as a `minus <node id>` row.
 [[input]]
 name = "location"
 kind = "location"
@@ -24,12 +25,10 @@ many = true
 name = "location"
 kind = "location"
 
-# all: every wired location must hold (AND). any: at least one may (OR).
+# How the + rows join. all: every one must hold (AND). any: at least one may (OR). The − rows
+# are then taken away.
 [[setting]]
 name = "mode"
 type = "choice"
 choices = ["all", "any"]
 default = "all"
-
-[look]
-size = [340, 132]

@@ -48,7 +48,7 @@ fn main() {
         match plugin::parse_in(&line) {
             Some(In::Value { port, value }) if port == "place" => {
                 let detail = match Data::from_json(PortKind::Location, &value) {
-                    Ok(Data::Location { area, .. }) => format!("{:.5} of Earth", area.allowed().fraction()),
+                    Ok(Data::Location { area, .. }) => format!("{:.5} of Earth", area.cells.fraction()),
                     Ok(_) => String::new(),
                     Err(e) => e,
                 };

@@ -117,35 +117,6 @@ impl App {
         }
     }
 
-    /// The record's location: the whole world, AND each area wired into it.
-    /// Steps: (node, how its area was reached, the fraction of Earth it allows or None while it has none).
-    pub(crate) fn record_area(&self, rec: NodeId) -> (WorldMask, Vec<(String, String, Option<f64>)>) {
-        let mut m = WorldMask::world();
-        let mut steps = Vec::new();
-        for (_, from, _, kind) in self.record_inputs(rec) {
-            if kind != PortKind::Location {
-                continue;
-            }
-            let label = self.nodes[from].label.clone();
-            match self.area_from(from) {
-                Ok((a, note)) => {
-                    let al = a.allowed();
-                    m = m.and(&al);
-                    steps.push((label, note, Some(al.fraction())));
-                }
-                Err(e) => steps.push((label, e, None)),
-            }
-        }
-        (m, steps)
-    }
-
-    /// The area on the record's location output.
-    pub(crate) fn record_area_out(&self, i: NodeId) -> Result<(Arc<Area>, String), String> {
-        let (m, steps) = self.record_area(i);
-        let k = steps.iter().filter(|s| s.2.is_some()).count();
-        Ok((Arc::new(Area::add(m)), format!("the whole world cut by {k} area(s)")))
-    }
-
     pub(crate) fn record_status(&self, i: NodeId) -> String {
         if let Some(r) = self.recordings.get(&i) {
             return format!("● recording {}", sourcer_node::fmt_secs(timebase::now_unix() - r.started));
@@ -154,18 +125,6 @@ impl App {
     }
 
     pub(crate) fn record_json(&self, i: NodeId) -> String {
-        let (m, steps) = self.record_area(i);
-        let st: Vec<String> = steps
-            .iter()
-            .map(|(n, note, f)| {
-                format!(
-                    "{{\"node\":\"{}\",\"note\":\"{}\",\"fraction_of_earth\":{}}}",
-                    json_escape(n),
-                    json_escape(note),
-                    f.map_or("null".to_string(), |f| format!("{f:.5}"))
-                )
-            })
-            .collect();
         // Each input with the value on it in its kind's JSON form (see corroborate::data):
         // anything wired in is kept, whatever module it comes from.
         let ins: Vec<String> = self
@@ -189,15 +148,7 @@ impl App {
             ),
             None => String::new(),
         };
-        format!(
-            ",\"inputs\":[{}]{rec},\"location\":{{\"start\":\"whole world\",\"cell_deg\":1,\"remaining_fraction_of_earth\":{:.5},\"remaining_km2\":{:.0},\"contradiction\":{},\"steps\":[{}],\"cells_row_first_last\":{}}}",
-            ins.join(","),
-            m.fraction(),
-            m.area_km2(),
-            m.is_empty(),
-            st.join(","),
-            m.runs_json()
-        )
+        format!(",\"inputs\":[{}]{rec}", ins.join(","))
     }
 
     fn write_json(&self, path: &std::path::Path, ids: &[NodeId]) -> Result<(), String> {
@@ -344,11 +295,6 @@ impl App {
                 if fed.iter().any(|f| f.3 == PortKind::Video) {
                     look::line(ui, "video: its frames are not recorded yet (audio is)", WARN);
                 }
-            }
-            let (m, steps) = self.record_area(i);
-            if !steps.is_empty() {
-                let t = if m.is_empty() { "location: nothing left (contradiction)".to_string() } else { format!("location: {:.2} % of Earth left", m.fraction() * 100.0) };
-                look::line(ui, t, if m.is_empty() { WARN } else { TEXT });
             }
         });
     }

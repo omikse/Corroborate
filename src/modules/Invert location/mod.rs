@@ -1,4 +1,4 @@
-//! Invert node: flips a location, so what it added now subtracts, and the other way round.
+//! Invert node: everywhere except the location wired in, as a plain area.
 
 use crate::core::NodeSpec;
 

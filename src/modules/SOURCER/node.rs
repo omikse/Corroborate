@@ -651,7 +651,7 @@ pub fn site(s: &SourceState) -> Option<(corroborate::data::Site, String)> {
 /// The location output: the recording's point (the 1° cell it is in as the area).
 pub fn location(s: &SourceState) -> Result<corroborate::data::Data, String> {
     let (p, key) = site(s).ok_or("no coordinates in the metadata")?;
-    let area = Area { cells: corroborate::area::WorldMask::circle(p.lat, p.lon, 0.0), add: true };
+    let area = Area::new(corroborate::area::WorldMask::circle(p.lat, p.lon, 0.0));
     Ok(corroborate::data::Data::Location { area: Arc::new(area), note: format!("from the file's metadata ({key})"), site: Some(p) })
 }
 

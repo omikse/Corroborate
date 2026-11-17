@@ -15,7 +15,8 @@ The graph runs always: there is no Run button. Changing a source, or what its au
 restarts it after a moment; **↻ Restart** in the top bar starts every source again from its
 beginning.
 
-Output: `location`, the whole world cut by every location wired in.
+It only records: a location wired in is kept as it is, and nothing is worked out from it (combine
+locations with [Combine locations](<../Combine locations/README.md>) first). No outputs.
 
 Files: `mod.rs` (name, label, ports, which kinds are streams), `node.rs` (the node in the
-workbench: inputs, saving, recording, its WAV writer, the location).
+workbench: inputs, saving, recording, its WAV writer).

@@ -9,7 +9,3 @@ role = "record"
 name = "in"
 kind = "any"
 many = true
-
-[[output]]
-name = "location"
-kind = "location"

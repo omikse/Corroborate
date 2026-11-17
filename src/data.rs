@@ -5,7 +5,7 @@
 //! | kind       | JSON                                                                          |
 //! |------------|-------------------------------------------------------------------------------|
 //! | `time`     | `{"utc": 1793839234.0, "error_s": 0.5, "source": "file metadata", "recording": "n3"}`: UTC (Unix seconds) ± `error_s`, where it comes from, and which recording it belongs to (the stable id of its source; absent for a time typed in UTC) |
-//! | `location` | `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W), plus `"lat"`, `"lon"` and `"elevation"` (m) when it is a point; programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
+//! | `location` | `{"cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W), plus `"lat"`, `"lon"` and `"elevation"` (m) when it is a point; programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
 //! | `event`    | `[{"clock": "n3", "t_start": 12.0, "t_end": 14.5, "label": "…", "detail": "…", "error_s": 0.1}, …]` (`error_s`: the event's own measurement error) |
 //! | `track`    | `[{"clock": "n3", "id": "h1", "t": 12.0, "value": 59.993, "ok": true}, …]` |
 //! | `text`     | `"any text"`                                                                  |
@@ -140,7 +140,7 @@ impl Data {
             }
             Data::Location { area, note, site } => {
                 let site = site.map_or(String::new(), |s| format!(",\"lat\":{},\"lon\":{}{}", s.lat, s.lon, s.elevation.map_or(String::new(), |e| format!(",\"elevation\":{e}"))));
-                format!("{{\"add\":{},\"cells\":{}{site},\"note\":\"{}\"}}", area.add, area.cells.runs_json(), json_escape(note))
+                format!("{{\"cells\":{}{site},\"note\":\"{}\"}}", area.cells.runs_json(), json_escape(note))
             }
             Data::Events(v) => {
                 let e: Vec<String> = v
@@ -182,7 +182,6 @@ impl Data {
                 Ok(Data::Time { utc, error_s: num(j, "error_s").unwrap_or(0.0), source: text(j, "source"), recording: text(j, "recording") })
             }
             PortKind::Location => {
-                let add = !matches!(j.get("add"), Some(Json::Bool(false)));
                 let note = text(j, "note");
                 let site = match (num(j, "lat"), num(j, "lon")) {
                     (Some(lat), Some(lon)) if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) => return Err(format!("location {lat}, {lon} is not on Earth")),
@@ -207,7 +206,7 @@ impl Data {
                     }
                     m
                 };
-                Ok(Data::Location { area: Arc::new(Area { cells, add }), note, site })
+                Ok(Data::Location { area: Arc::new(Area::new(cells)), note, site })
             }
             PortKind::Event => {
                 let items = list(j);
@@ -383,8 +382,8 @@ mod tests {
         let values = [
             Data::Time { utc: 1_793_839_234.5, error_s: 0.25, source: "file \"metadata\"".into(), recording: String::new() },
             Data::Time { utc: 1_793_839_234.5, error_s: 2.0, source: String::new(), recording: "n3".into() },
-            Data::Location { area: Arc::new(Area { cells: cells.clone(), add: false }), note: "not here".into(), site: None },
-            Data::Location { area: Arc::new(Area { cells, add: true }), note: String::new(), site: Some(Site { lat: 42.4797, lon: -76.4514, elevation: Some(335.0) }) },
+            Data::Location { area: Arc::new(Area::new(cells.clone())), note: "not here".into(), site: None },
+            Data::Location { area: Arc::new(Area::new(cells)), note: String::new(), site: Some(Site { lat: 42.4797, lon: -76.4514, elevation: Some(335.0) }) },
             Data::Events(vec![
                 Event { clock: "n2".into(), t_start: 12.0, t_end: 14.5, label: "clap".into(), detail: "loud\nshort".into(), error_s: 0.1 },
                 Event { t_start: 1.0, t_end: 1.0, ..Default::default() },
@@ -407,7 +406,6 @@ mod tests {
     fn programs_may_send_a_circle() {
         let Ok(Data::Location { area, .. }) = Data::parse(PortKind::Location, r#"{"lat":50.1,"lon":14.4,"radius_km":200}"#) else { panic!() };
         assert_eq!(area.cells, WorldMask::circle(50.1, 14.4, 200.0));
-        assert!(area.add);
         assert!(Data::parse(PortKind::Location, r#"{"lat":95,"lon":0}"#).unwrap_err().contains("not on Earth"));
         assert!(Data::parse(PortKind::Location, r#"{"cells":[[200,0,1]]}"#).unwrap_err().contains("outside"));
         assert!(Data::parse(PortKind::Time, r#"{"when":1}"#).unwrap_err().contains("utc"));

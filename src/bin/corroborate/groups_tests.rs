@@ -22,7 +22,7 @@ fn scene() -> Scene {
     let a = d.app().add(drive::place(52.0, 21.0, 300.0), Pos2::new(40.0, 40.0));
     let b = d.app().add(drive::place(50.0, 20.0, 200.0), Pos2::new(40.0, 330.0));
     let inv = d.app().add(Kind::InvertLocation, Pos2::new(330.0, 40.0));
-    let comb = d.app().add(Kind::CombineLocations { any: false }, Pos2::new(600.0, 180.0));
+    let comb = d.app().add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(600.0, 180.0));
     let map = d.app().add(Kind::Map, Pos2::new(1000.0, 180.0));
     d.app().wire(a, "value", inv, "location");
     d.app().wire(inv, "location", comb, "location 1");
@@ -189,7 +189,7 @@ fn uses_of_one_group_stay_the_same() {
     key(&mut d, Modifiers::NONE, Key::Tab);
     let app = d.app();
     let comb2 = app.inside(g2).into_iter().find(|&x| matches!(app.nodes[x].kind, Kind::CombineLocations { .. })).unwrap();
-    assert!(matches!(app.nodes[comb2].kind, Kind::CombineLocations { any: true }), "the other use follows");
+    assert!(matches!(app.nodes[comb2].kind, Kind::CombineLocations { any: true, .. }), "the other use follows");
     assert_eq!(app.nodes[inv2].label, "Not here");
     assert_eq!(app.graph.feeder(inv2, "location").map(|f| f.0), Some(b), "and keeps its own wire outside");
     assert_eq!(app.graph.feeder(inv, "location").map(|f| f.0), Some(a));

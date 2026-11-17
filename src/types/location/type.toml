@@ -2,7 +2,7 @@ id = "location"
 label = "Location"
 color = "#c785c9"
 flow = "value"
-description = "An area of the Earth in 1° cells that either adds (the place is here) or subtracts (the place is not here)."
+description = "Where something is: an area of the Earth (1° cells), or a point with a radius around it."
 
 [[field]]
 name = "lat"
@@ -35,12 +35,6 @@ name = "elevation"
 type = "number"
 label = "elevation"
 unit = "m"
-
-[[field]]
-name = "add"
-type = "bool"
-label = "the place is here"
-default = true
 
 [[field]]
 name = "note"

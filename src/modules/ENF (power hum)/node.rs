@@ -183,7 +183,7 @@ pub fn area_out(st: &Shared) -> Result<(Arc<Area>, String), String> {
         }
     }
     match &s.enf.area {
-        Some(a) => Ok((Arc::new(Area::add((**a).clone())), s.enf.area_note.clone())),
+        Some(a) => Ok((Arc::new(Area::new((**a).clone())), s.enf.area_note.clone())),
         None if !s.enf.area_note.is_empty() => Err(s.enf.area_note.clone()),
         None => Err(format!("no area yet ({})", if s.status.is_empty() { "not run" } else { &s.status })),
     }
@@ -282,7 +282,7 @@ impl App {
             _ => None,
         };
         let place = match self.graph.feeder(i, "location").map(|(f, o)| self.value_from(f, o)) {
-            Some(Ok(Data::Location { area, .. })) => Some(area.allowed()),
+            Some(Ok(Data::Location { area, .. })) => Some(area.cells.clone()),
             _ => None,
         };
         EnfJob { state: self.nodes[i].state.clone(), grid: grid_frequencies_node::load(&path).map(Arc::new), prior: None, claimed, place }

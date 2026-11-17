@@ -65,8 +65,8 @@ and where every conclusion shows how it was reached.
 - **A phone call.** Sounds in the background narrow down where the caller was.
 
 A time is a moment in UTC with its error and source, belonging to a recording (usually its start or
-end); a location is an area of the Earth that either adds (the place is here) or subtracts (it is
-not here), or an exact point. Both travel only on wires: a node knows a time or a place only when
+end); a location is an area of the Earth, or an exact point. Adding locations up and taking them
+away from each other is a node's job (Combine locations). Both travel only on wires: a node knows a time or a place only when
 one is wired into it, and hovering it walks back along the wires to where it came from.
 
 ## Responsibility
@@ -111,7 +111,7 @@ forms are in the [Template README](src/modules/Template/README.md).
 | Type | What it carries |
 |---|---|
 | `time` | a moment in UTC with its error and where it comes from, belonging to a recording: when it started, ended, or something happened |
-| `location` | an area of the Earth that adds (the place is here) or subtracts (it is not here), or an exact point |
+| `location` | an area of the Earth, or an exact point |
 | `length` | a duration in seconds, such as how long a recording is |
 | `event` | timed findings (a clap, a plane passing), each with a start, an end and a label; a list that keeps growing |
 | `track` | a measured line over time (a frequency, a level); a list that keeps growing |
@@ -145,11 +145,11 @@ Every node is a module: a folder named by its label under `src/modules/` (in the
 | [ADS-B check](<src/modules/ADS-B check/README.md>) | flight data against heard passes, and the audio's start and end time from them |
 | [Metadata](<src/modules/Metadata/README.md>) | what a file says about itself |
 | [Plugin](<src/modules/Plugin/README.md>) | runs a separate program on the same audio |
-| [Combine locations](<src/modules/Combine locations/README.md>) | several locations into one (all or any) |
-| [Invert location](<src/modules/Invert location/README.md>) | flips what a location adds and subtracts |
+| [Combine locations](<src/modules/Combine locations/README.md>) | locations added up and taken away: + rows joined (all or any), − rows removed |
+| [Invert location](<src/modules/Invert location/README.md>) | everywhere except a location |
 | [Map](<src/modules/Map/README.md>) | locations on a map you can move and zoom |
 | [Timeline](<src/modules/Timeline/README.md>) | recordings as bars from their start to their end, on one real-time playhead |
-| [Result record](<src/modules/Result record/README.md>) | the result JSON, the evidence trail and the location every input agrees on |
+| [Result record](<src/modules/Result record/README.md>) | the result JSON and the evidence trail: everything wired into it |
 
 The old pre-workbench version (doppler-view) is tag `v0.1-doppler-live`; its viewer lives on as
 `planes-view` ([VIEWER.md](<src/modules/Planes (Doppler)/VIEWER.md>)).

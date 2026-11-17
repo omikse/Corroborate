@@ -11,7 +11,7 @@ use egui_kittest::kittest::Queryable;
 fn three() -> (Drive, NodeId, NodeId, NodeId) {
     let mut d = Drive::new();
     let inv = d.app().add(Kind::InvertLocation, Pos2::new(40.0, 60.0));
-    let comb = d.app().add(Kind::CombineLocations { any: false }, Pos2::new(40.0, 330.0));
+    let comb = d.app().add(Kind::CombineLocations { any: false, rows: Vec::new() }, Pos2::new(40.0, 330.0));
     let map = d.app().add(Kind::Map, Pos2::new(700.0, 60.0));
     d.app().wire(inv, "location", comb, "location 1");
     d.app().wire(comb, "location", map, "location 1");
@@ -212,7 +212,7 @@ fn copy_paste_cut_duplicate() {
     assert_eq!(d.app().nodes.len(), 5, "two pasted");
     let (pi, pc) = (3, 4);
     assert!(matches!(d.app().nodes[pi].kind, Kind::InvertLocation));
-    assert!(matches!(d.app().nodes[pc].kind, Kind::CombineLocations { any: true }), "settings come along");
+    assert!(matches!(d.app().nodes[pc].kind, Kind::CombineLocations { any: true, .. }), "settings come along");
     assert_eq!(d.app().nodes[pc].label, "my combine");
     assert_eq!(d.app().graph.feeder(pc, "location 1"), Some((pi, "location")), "the wire between them comes along");
     assert_eq!(d.app().graph.feeder(pi, "location"), None, "wires to nodes not copied do not");
@@ -240,7 +240,7 @@ fn undo_of_a_setting_is_logged() {
     settle(&mut d);
     let logged = d.app().changes.len();
     key(&mut d, Modifiers::COMMAND, Key::Z);
-    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: false }), "undo puts the setting back");
+    assert!(matches!(d.app().nodes[comb].kind, Kind::CombineLocations { any: false, .. }), "undo puts the setting back");
     let c = d.app().changes.last().unwrap();
     assert_eq!((c.name.as_str(), c.old.as_str(), c.new.as_str()), ("mode", "any", "all"));
     assert_eq!(d.app().changes.len(), logged + 1);
@@ -279,7 +279,7 @@ fn a_dot_says_its_type() {
     let p = d.app().graph.nodes()[comb].spec.inputs[0].clone();
     let t = d.app().port_hover(comb, &p, false);
     assert!(t.starts_with("location 1 · Location (value, input, optional)"), "{t}");
-    assert!(t.contains("An area of the Earth") && t.contains("now: no location wired in"), "{t}");
+    assert!(t.contains("Where something is: an area of the Earth") && t.contains("now: no location wired in"), "{t}");
     let o = d.app().graph.nodes()[inv].spec.outputs[0].clone();
     assert!(d.app().port_hover(inv, &o, true).contains("(value, output)"));
     let (c, _) = { let a = d.app(); a.port_place(a.canvas_origin, comb, 0, false) };

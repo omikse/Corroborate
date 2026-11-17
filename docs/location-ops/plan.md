@@ -1,7 +1,6 @@
 # Locations without subtract
 
-Status: planned on 2026-11-17 from that day's interview. Nothing built yet. Starts once the
-time-type change (no `clock`/`t` on a time) is committed, since both touch `src/data.rs`.
+Status: planned on 2026-11-17 from that day's interview; built on 2026-11-18.
 
 ## The idea
 
@@ -44,3 +43,8 @@ time is the Time node's.
 - The Result record only records.
 - No preview map on Combine; wire a Map.
 - No backwards compatibility.
+- (2026-11-18, building) A row's sign is kept by the node wired in (`minus <node id>`, as Audio
+  match keeps its rows), not by port: ports renumber when a wire goes. One node wired twice has
+  one sign.
+- (2026-11-18) Map colours each input from a fixed list (blue, green, orange, purple, cyan,
+  yellow); pins take their input's colour too.

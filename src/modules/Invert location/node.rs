@@ -4,11 +4,11 @@
 use super::*;
 
 impl App {
-    /// The wired location flipped: what it added now subtracts, and the other way round.
+    /// Everywhere except the wired location.
     pub(crate) fn invert_area_out(&self, i: NodeId) -> Result<(Arc<Area>, String), String> {
         let (f, _) = self.graph.feeder(i, "location").ok_or("no location wired in")?;
         let (a, note) = self.area_from(f)?;
-        Ok((Arc::new(a.inverted()), format!("inverted ({}): {note}", if a.add { "adds -> subtracts" } else { "subtracts -> adds" })))
+        Ok((Arc::new(a.inverted()), format!("everywhere but: {note}")))
     }
 }
 

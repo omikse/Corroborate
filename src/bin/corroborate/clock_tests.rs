@@ -20,10 +20,9 @@ fn uid(app: &App, i: NodeId) -> String {
 }
 
 /// One recording puts a source in another's recording, saved with the project (not with pasted nodes);
-/// Separate recordings undoes it. An old project's evidence lines (anchors, links, switches) are read,
-/// dropped, and counted in a message.
+/// Separate recordings undoes it.
 #[test]
-fn sources_share_clocks_and_old_evidence_is_dropped() {
+fn sources_share_clocks() {
     let mut app = App::empty();
     let (a, b) = (source(&mut app, 40.0), source(&mut app, 300.0));
     let (ua, ub) = (uid(&app, a), uid(&app, b));
@@ -38,14 +37,6 @@ fn sources_share_clocks_and_old_evidence_is_dropped() {
     let mut pasted = App::empty();
     pasted.append_text(&app.project_text(), false);
     assert!(pasted.ev.share.is_empty());
-
-    let old = format!("{}anchor|{ub}|3|2000|0.5\nanchor|{ua}|0|1000|1\nlink|{ua}|1|n7|2|0.25\noff|anchor n9 n1 0.000\nstamp-end|{ua}\n", app.project_text());
-    let mut back = App::empty();
-    assert!(back.load_project_text(&old));
-    assert!(back.msg.contains("2 anchors, 1 link, 1 evidence switch"), "{}", back.msg);
-    let again = back.project_text();
-    assert!(!again.contains("anchor|") && !again.contains("link|") && !again.contains("off|") && !again.contains("stamp-end"), "{again}");
-    assert_eq!(back.ev.share, app.ev.share, "the clock lines are kept");
 
     app.separate_clocks(&[b]);
     assert_eq!(app.clock_of(b), Some(ub), "b has its own clock again");

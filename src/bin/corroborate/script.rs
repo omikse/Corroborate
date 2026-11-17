@@ -467,7 +467,7 @@ impl App {
 
     /// A setting's editor at `r`: 0 a text box, 1 a checkbox, 2 a list of its choices. Values go
     /// through `set_setting` (checked) like the module's own editors.
-    fn setting_widget(&mut self, ui: &mut egui::Ui, i: NodeId, name: &str, r: Rect, how: u8) {
+    pub(crate) fn setting_widget(&mut self, ui: &mut egui::Ui, i: NodeId, name: &str, r: Rect, how: u8) {
         let Some(s) = self.manifest_of(i).and_then(|m| m.setting(name).cloned()) else {
             ui.painter().text(r.min, Align2::LEFT_TOP, format!("no setting {name}"), FontId::proportional(10.5 * self.zoom), WARN);
             return;

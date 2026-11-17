@@ -101,8 +101,8 @@ mod tests {
     fn values_of_types() {
         assert_eq!(spec("time").outputs, [Port::req("value", PortKind::Time)]);
         assert!(types().iter().all(|t| !matches!(t.id, "audio" | "video" | "any")));
-        let loc = data("location", &rows(&[("lat", "50"), ("lon", "15"), ("radius_km", "300"), ("add", "true")])).unwrap();
-        assert!(matches!(&loc, Data::Location { area, .. } if area.add && area.allowed().fraction() > 0.0));
+        let loc = data("location", &rows(&[("lat", "50"), ("lon", "15"), ("radius_km", "300")])).unwrap();
+        assert!(matches!(&loc, Data::Location { area, .. } if area.cells.fraction() > 0.0));
         let time = data("time", &rows(&[("utc", "2026-11-04 20:06:39"), ("error_s", "2")])).unwrap();
         assert_eq!(time, Data::Time { utc: 1793822799.0, error_s: 2.0, source: String::new(), recording: String::new() });
         assert!(data("time", &rows(&[("utc", "")])).unwrap_err().contains("utc"));

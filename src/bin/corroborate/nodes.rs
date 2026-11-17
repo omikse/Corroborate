@@ -38,9 +38,10 @@ pub enum Kind {
     ResultRecord { folder: String },
     /// Shows an area on a world map (Robinson projection).
     Map,
-    /// Several locations into one: all must hold (AND) or any may (OR).
-    CombineLocations { any: bool },
-    /// Flips a location: what it added it now subtracts, and the other way round.
+    /// Locations added and taken away: the + rows join (all must hold: AND, any may: OR), then
+    /// the − rows are taken away. `rows`: `minus <node id>` for each location taken away.
+    CombineLocations { any: bool, rows: Vec<(String, String)> },
+    /// Everywhere except the location wired in.
     InvertLocation,
     /// A module with no Rust code: a program on the data bus (protocol 2) with the ports and
     /// settings its module.toml declares. Settings are saved as `row|` lines, like Manual's.
@@ -83,7 +84,7 @@ impl Kind {
             "enf" => Kind::Enf { grid: String::new() },
             "grid-frequencies" => Kind::GridFrequencies { path: String::new() },
             "result-record" => Kind::ResultRecord { folder: String::new() },
-            "combine-locations" => Kind::CombineLocations { any: combine_locations::is_any(set("mode").unwrap_or("all")) },
+            "combine-locations" => Kind::CombineLocations { any: combine_locations::is_any(set("mode").unwrap_or("all")), rows: Vec::new() },
             "invert-location" => Kind::InvertLocation,
             "map" => Kind::Map,
             _ => return None,
@@ -105,7 +106,7 @@ impl Kind {
             Kind::Plugin { path } => plugin::label(path),
             Kind::ResultRecord { .. } => label(result_record::manifest()),
             Kind::Map => label(map::manifest()),
-            Kind::CombineLocations { any } => combine_locations::label(*any),
+            Kind::CombineLocations { any, .. } => combine_locations::label(*any),
             Kind::InvertLocation => label(invert_location::manifest()),
             Kind::Module { m, .. } => m.label.clone(),
             Kind::Missing { name, .. } => format!("{name} (module missing)"),
@@ -163,7 +164,7 @@ impl Kind {
         match self {
             Kind::GridFrequencies { path } | Kind::Plugin { path } | Kind::Enf { grid: path } | Kind::ResultRecord { folder: path } => path.clone(),
             Kind::Sourcer { input } => input.clone(),
-            Kind::CombineLocations { any } => combine_locations::mode(*any).into(),
+            Kind::CombineLocations { any, .. } => combine_locations::mode(*any).into(),
             Kind::Missing { param, .. } => param.clone(),
             Kind::Group { def, .. } => def.clone(),
             Kind::Value { ty, .. } => ty.clone(),
@@ -188,7 +189,7 @@ impl Kind {
             Some("grid-frequencies") => Kind::GridFrequencies { path: param },
             Some("plugin") => Kind::Plugin { path: find_program(&param) },
             Some("result-record") => Kind::ResultRecord { folder: param },
-            Some("combine-locations") => Kind::CombineLocations { any: combine_locations::is_any(&param) },
+            Some("combine-locations") => Kind::CombineLocations { any: combine_locations::is_any(&param), rows: Vec::new() },
             Some("value") => Kind::Value { ty: if param.is_empty() { "location".into() } else { param }, rows: Vec::new() },
             // A built-in module on the data bus (ADS-B check) is a program like a dropped-in one.
             Some(id) => Kind::of_id(id, &[]).or_else(|| modules().into_iter().find(|m| m.id == id).and_then(Kind::module)).unwrap_or(Kind::Missing { name: name.into(), param, rows: Vec::new() }),
@@ -208,7 +209,7 @@ impl Kind {
     /// Lines a project file keeps under the node: a Value's fields, a module's settings.
     pub fn rows(&self) -> &[(String, String)] {
         match self {
-            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::CutDetector { rows } | Kind::Time { rows } | Kind::Timeline { rows } => rows,
+            Kind::Value { rows, .. } | Kind::Module { settings: rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::CutDetector { rows } | Kind::Time { rows } | Kind::Timeline { rows } | Kind::CombineLocations { rows, .. } => rows,
             _ => &[],
         }
     }
@@ -220,7 +221,7 @@ impl Kind {
         match self {
             Kind::Sourcer { input } => vec![("source".into(), input.clone())],
             Kind::Value { ty, rows } => std::iter::once(("type".to_string(), ty.clone())).chain(rows.iter().cloned()).collect(),
-            Kind::CombineLocations { any } => vec![("mode".into(), combine_locations::mode(*any).into())],
+            Kind::CombineLocations { any, .. } => vec![("mode".into(), combine_locations::mode(*any).into())],
             // A group's ports are not settings.
             Kind::Group { .. } => Vec::new(),
             _ => self.rows().to_vec(),
@@ -231,7 +232,7 @@ impl Kind {
     pub fn put_setting(&mut self, name: &str, v: String) {
         match (self, name) {
             (Kind::Sourcer { input }, "source") => *input = v,
-            (Kind::CombineLocations { any }, "mode") => *any = combine_locations::is_any(&v),
+            (Kind::CombineLocations { any, .. }, "mode") => *any = combine_locations::is_any(&v),
             (Kind::Value { ty, rows }, "type") => {
                 *rows = value::defaults(&v);
                 *ty = v;
@@ -248,7 +249,7 @@ impl Kind {
     /// keeps the default), a missing module's row as it was.
     pub fn add_row(&mut self, k: String, v: String) {
         match self {
-            Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Timeline { rows } => rows.push((k, v)),
+            Kind::Value { rows, .. } | Kind::Missing { rows, .. } | Kind::Group { rows, .. } | Kind::AudioMatch { rows } | Kind::Timeline { rows } | Kind::CombineLocations { rows, .. } => rows.push((k, v)),
             Kind::Time { rows } | Kind::CutDetector { rows } => match rows.iter_mut().find(|(q, _)| *q == k) {
                 Some((_, x)) => *x = v,
                 None => rows.push((k, v)),

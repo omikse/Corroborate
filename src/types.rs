@@ -405,7 +405,7 @@ mod tests {
     fn fields_make_json() {
         let loc = lookup("location").unwrap();
         let v = |a: &[(&str, &str)]| a.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
-        assert_eq!(loc.json(&v(&[("lat", "50"), ("lon", "14.4"), ("add", "true")])).unwrap(), "{\"lat\": 50, \"lon\": 14.4, \"add\": true}");
+        assert_eq!(loc.json(&v(&[("lat", "50"), ("lon", "14.4"), ("note", "hill")])).unwrap(), "{\"lat\": 50, \"lon\": 14.4, \"note\": \"hill\"}");
         assert!(loc.json(&v(&[("lat", "95"), ("lon", "0")])).unwrap_err().contains("outside"));
         assert_eq!(loc.json(&v(&[("lat", "50")])).unwrap_err(), "fill in longitude");
         let time = lookup("time").unwrap();
