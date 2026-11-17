@@ -9,7 +9,7 @@
 //! - Projects saved before stage 4 may hold evidence lines (`anchor|`, `link|`, `off|`,
 //!   `stamp-end|`): they are read, dropped, and counted in a message.
 //!
-//! Project lines: `format|2`, `clock|<node id>|<clock id>`.
+//! Project lines: `format|2`, `recording|<node id>|<recording id>`.
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,7 +92,7 @@ impl App {
         // `format|2`: Audio match's rows have a time each.
         let mut t = String::from("format|2\n");
         for (n, c) in &self.ev.share {
-            t.push_str(&format!("clock|{}|{}\n", clean(n), clean(c)));
+            t.push_str(&format!("recording|{}|{}\n", clean(n), clean(c)));
         }
         t
     }
@@ -101,7 +101,7 @@ impl App {
     /// it is not one.
     pub(crate) fn evidence_line(&mut self, f: &[&str]) -> bool {
         match f {
-            ["clock", n, c] => {
+            ["recording", n, c] => {
                 self.ev.share.insert(n.to_string(), c.to_string());
             }
             ["format", _] | ["stamp-end", _] => {}

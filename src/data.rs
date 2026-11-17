@@ -4,7 +4,7 @@
 //!
 //! | kind       | JSON                                                                          |
 //! |------------|-------------------------------------------------------------------------------|
-//! | `time`     | `{"utc": 1793839234.0, "error_s": 0.5, "source": "file metadata", "recording": "n3"}`: UTC (Unix seconds) ± `error_s`, where it comes from, and which recording it belongs to (the stable id of its source; absent for a time typed in UTC). Old `"clock"`/`"t"` keys are read: `"clock"` as the recording, `"t"` as the UTC on clock `"utc"` |
+//! | `time`     | `{"utc": 1793839234.0, "error_s": 0.5, "source": "file metadata", "recording": "n3"}`: UTC (Unix seconds) ± `error_s`, where it comes from, and which recording it belongs to (the stable id of its source; absent for a time typed in UTC) |
 //! | `location` | `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}` (1° cells, row 0 = 89–90° N, col 0 = 180–179° W), plus `"lat"`, `"lon"` and `"elevation"` (m) when it is a point; programs may send `{"lat": 50.1, "lon": 14.4, "radius_km": 25}` instead |
 //! | `event`    | `[{"clock": "n3", "t_start": 12.0, "t_end": 14.5, "label": "…", "detail": "…", "error_s": 0.1}, …]` (`error_s`: the event's own measurement error) |
 //! | `track`    | `[{"clock": "n3", "id": "h1", "t": 12.0, "value": 59.993, "ok": true}, …]` |
@@ -178,11 +178,8 @@ impl Data {
         let text = |o: &Json, k: &str| o.get(k).and_then(Json::str).unwrap_or("").to_string();
         match kind {
             PortKind::Time => {
-                // Old forms: `"clock"` names the recording, and `"t"` on clock `"utc"` is the UTC.
-                let old_clock = j.get("clock").and_then(Json::str).filter(|c| !c.is_empty() && *c != "utc");
-                let utc = num(j, "utc").or_else(|| num(j, "t").filter(|_| old_clock.is_none())).ok_or("time needs \"utc\" (Unix seconds)")?;
-                let recording = j.get("recording").and_then(Json::str).or(old_clock).unwrap_or("").to_string();
-                Ok(Data::Time { utc, error_s: num(j, "error_s").unwrap_or(0.0), source: text(j, "source"), recording })
+                let utc = num(j, "utc").ok_or("time needs \"utc\" (Unix seconds)")?;
+                Ok(Data::Time { utc, error_s: num(j, "error_s").unwrap_or(0.0), source: text(j, "source"), recording: text(j, "recording") })
             }
             PortKind::Location => {
                 let add = !matches!(j.get("add"), Some(Json::Bool(false)));
@@ -414,17 +411,8 @@ mod tests {
         assert!(Data::parse(PortKind::Location, r#"{"lat":95,"lon":0}"#).unwrap_err().contains("not on Earth"));
         assert!(Data::parse(PortKind::Location, r#"{"cells":[[200,0,1]]}"#).unwrap_err().contains("outside"));
         assert!(Data::parse(PortKind::Time, r#"{"when":1}"#).unwrap_err().contains("utc"));
-        assert!(Data::parse(PortKind::Time, r#"{"clock":"n1"}"#).unwrap_err().contains("utc"));
         let Ok(Data::Time { utc, recording, .. }) = Data::parse(PortKind::Time, r#"{"utc":60}"#) else { panic!() };
         assert_eq!((utc, recording.as_str()), (60.0, ""));
-        // Old forms still read.
-        let old = |j: &str| Data::parse(PortKind::Time, j).map(|d| match d {
-            Data::Time { utc, recording, .. } => (utc, recording),
-            _ => panic!(),
-        });
-        assert_eq!(old(r#"{"clock":"n3","t":0,"utc":100.5,"error_s":1}"#), Ok((100.5, "n3".to_string())));
-        assert_eq!(old(r#"{"clock":"utc","t":60}"#), Ok((60.0, String::new())));
-        assert!(old(r#"{"clock":"n3","t":5}"#).unwrap_err().contains("utc"));
     }
 
     #[test]
