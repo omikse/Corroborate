@@ -1,0 +1,30 @@
+# Template: copy this folder to start a module. Rename the folder to the module's label.
+# Every key is explained in src/module_manifest.rs (top of the file).
+# This template has no `category`, so it is never offered in Add node; give yours one.
+
+id = "template"               # stable, kebab-case: what project files keep
+label = "Template"            # shown on the node; the folder's name
+# category = "Detectors"      # Add node heading: Sources Detectors Data Plugins Output Location View
+role = "transform"            # source-file|source-live|reference|detector|transform|solver|record|view
+
+[[input]]
+name = "audio"
+kind = "audio"
+required = true
+
+[[input]]
+name = "time"
+kind = "time"
+
+[[output]]
+name = "events"
+kind = "event"
+about = "What this output carries, in one line."
+needs = ["audio"]
+
+[[output]]
+name = "location"
+kind = "location"
+status = "planned"            # planned and possible outputs are drawn greyed, nothing to wire
+about = "A planned output: listed in the README's Outputs table as planned."
+needs = ["audio", "time"]
