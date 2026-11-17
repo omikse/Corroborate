@@ -1,6 +1,6 @@
 //! Locate a sound from its arrival times at several recorders: TDOA (Time Difference of Arrival).
 //!
-//! Inputs: for each recorder, its position (a `Location` with its own radius) and the arrival
+//! Inputs: for each recorder, its position (a `Place` with its own radius) and the arrival
 //! time of the sound on the shared clock (after `sync`), with an error. Unknowns: the source
 //! position and the time the sound was made. Model: t_i = T0 + distance_i / c.
 //!
@@ -8,21 +8,46 @@
 //! vague recorder position widens the result instead of being silently trusted.
 //!
 //! Method: a coarse grid search for a start point (so the fit does not lock onto a wrong
-//! minimum), then weighted Gauss-Newton. The result is a `Location` whose radius is two
+//! minimum), then weighted Gauss-Newton. The result is a `Place` whose radius is two
 //! sigmas of the position covariance along its worst direction (about 86 % for a 2-D normal).
 //! Three recorders are the minimum and leave nothing to check the fit against; four or more
 //! give residuals that show a bad match.
 
-use crate::core::{Location, Method};
 use crate::sync::invert;
 
 /// Speed of sound in air at about 20 °C, m/s.
 pub const C_SOUND: f64 = 343.0;
+/// Mean Earth radius used for distances, in metres.
 const EARTH_R_M: f64 = 6_371_000.0;
+
+/// A point with the radius (metres) inside which the true place is expected.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub lat: f64,
+    pub lon: f64,
+    pub radius_m: f64,
+}
+
+impl Place {
+    /// `None` when the coordinates are out of range or the radius is negative or not finite.
+    pub fn new(lat: f64, lon: f64, radius_m: f64) -> Option<Self> {
+        let ok = (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) && radius_m.is_finite() && radius_m >= 0.0;
+        ok.then_some(Self { lat, lon, radius_m })
+    }
+
+    /// Great-circle distance to another point, in metres (haversine formula).
+    pub fn distance_m(&self, other: &Place) -> f64 {
+        let (p1, p2) = (self.lat.to_radians(), other.lat.to_radians());
+        let dp = p2 - p1;
+        let dl = (other.lon - self.lon).to_radians();
+        let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+        2.0 * EARTH_R_M * a.sqrt().min(1.0).asin()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Arrival {
-    pub at: Location,
+    pub at: Place,
     /// Arrival time on the shared clock, seconds.
     pub t: f64,
     pub error_s: f64,
@@ -30,7 +55,7 @@ pub struct Arrival {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fix {
-    pub location: Location,
+    pub location: Place,
     /// When the sound was made, shared clock, and its error.
     pub t0: f64,
     pub t0_error_s: f64,
@@ -59,7 +84,7 @@ impl Frame {
         let ky = EARTH_R_M * std::f64::consts::PI / 180.0;
         Self { lat0, lon0, kx: ky * lat0.to_radians().cos(), ky }
     }
-    fn xy(&self, l: &Location) -> (f64, f64) {
+    fn xy(&self, l: &Place) -> (f64, f64) {
         ((l.lon - self.lon0) * self.kx, (l.lat - self.lat0) * self.ky)
     }
     fn latlon(&self, x: f64, y: f64) -> (f64, f64) {
@@ -168,7 +193,7 @@ pub fn locate(arr: &[Arrival], c: f64) -> Result<Fix, LocateError> {
         })
         .collect();
     Ok(Fix {
-        location: Location::new(lat, lon, radius, Method::SharedSound).ok_or(LocateError::Degenerate)?,
+        location: Place::new(lat, lon, radius).ok_or(LocateError::Degenerate)?,
         t0,
         t0_error_s: cov[2][2].max(0.0).sqrt(),
         residuals,
@@ -184,10 +209,26 @@ mod tests {
     const LON0: f64 = 2.3522;
 
     /// Position `x` m east and `y` m north of the test origin, with a radius.
-    fn at(x: f64, y: f64, r: f64) -> Location {
+    fn at(x: f64, y: f64, r: f64) -> Place {
         let f = Frame::new(LAT0, LON0);
         let (lat, lon) = f.latlon(x, y);
-        Location::new(lat, lon, r, Method::Gps).unwrap()
+        Place::new(lat, lon, r).unwrap()
+    }
+
+    #[test]
+    fn distance_matches_known_route() {
+        // Paris to London, about 343.5 km great-circle.
+        let d = Place::new(48.8566, 2.3522, 0.0).unwrap().distance_m(&Place::new(51.5074, -0.1278, 0.0).unwrap());
+        assert!((d - 343_500.0).abs() < 1_000.0, "got {d}");
+    }
+
+    #[test]
+    fn rejects_bad_coordinates_and_radius() {
+        assert!(Place::new(91.0, 0.0, 10.0).is_none());
+        assert!(Place::new(0.0, 181.0, 10.0).is_none());
+        assert!(Place::new(0.0, 0.0, -1.0).is_none());
+        assert!(Place::new(0.0, 0.0, f64::NAN).is_none());
+        assert!(Place::new(0.0, 0.0, 0.0).is_some());
     }
 
     fn arrivals(src: (f64, f64), recs: &[(f64, f64)], err: f64, r: f64) -> Vec<Arrival> {

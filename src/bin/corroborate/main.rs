@@ -1030,7 +1030,7 @@ impl App {
             }
             let mut fold = false;
             let collapsed = self.nodes[i].collapsed;
-            // Same clock / Separate clocks act on the selected sources (or this one).
+            // One recording / Separate recordings act on the selected sources (or this one).
             let srcs: Vec<NodeId> = if self.is_picked(i) { self.picked() } else { vec![i] }.into_iter().filter(|&j| self.nodes[j].kind.is_source()).collect();
             let (can_share, shared) = (srcs.len() >= 2, srcs.iter().any(|&j| self.shares_clock(j)));
             let mut clock_act: Option<bool> = None;
@@ -1086,11 +1086,11 @@ impl App {
                     fold = true;
                     ui.close();
                 }
-                if can_share && ui.button("Same clock").on_hover_text("These sources' times are on one clock (photos from one camera, files from one recorder)").clicked() {
+                if can_share && ui.button("One recording").on_hover_text("These sources are parts of one recording (the parts of a split file, files from one recorder): their times belong to it").clicked() {
                     clock_act = Some(true);
                     ui.close();
                 }
-                if shared && ui.button("Separate clocks").on_hover_text("Each of these sources gets its own clock again").clicked() {
+                if shared && ui.button("Separate recordings").on_hover_text("Each of these sources is its own recording again").clicked() {
                     clock_act = Some(false);
                     ui.close();
                 }

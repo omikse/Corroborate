@@ -244,7 +244,7 @@ pub fn value(s: &NodeState, out: &str, clock: &str) -> Result<corroborate::data:
                 .collect(),
         )),
         "audio start time" => match &s.enf.dated {
-            Some(Ok(d)) if d.confirmed => Ok(Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(d.start()), error_s: 1.0, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()) }),
+            Some(Ok(d)) if d.confirmed => Ok(Data::Time { utc: d.start(), error_s: 1.0, source: format!("ENF matched to the {} grid log: {}", d.best.grid, d.verdict()), recording: clock.to_string() }),
             Some(Ok(d)) => Err(format!("{}: best {} in {}, not clear enough", d.verdict(), timebase::fmt_utc(d.start()), d.best.grid)),
             Some(Err(e)) => Err(e.clone()),
             None => Err("matched against the grid logs at the end of a file".into()),
@@ -278,7 +278,7 @@ impl App {
         };
         use corroborate::data::Data;
         let claimed = match self.graph.feeder(i, "time").map(|(f, o)| self.value_from(f, o)) {
-            Some(Ok(Data::Time { utc: Some(u), error_s, .. })) => Some((u, error_s)),
+            Some(Ok(Data::Time { utc, error_s, .. })) => Some((utc, error_s)),
             _ => None,
         };
         let place = match self.graph.feeder(i, "location").map(|(f, o)| self.value_from(f, o)) {

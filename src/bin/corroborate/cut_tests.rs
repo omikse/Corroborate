@@ -33,7 +33,7 @@ pub fn four_shots() -> PathBuf {
 
 fn utc_of(d: Result<Data, String>) -> (f64, f64, String) {
     match d {
-        Ok(Data::Time { utc: Some(u), error_s, clock, .. }) => (u, error_s, clock),
+        Ok(Data::Time { utc: u, error_s, recording, .. }) => (u, error_s, recording),
         other => panic!("no time: {other:?}"),
     }
 }

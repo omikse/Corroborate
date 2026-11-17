@@ -5,17 +5,16 @@
 //! on video) or the travel time of sound biases every offset by up to distance / 343 m/s,
 //! which is far too coarse for locating anything. The result's radius says so honestly.
 
-use corroborate::core::{Location, Method};
-use corroborate::locate::{locate, Arrival, C_SOUND};
+use corroborate::locate::{locate, Arrival, Place, C_SOUND};
 use corroborate::sync::{solve, Obs, Offset};
 
 const LAT0: f64 = 48.8566;
 const LON0: f64 = 2.3522;
 const KY: f64 = 6_371_000.0 * std::f64::consts::PI / 180.0;
 
-fn place(x: f64, y: f64, r: f64) -> Location {
+fn place(x: f64, y: f64, r: f64) -> Place {
     let kx = KY * LAT0.to_radians().cos();
-    Location::new(LAT0 + y / KY, LON0 + x / kx, r, Method::Gps).unwrap()
+    Place::new(LAT0 + y / KY, LON0 + x / kx, r).unwrap()
 }
 
 /// Recorders (metres east, north), their unknown clock offsets, and the bang.

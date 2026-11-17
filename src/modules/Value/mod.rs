@@ -104,7 +104,7 @@ mod tests {
         let loc = data("location", &rows(&[("lat", "50"), ("lon", "15"), ("radius_km", "300"), ("add", "true")])).unwrap();
         assert!(matches!(&loc, Data::Location { area, .. } if area.add && area.allowed().fraction() > 0.0));
         let time = data("time", &rows(&[("utc", "2026-11-04 20:06:39"), ("error_s", "2")])).unwrap();
-        assert_eq!(time, Data::Time { clock: "utc".into(), t: 1793822799.0, utc: Some(1793822799.0), error_s: 2.0, source: String::new() });
+        assert_eq!(time, Data::Time { utc: 1793822799.0, error_s: 2.0, source: String::new(), recording: String::new() });
         assert!(data("time", &rows(&[("utc", "")])).unwrap_err().contains("utc"));
         assert!(data("smell", &[]).unwrap_err().contains("not known"));
     }

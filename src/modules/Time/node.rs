@@ -88,8 +88,8 @@ impl App {
     pub(crate) fn time_in(&self, i: NodeId) -> Option<Result<(f64, String, f64), String>> {
         let (f, o) = self.graph.feeder(i, "time")?;
         Some(match self.value_from(f, o) {
-            Ok(Data::Time { utc: Some(u), source, error_s, .. }) => Ok((u, source, error_s)),
-            Ok(_) => Err("the wired time has no date".to_string()),
+            Ok(Data::Time { utc, source, error_s, .. }) => Ok((utc, source, error_s)),
+            Ok(_) => Err("the wire gives no time".to_string()),
             Err(e) => Err(format!("the wired time: {e}")),
         })
     }
@@ -138,7 +138,7 @@ impl App {
         let s = self.time_stacks(i)?;
         let error_s = time::root_sum_squares(&s.errs);
         let source = format!("Time node {} ({}), from {}", self.nodes[i].label, did_line(&s), s.from);
-        Ok(Data::Time { clock: corroborate::clock::UTC.to_string(), t: s.t, utc: Some(s.t), error_s, source })
+        Ok(Data::Time { utc: s.t, error_s, source, recording: String::new() })
     }
 }
 

@@ -119,10 +119,10 @@ impl App {
     }
 
     /// SOURCER's time output for a file: what the file says, raw, with no error of its own.
-    pub(crate) fn file_time(&self, i: NodeId, clock: &str) -> Result<corroborate::data::Data, String> {
+    pub(crate) fn file_time(&self, i: NodeId, recording: &str) -> Result<corroborate::data::Data, String> {
         let f = self.facts_of(i).ok_or("still reading the file")?;
         let utc = f.stamp.ok_or("no time in the file's metadata")?;
-        Ok(corroborate::data::Data::Time { clock: clock.to_string(), t: 0.0, utc: Some(utc), error_s: 0.0, source: f.source })
+        Ok(corroborate::data::Data::Time { utc, error_s: 0.0, source: f.source, recording: recording.to_string() })
     }
 
     /// SOURCER's length output.

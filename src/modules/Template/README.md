@@ -42,7 +42,7 @@ stores. The types themselves are listed in the [main README](../../../README.md#
 
 | Type | JSON |
 |---|---|
-| `time` | `{"utc": 1793839234.5, "error_s": 0.25, "source": "where it comes from"}`: UTC in Unix seconds, the error 1 sigma |
+| `time` | `{"utc": 1793839234.5, "error_s": 0.25, "source": "where it comes from", "recording": "n3"}`: UTC in Unix seconds, the error 1 sigma, and the recording it belongs to (left out when none; old `"clock"` is read as it) |
 | `location` | an area: `{"add": true, "cells": [[row, first_col, last_col], …], "note": "…"}`; a point: `{"lat": 50.1, "lon": 14.4, "elevation": 335}`, with `"radius_km"` for a circle around it |
 | `event` | a list: `[{"t_start": 12.0, "t_end": 13.5, "label": "…", "detail": "…", "error_s": 0.02}]`, in seconds into the recording |
 | `track` | a list: `[{"id": "hum", "t": 12.0, "value": 50.012, "ok": true}]` |

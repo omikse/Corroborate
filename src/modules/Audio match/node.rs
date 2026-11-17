@@ -553,7 +553,7 @@ impl App {
                 r.time_wired = true;
                 r.wired = true;
                 match self.value_from(f, o) {
-                    Ok(Data::Time { utc: Some(u), error_s, source, .. }) => (r.meta, r.meta_err, r.meta_source) = (Some(u), error_s, source),
+                    Ok(Data::Time { utc, error_s, source, .. }) => (r.meta, r.meta_err, r.meta_source) = (Some(utc), error_s, source),
                     Ok(_) => {}
                     // Nothing came into the Time node (a file with no time in its metadata): no
                     // time metadata, not the Time node's error.
@@ -564,8 +564,8 @@ impl App {
             if let Some((f, o)) = ports.get(2).and_then(|e| self.graph.feeder(i, e.name)) {
                 r.end_wired = true;
                 r.wired = true;
-                if let Ok(Data::Time { utc: Some(u), .. }) = self.value_from(f, o) {
-                    r.end_in = Some(u);
+                if let Ok(Data::Time { utc, .. }) = self.value_from(f, o) {
+                    r.end_in = Some(utc);
                 }
             }
             rows.push(r);
@@ -786,9 +786,9 @@ impl App {
                 Some((ppm, _)) => format!("; its length at the measured drift {} s/h, {} from start + length", drift_text(ppm), ms_text(e - at - r.len)),
                 None => format!(", plus its length {:.3} s", r.len),
             };
-            Data::Time { clock, t: r.len, utc: Some(e), error_s: r.end_err, source: format!("{source}{how}{fitted}") }
+            Data::Time { utc: e, error_s: r.end_err, source: format!("{source}{how}{fitted}"), recording: clock }
         } else {
-            Data::Time { clock, t: 0.0, utc: Some(at), error_s: r.start_err, source: format!("{source}{fitted}") }
+            Data::Time { utc: at, error_s: r.start_err, source: format!("{source}{fitted}"), recording: clock }
         })
     }
 

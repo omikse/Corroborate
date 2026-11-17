@@ -609,15 +609,13 @@ impl App {
             "length" => Ok(Data::Custom { kind: "length", json: format!("{{\"seconds\":{}}}", p.len()) }),
             "time" => {
                 let (f, o) = self.graph.feeder(i, "time").ok_or("wire the recording's time into the detector")?;
-                let Data::Time { clock, t, utc: Some(u), error_s, source } = self.value_from(f, o)? else { return Err("its time has no date yet".into()) };
-                // The wired moment is on the file's clock: the file starts that much before it.
-                let start = if clock == v.clock { u - t } else { u };
+                // The wired time is when the file starts.
+                let Data::Time { utc: start, error_s, source, .. } = self.value_from(f, o)? else { return Err("the wire gives no time".into()) };
                 Ok(Data::Time {
-                    clock: self.piece_clock(i, out).unwrap_or_default(),
-                    t: 0.0,
-                    utc: Some(start + p.a0),
+                    utc: start + p.a0,
                     error_s,
                     source: format!("as played: {source}, + {} s into the file (cuts before it may hide time)", clock_text(p.a0)),
+                    recording: self.piece_clock(i, out).unwrap_or_default(),
                 })
             }
             _ => Err("a stream, not a value".into()),
@@ -1350,7 +1348,7 @@ impl crate::look::NodeLook for Look {
             p.text(Pos2::new(area.left() + 416.0 * z, ty(row)), Align2::LEFT_CENTER, shown, font(10.5), DIM);
             let out = cd::piece_port("time", pc.n);
             let t = match app.cut_value(i, out) {
-                Ok(Data::Time { utc: Some(u), error_s, .. }) => format!("{} ± {error_s:.2} s", timebase::fmt_utc(u)),
+                Ok(Data::Time { utc, error_s, .. }) => format!("{} ± {error_s:.2} s", timebase::fmt_utc(utc)),
                 Ok(_) => String::new(),
                 Err(e) => e,
             };

@@ -31,7 +31,7 @@ impl App {
             seen.push((n, o.clone()));
             let v = self.value_from(n, &o);
             let value = match &v {
-                Ok(Data::Time { utc: Some(u), error_s, .. }) => format!("{} ±{error_s:.3} s", timebase::fmt_utc(*u)),
+                Ok(Data::Time { utc, error_s, .. }) => format!("{} ±{error_s:.3} s", timebase::fmt_utc(*utc)),
                 Ok(d) => crate::bus::summary(d),
                 Err(e) => format!("nothing: {e}"),
             };

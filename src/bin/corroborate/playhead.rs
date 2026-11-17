@@ -74,7 +74,8 @@ impl Playheads {
 
 impl App {
     /// Which recordings follow the real-time playhead now: those whose start time is wired into
-    /// a Timeline (the first Timeline that has it). A start and end on one clock give its speed.
+    /// a Timeline (the first Timeline that has it). Its start is its moment 0; an end gives its
+    /// speed: its length over the time between start and end.
     pub(crate) fn follows_now(&self) -> BTreeMap<String, Follow> {
         let mut out = BTreeMap::new();
         for i in 0..self.nodes.len() {
@@ -83,11 +84,11 @@ impl App {
             }
             for r in self.timeline_rows(i) {
                 let (Some(c), Some((u0, _))) = (r.clock.clone(), r.at) else { continue };
-                let k = match (r.end, r.t1) {
-                    (Some((u1, _)), Some(t1)) if u1 != u0 && t1 != r.t0 && ((t1 - r.t0) / (u1 - u0)) > 0.0 => (t1 - r.t0) / (u1 - u0),
+                let k = match r.end {
+                    Some((u1, _)) if r.len > 0.0 && u1 > u0 => r.len / (u1 - u0),
                     _ => 1.0,
                 };
-                out.entry(c).or_insert(Follow { t0: r.t0, u0, k });
+                out.entry(c).or_insert(Follow { t0: 0.0, u0, k });
             }
         }
         out

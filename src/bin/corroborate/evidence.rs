@@ -2,9 +2,10 @@
 //! clock solve any more (Time on wires, stage 4, 2026-11-11): a time reaches a node only on a wire,
 //! and each node that measures clocks (Audio match) fits its own.
 //!
-//! - **Clocks**: each source node is its own clock, named by its stable id, unless Same clock
-//!   (right-click on several selected sources) gave them one shared id: a label only, saying the
-//!   files are one recording's parts. A node fed audio is on the clock of that audio's source.
+//! - **Recordings**: each source node is its own recording (its own clock inside, for playheads
+//!   and pieces), named by its stable id, unless One recording (right-click on several selected
+//!   sources) gave them one shared id: a label only, saying the files are one recording's parts.
+//!   A node fed audio belongs to the recording of that audio's source.
 //! - Projects saved before stage 4 may hold evidence lines (`anchor|`, `link|`, `off|`,
 //!   `stamp-end|`): they are read, dropped, and counted in a message.
 //!
@@ -16,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Which sources share a clock, and what an old project held that is no longer read.
 #[derive(Default)]
 pub struct Evidence {
-    /// Source node id → shared clock id (Same clock).
+    /// Source node id → shared recording id (One recording).
     pub share: BTreeMap<String, String>,
     /// While loading: old evidence lines dropped (anchors, links, switches).
     pub dropped: (usize, usize, usize),
@@ -50,7 +51,7 @@ impl App {
         self.clock_at(f, depth + 1)
     }
 
-    /// Same clock: sources `nodes` share one clock (named by the smallest of their clocks), with
+    /// One recording: sources `nodes` share one recording (named by the smallest of their clocks), with
     /// every source already sharing a clock with one of them.
     pub(crate) fn same_clock(&mut self, nodes: &[NodeId]) {
         let srcs: Vec<NodeId> = nodes.iter().copied().filter(|&i| self.nodes[i].kind.is_source()).collect();
@@ -67,7 +68,7 @@ impl App {
         self.save_project();
     }
 
-    /// Separate clocks: sources `nodes` each go back to their own clock.
+    /// Separate recordings: sources `nodes` each go back to their own.
     pub(crate) fn separate_clocks(&mut self, nodes: &[NodeId]) {
         for &i in nodes {
             self.ev.share.remove(&self.nodes[i].uid);

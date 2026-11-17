@@ -194,7 +194,7 @@ impl App {
                 drop(s);
                 self.length_out(from)
             }
-            (PortKind::Time, _) => s.anchor.as_ref().map(|a| Data::Time { clock: clock.clone(), t: 0.0, utc: Some(a.utc0), error_s: a.error_s, source: a.source.clone() }).ok_or("no time yet".into()),
+            (PortKind::Time, _) => s.anchor.as_ref().map(|a| Data::Time { utc: a.utc0, error_s: a.error_s, source: a.source.clone(), recording: clock.clone() }).ok_or("no time yet".into()),
             (PortKind::Event, Kind::Plugin { .. }) => Ok(Data::Events(
                 s.plugin.findings.iter().map(|f| Event { clock: clock.clone(), t_start: f.t_start, t_end: f.t_end, label: f.label.clone(), detail: f.detail.clone(), error_s: f.error_s }).collect(),
             )),
@@ -479,8 +479,7 @@ fn json_object(kv: &[(String, String)]) -> String {
 /// One line about an output's value, for the node.
 pub(crate) fn summary(d: &Data) -> String {
     match d {
-        Data::Time { utc: Some(u), error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*u)),
-        Data::Time { clock, t, error_s, .. } => format!("{t:+.1} s on {clock} ± {error_s:.1} s"),
+        Data::Time { utc, error_s, .. } => format!("{} ± {error_s:.1} s", timebase::fmt_utc(*utc)),
         Data::Location { area, note, .. } => format!("{} {note}", map_node::area_status(area)),
         Data::Events(v) => match v.last() {
             Some(e) => format!("{} events, last: {}", v.len(), e.label),

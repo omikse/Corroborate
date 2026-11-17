@@ -19,8 +19,8 @@ fn uid(app: &App, i: NodeId) -> String {
     app.nodes[i].uid.clone()
 }
 
-/// Same clock puts a source on another's clock, saved with the project (not with pasted nodes);
-/// Separate clocks undoes it. An old project's evidence lines (anchors, links, switches) are read,
+/// One recording puts a source in another's recording, saved with the project (not with pasted nodes);
+/// Separate recordings undoes it. An old project's evidence lines (anchors, links, switches) are read,
 /// dropped, and counted in a message.
 #[test]
 fn sources_share_clocks_and_old_evidence_is_dropped() {
@@ -292,10 +292,10 @@ fn audio_match_links_two_recordings() {
     let v = d.app().add(Kind::Value { ty: "time".into(), rows: vec![("utc".into(), "1970-01-01T00:16:40Z".into()), ("error_s".into(), "2".into())] }, Pos2::new(30.0, 800.0));
     d.app().wire(v, "value", m, "time 1");
     d.frames(3);
-    let Ok(Data::Time { utc: Some(free_b), source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no unanchored time out of row 2") };
+    let Ok(Data::Time { utc: free_b, source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no unanchored time out of row 2") };
     assert!((free_b - 1020.5).abs() < 0.01 && source.contains("unanchored: the average of 1 phone's stamps"), "{free_b} {source}");
     let len_b = d.app().match_view(m).rows[1].len;
-    let Ok(Data::Time { utc: Some(end_b), .. }) = d.app().value_from(m, "end 2") else { panic!("no end time out of row 2") };
+    let Ok(Data::Time { utc: end_b, .. }) = d.app().value_from(m, "end 2") else { panic!("no end time out of row 2") };
     assert!((end_b - free_b - len_b).abs() < 1e-6, "the end is the start plus the length");
     d.shot("audio_match_unanchored");
 
@@ -313,7 +313,7 @@ fn audio_match_links_two_recordings() {
     let logged = d.app().changes.len();
     d.drag(Pos2::new(bar_x, y), Pos2::new(bar_x + 60.0, y));
     d.frames(2);
-    let Ok(Data::Time { utc: Some(moved_b), source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after the drag") };
+    let Ok(Data::Time { utc: moved_b, source, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after the drag") };
     assert!(moved_b > free_b + 1.0 && source.contains("moved by hand"), "the output moved: {free_b} -> {moved_b} {source}");
     assert_eq!(d.app().changes.len(), logged + 1, "the drag is logged");
     assert!(d.app().changes.last().unwrap().name.starts_with("drag of the group"));
@@ -326,15 +326,15 @@ fn audio_match_links_two_recordings() {
     d.wait(0.5);
     d.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
     d.frames(3);
-    let Ok(Data::Time { utc: Some(undone_b), .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after undo") };
+    let Ok(Data::Time { utc: undone_b, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time after undo") };
     assert!((undone_b - free_b).abs() < 0.01, "Ctrl+Z puts the group back: {undone_b}");
 
     // The group anchored on row 1's time: every recording of the group has real time.
     d.app().toggle_anchor(m, 0);
     d.frames(3);
-    let Ok(Data::Time { utc: Some(ub_utc), error_s, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time out of row 2") };
+    let Ok(Data::Time { utc: ub_utc, error_s, .. }) = d.app().value_from(m, "synced 2") else { panic!("no time out of row 2") };
     assert!((ub_utc - 1020.5).abs() < 0.01 && error_s >= 2.0, "b starts 20.5 s after a: {ub_utc} ± {error_s}");
-    let Ok(Data::Time { utc: Some(ua_utc), .. }) = d.app().value_from(m, "synced 1") else { panic!("no time out of row 1") };
+    let Ok(Data::Time { utc: ua_utc, .. }) = d.app().value_from(m, "synced 1") else { panic!("no time out of row 1") };
     assert!((ua_utc - 1000.0).abs() < 0.01, "{ua_utc}");
     let view = d.app().match_view(m);
     assert_eq!(crate::audio_match_node::cell(&view, 0).0, crate::audio_match_node::Cell::Anchor);
@@ -391,7 +391,7 @@ fn audio_match_links_two_recordings() {
     let (s2k, e2k) = (view.rows[1].start.unwrap(), view.rows[1].end.unwrap());
     let grew = (s2k - 1000.0) / (s2 - 1000.0);
     assert!(((e2k - s2k) / (e2 - s2) - grew).abs() < 1e-6 && (grew / k - 1.0).abs() < 300e-6, "row 2 moves by the same speed: {s2} {e2} -> {s2k} {e2k}");
-    let Ok(Data::Time { utc: Some(end1), .. }) = d.app().value_from(m, "end 1") else { panic!("no end out of row 1") };
+    let Ok(Data::Time { utc: end1, .. }) = d.app().value_from(m, "end 1") else { panic!("no end out of row 1") };
     assert!((end1 - (1000.0 + len_a + 0.4)).abs() < 1e-6, "the anchor's end is its wired end: {end1}");
     d.shot("audio_match_anchor_end");
     d.app().graph.disconnect(m, "end in 1");
@@ -574,12 +574,12 @@ fn time_node_corrects_a_time() {
     app.sync_many_ports();
     d.frames(3);
     let out = |d: &mut crate::drive::Drive| d.app().value_from(t, "result");
-    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if u == t0 && error_s == 0.0));
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: u, error_s, .. }) if u == t0 && error_s == 0.0));
     d.click("+ row");
     assert_eq!(d.app().graph.nodes()[t].spec.inputs.len(), 3, "a row and its port, and the waiting port");
     d.app().wire(s, "length", t, "row 1");
     d.frames(3);
-    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), .. }) if (u - (t0 - 150.0)).abs() < 1e-3));
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: u, .. }) if (u - (t0 - 150.0)).abs() < 1e-3));
     assert_eq!(d.app().match_view(m).rows[0].meta, Some(t0 - 150.0), "the row follows the edit");
     // The error stack: a row of zeros with only a ± is a judgement, whatever its sign.
     let judge = |d: &mut crate::drive::Drive, sign: &str, e: &str| {
@@ -596,7 +596,7 @@ fn time_node_corrects_a_time() {
         d.frames(2);
     };
     judge(&mut d, "+", "1");
-    assert!(matches!(out(&mut d), Ok(Data::Time { utc: Some(u), error_s, .. }) if (u - (t0 - 150.0)).abs() < 1e-3 && (error_s - 1.0).abs() < 1e-9), "{:?}", out(&mut d));
+    assert!(matches!(out(&mut d), Ok(Data::Time { utc: u, error_s, .. }) if (u - (t0 - 150.0)).abs() < 1e-3 && (error_s - 1.0).abs() < 1e-9), "{:?}", out(&mut d));
     judge(&mut d, "-", "1");
     assert!(matches!(out(&mut d), Ok(Data::Time { error_s, .. }) if (error_s - 1.0).abs() < 1e-9), "a row's sign does not change its ±");
     // The trace of SOURCER → Time → Audio match names the three nodes in order.
@@ -681,7 +681,7 @@ fn an_old_time_node_reads_the_same() {
     assert!(text.contains("error_s"), "{text}");
     let mut back = App::empty();
     assert!(back.load_project_text(&text));
-    let Ok(Data::Time { utc: Some(u), error_s, .. }) = back.value_from(t, "result") else { panic!("{:?}", back.value_from(t, "result")) };
+    let Ok(Data::Time { utc: u, error_s, .. }) = back.value_from(t, "result") else { panic!("{:?}", back.value_from(t, "result")) };
     assert_eq!(corroborate::timebase::fmt_utc(u), corroborate::timebase::fmt_utc(corroborate::timebase::parse_iso8601("2012-09-09T12:17:54.800Z").unwrap()));
     assert!((error_s - 1.5).abs() < 1e-9, "{error_s}");
     let Kind::Time { rows } = &back.nodes[t].kind else { panic!() };
@@ -875,7 +875,7 @@ fn make_jiku_inverted_project() {
     let app = d.app();
     let (mut at_end, mut at_start, mut neither) = (0, 0, 0);
     for &(n, s) in &pairs {
-        let (Ok(Data::Time { utc: Some(stamp), .. }), Ok(Data::Custom { json, .. })) = (app.value_from(s, "time"), app.value_from(s, "length")) else {
+        let (Ok(Data::Time { utc: stamp, .. }), Ok(Data::Custom { json, .. })) = (app.value_from(s, "time"), app.value_from(s, "length")) else {
             println!("{:32} {n}: time {:?}, length {:?}", app.nodes[s].label, app.value_from(s, "time"), app.value_from(s, "length"));
             continue;
         };
@@ -998,7 +998,7 @@ fn a_file_stamp_is_a_claim_only() {
     assert_eq!(app.value_from(s, "time"), Err("still reading the file".to_string()));
     app.facts.put("clip.mp4", FileFacts { stamp: Some(1000.0), len: Some(60.0), source: "the file's creation_time".into() });
     let c = app.clock_of(s).unwrap();
-    assert_eq!(app.value_from(s, "time"), Ok(Data::Time { clock: c, t: 0.0, utc: Some(1000.0), error_s: 0.0, source: "the file's creation_time".into() }));
+    assert_eq!(app.value_from(s, "time"), Ok(Data::Time { utc: 1000.0, error_s: 0.0, source: "the file's creation_time".into(), recording: c }));
     assert_eq!(app.value_from(s, "length"), Ok(Data::Custom { kind: "length", json: "{\"seconds\":60}".into() }));
     app.wire(s, "time", p, "time");
     assert_eq!(app.graph.wires().len(), 2, "{}", app.msg);
@@ -1010,7 +1010,7 @@ fn a_file_stamp_is_a_claim_only() {
     let live = source(&mut app, 300.0);
     anchor(&app, live, 2000.0, 1.0);
     let Ok(Data::Time { utc, error_s, .. }) = app.value_from(live, "time") else { panic!("no time from the live source") };
-    assert_eq!((utc, error_s), (Some(2000.0), 1.0));
+    assert_eq!((utc, error_s), (2000.0, 1.0));
 }
 
 /// Opens a copy of the Jiku project (made by make_jiku_project; the copy in target\drive, so

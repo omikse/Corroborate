@@ -44,12 +44,8 @@ pub struct Row {
     pub at: Option<(f64, f64)>,
     /// When it ends and that time's error, when wired.
     pub end: Option<(f64, f64)>,
-    /// The recording's clock: its media's, else the start time's own (not UTC).
+    /// The recording (its playhead's clock): its media's, else the one its start time belongs to.
     pub clock: Option<String>,
-    /// The moments on that clock the start and end times are of: 0 and the length, or the times'
-    /// own when they are on that clock.
-    pub t0: f64,
-    pub t1: Option<f64>,
 }
 
 impl App {
@@ -81,22 +77,20 @@ impl App {
                     let time_in = |port: &str| {
                         let (f, o) = self.graph.feeder(i, port)?;
                         match self.value_from(f, o) {
-                            Ok(Data::Time { clock, t, utc: Some(u), error_s, .. }) => Some(Some((clock, t, u, error_s))),
+                            Ok(Data::Time { utc, error_s, recording, .. }) => Some(Some((recording, utc, error_s))),
                             _ => Some(None),
                         }
                     };
                     let start = time_in(time.name);
                     let stop = time_in(end.name);
                     r.wired |= start.is_some() || stop.is_some();
-                    if let Some(Some((c, t, u, e))) = start {
-                        if r.clock.is_none() && c != corroborate::clock::UTC {
-                            r.clock = Some(c.clone());
+                    if let Some(Some((rec, u, e))) = start {
+                        if r.clock.is_none() && !rec.is_empty() {
+                            r.clock = Some(rec);
                         }
-                        r.t0 = if r.clock.as_ref() == Some(&c) { t } else { 0.0 };
                         r.at = Some((u, e));
                     }
-                    if let Some(Some((c, t, u, e))) = stop {
-                        r.t1 = if r.clock.as_ref() == Some(&c) { Some(t) } else { (r.len > 0.0).then_some(r.len) };
+                    if let Some(Some((_, u, e))) = stop {
                         r.end = Some((u, e));
                     }
                 }
