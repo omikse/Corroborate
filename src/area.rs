@@ -3,8 +3,8 @@
 //! never hidden.
 //!
 //! Also the grid-frequency map (which cells run on 50 Hz, which on 60 Hz), read from a
-//! swappable JSON file. A cell counts for a frequency when its centre lies inside any region
-//! of that frequency, so overlapping regions allow both (it never wrongly excludes a cell).
+//! swappable JSON file of cells (made by `tools/grid_cells.py`). A cell in regions of both
+//! frequencies allows both (it never wrongly excludes a cell).
 
 use crate::plugin::{parse_json, Json};
 
@@ -35,16 +35,18 @@ impl WorldMask {
         self.cells[r * COLS + c]
     }
 
-    /// Cells whose centre lies inside any of the polygons (points as (lat, lon)).
-    pub fn from_polygons(polys: &[&[(f64, f64)]]) -> Self {
+    /// Cells from runs `[[row, first_col, last_col], …]` (the form `runs_json` writes).
+    pub fn from_runs(runs: &Json) -> Result<Self, String> {
         let mut m = Self::none();
-        for r in 0..ROWS {
-            for c in 0..COLS {
-                let p = centre(r, c);
-                m.cells[r * COLS + c] = polys.iter().any(|poly| inside(p, poly));
+        for r in runs.arr() {
+            let v: Vec<usize> = r.arr().iter().filter_map(Json::num).map(|x| x as usize).collect();
+            let [row, a, b] = v[..] else { return Err("each cell run is [row, first_col, last_col]".into()) };
+            if row >= ROWS || a > b || b >= COLS {
+                return Err(format!("cell run [{row},{a},{b}] is outside the 180 × 360 grid"));
             }
+            m.cells[row * COLS + a..=row * COLS + b].fill(true);
         }
-        m
+        Ok(m)
     }
 
     /// Cells whose centre is within `radius_km` of a point; the cell holding the point always counts.
@@ -135,18 +137,6 @@ impl Area {
     }
 }
 
-fn inside((lat, lon): (f64, f64), poly: &[(f64, f64)]) -> bool {
-    let mut odd = false;
-    let n = poly.len();
-    for i in 0..n {
-        let (ai, bi) = poly[i];
-        let (aj, bj) = poly[(i + n - 1) % n];
-        if (ai > lat) != (aj > lat) && lon < (bj - bi) * (lat - ai) / (aj - ai) + bi {
-            odd = !odd;
-        }
-    }
-    odd
-}
 
 fn distance_km(a1: f64, b1: f64, a2: f64, b2: f64) -> f64 {
     let (p1, p2) = (a1.to_radians(), a2.to_radians());
@@ -158,7 +148,7 @@ fn distance_km(a1: f64, b1: f64, a2: f64, b2: f64) -> f64 {
 pub struct GridRegion {
     pub id: String,
     pub hz: f64,
-    pub polygon: Vec<(f64, f64)>,
+    pub cells: WorldMask,
 }
 
 /// A synchronous area: one grid, one frequency everywhere in it at any second (what a grid
@@ -168,19 +158,16 @@ pub struct SyncArea {
     pub id: String,
     pub name: String,
     pub hz: f64,
-    pub parts: Vec<(Vec<(f64, f64)>, Option<f64>, Option<f64>)>,
+    pub parts: Vec<(WorldMask, Option<f64>, Option<f64>)>,
 }
 
 impl SyncArea {
     /// The cells of the area at UTC time `t` (all parts ever, when None).
     pub fn mask_at(&self, t: Option<f64>) -> WorldMask {
-        let polys: Vec<&[(f64, f64)]> = self
-            .parts
+        self.parts
             .iter()
             .filter(|(_, from, to)| t.is_none_or(|t| from.is_none_or(|f| t >= f) && to.is_none_or(|e| t < e)))
-            .map(|(p, _, _)| p.as_slice())
-            .collect();
-        WorldMask::from_polygons(&polys)
+            .fold(WorldMask::none(), |m, (p, _, _)| m.or(p))
     }
 }
 
@@ -200,22 +187,13 @@ impl GridMap {
         for (i, r) in j.get("regions").map_or(&[][..], Json::arr).iter().enumerate() {
             let id = r.get("id").and_then(Json::str).unwrap_or("?").to_string();
             let hz = r.get("frequency_hz").and_then(Json::num).ok_or(format!("region {i} ({id}): no frequency_hz"))?;
-            let polygon: Vec<(f64, f64)> = r
-                .get("bounds")
-                .map_or(&[][..], Json::arr)
-                .iter()
-                .filter_map(|p| Some((p.arr().first()?.num()?, p.arr().get(1)?.num()?)))
-                .collect();
-            if polygon.len() < 3 {
-                return Err(format!("region {i} ({id}): bounds need at least 3 [lat, lon] points"));
-            }
-            regions.push(GridRegion { id, hz, polygon });
+            let cells = WorldMask::from_runs(r.get("cells").ok_or(format!("region {i} ({id}): no cells"))?).map_err(|e| format!("region {i} ({id}): {e}"))?;
+            regions.push(GridRegion { id, hz, cells });
         }
         if regions.is_empty() {
             return Err("no regions".into());
         }
         let source = j.get("source").and_then(Json::str).unwrap_or("unknown").to_string();
-        let poly = |b: Option<&Json>| -> Vec<(f64, f64)> { b.map_or(&[][..], Json::arr).iter().filter_map(|p| Some((p.arr().first()?.num()?, p.arr().get(1)?.num()?))).collect() };
         let date = |v: Option<&Json>, what: &str| -> Result<Option<f64>, String> {
             match v.and_then(Json::str) {
                 None => Ok(None),
@@ -228,11 +206,8 @@ impl GridMap {
             let hz = a.get("frequency_hz").and_then(Json::num).ok_or(format!("synchronous area {id}: no frequency_hz"))?;
             let mut parts = Vec::new();
             for p in a.get("parts").map_or(&[][..], Json::arr) {
-                let b = poly(p.get("bounds"));
-                if b.len() < 3 {
-                    return Err(format!("synchronous area {id}: a part needs at least 3 [lat, lon] points"));
-                }
-                parts.push((b, date(p.get("from"), &id)?, date(p.get("to"), &id)?));
+                let cells = WorldMask::from_runs(p.get("cells").ok_or(format!("synchronous area {id}: a part has no cells"))?).map_err(|e| format!("synchronous area {id}: {e}"))?;
+                parts.push((cells, date(p.get("from"), &id)?, date(p.get("to"), &id)?));
             }
             let name = a.get("name").and_then(Json::str).unwrap_or(&id).to_string();
             areas.push(SyncArea { id, name, hz, parts });
@@ -250,8 +225,7 @@ impl GridMap {
     }
 
     pub fn mask_for(&self, nominal: f64) -> WorldMask {
-        let polys: Vec<&[(f64, f64)]> = self.regions_for(nominal).iter().map(|r| r.polygon.as_slice()).collect();
-        WorldMask::from_polygons(&polys)
+        self.regions_for(nominal).iter().fold(WorldMask::none(), |m, r| m.or(&r.cells))
     }
 }
 
@@ -299,6 +273,24 @@ mod tests {
         assert_eq!(at(54.69, 25.28, t("2025-06-01")), ["CE"], "Vilnius 2025");
         assert_eq!(at(50.45, 30.52, t("2021-06-01")), Vec::<&str>::new(), "Kyiv 2021");
         assert_eq!(at(50.45, 30.52, t("2023-06-01")), ["CE"], "Kyiv 2023");
+        assert_eq!(at(55.68, 12.57, None), ["Nordic"], "Copenhagen");
+        assert_eq!(at(55.47, 8.45, None), ["CE"], "Esbjerg");
+        assert_eq!(at(56.16, 10.20, None), ["Nordic", "CE"], "Aarhus: its cell spans the Great Belt");
+        assert_eq!(at(40.0, 9.0, None), Vec::<&str>::new(), "Sardinia (HVDC)");
+        assert_eq!(at(28.1, -15.4, None), Vec::<&str>::new(), "Gran Canaria");
+        // Frequencies, by real borders: coasts and small islands keep their cells.
+        let hz = |lat: f64, lon: f64| -> Vec<u32> {
+            let p = WorldMask::circle(lat, lon, 1.0);
+            [50, 60].into_iter().filter(|&f| !g.mask_for(f as f64).and(&p).is_empty()).collect()
+        };
+        assert_eq!(hz(35.68, 139.69), [50], "Tokyo");
+        assert_eq!(hz(34.69, 135.50), [60], "Osaka");
+        assert_eq!(hz(-23.55, -46.63), [60], "São Paulo");
+        assert_eq!(hz(-25.26, -57.58), [50], "Asunción");
+        assert_eq!(hz(24.71, 46.68), [60], "Riyadh");
+        assert_eq!(hz(13.10, -59.62), [50], "Barbados");
+        assert_eq!(hz(18.47, -66.11), [60], "San Juan");
+        assert_eq!(hz(59.0, -40.0), Vec::<u32>::new(), "open sea");
     }
 
     #[test]
@@ -331,14 +323,18 @@ mod tests {
 
     #[test]
     fn grid_mask_and_contradiction() {
-        let doc = r#"{"source":"t","regions":[
-            {"id":"A","frequency_hz":50,"bounds":[[40,0],[40,20],[60,20],[60,0]]},
-            {"id":"B","frequency_hz":60,"bounds":[[20,-120],[20,-70],[50,-70],[50,-120]]}]}"#;
-        let g = GridMap::parse(doc).unwrap();
+        // A: 30°–49° N, 0°–19° E; B: 40°–69° N, 120°–71° W.
+        let a: Vec<String> = (41..=60).map(|r| format!("[{r},180,199]")).collect();
+        let b: Vec<String> = (21..=50).map(|r| format!("[{r},60,109]")).collect();
+        let doc = format!(r#"{{"source":"t","regions":[
+            {{"id":"A","frequency_hz":50,"cells":[{}]}},
+            {{"id":"B","frequency_hz":60,"cells":[{}]}}]}}"#, a.join(","), b.join(","));
+        let g = GridMap::parse(&doc).unwrap();
         let m50 = g.mask_for(50.0);
-        let poland = WorldMask::circle(52.0, 19.0, 300.0);
-        assert!(!m50.and(&poland).is_empty());
-        assert!(g.mask_for(60.0).and(&poland).is_empty());
+        let italy = WorldMask::circle(42.0, 12.5, 100.0);
+        assert!(!m50.and(&italy).is_empty());
+        assert!(g.mask_for(60.0).and(&italy).is_empty());
         assert!(m50.fraction() < 0.02 && m50.fraction() > 0.005);
+        assert!(GridMap::parse(r#"{"regions":[{"id":"C","frequency_hz":50,"cells":[[200,0,1]]}]}"#).unwrap_err().contains("outside"));
     }
 }

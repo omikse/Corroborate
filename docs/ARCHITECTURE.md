@@ -67,7 +67,7 @@ and views (Map, Timeline).
 | `enf-plugin`, `metadata`, `adsb-check` | their module folders | plugins |
 
 `examples/bus_echo.rs` is a complete protocol 2 plugin; `tools/` holds `run.ps1` (build and deploy
-to `app\`), `adsb-log.py` and `jiku.py`.
+to `app\`), `adsb-log.py`, `jiku.py` and `grid_cells.py` (makes the bundled grid frequency file).
 
 ## Tests
 

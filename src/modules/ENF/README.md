@@ -27,7 +27,7 @@ The **grid data** file is chosen in the node (empty: the bundled file of
 | S3 Rejection | S1, S2 | readings that don't count are kept with the reason ([notes](#s3-rejection)) | — |
 | S4 Runs | S3 | runs of clear hum of 30 s or more, to the timeline and the result file | — |
 | S5 Quality | S3 | good enough to date, weak, or no hum, and why ([notes](#s5-quality)) | — |
-| S6 Area | S2, grid data | every 1° cell whose centre is in a region of that frequency | grid data file |
+| S6 Area | S2, grid data | every 1° cell with land of a country of that frequency | grid data file |
 | S7 Dating | S3, `time`, `location`, grid logs | at the end of a file, the hum matched against the grid log store ([notes](#s7-dating)) | — |
 | S8 Start error | S7 | how sure the start is, from how sharp the match is ([notes](#s8-start-error)) | — |
 | S9 Blind place | S7 | with no `location` wired, a clear match puts the recording in that grid's area at that date | — |
@@ -39,7 +39,7 @@ Each output is in its type's colour when the signal is good enough for its use (
 
 | Output | From | Error | Tested |
 |---|---|---|---|
-| `location` | S6, or S9 after a blind match | grid outlines are rough boxes: borders off by up to a few hundred km, at 1° | Cornell Lab stream (Ithaca, New York), no place wired: 60 Hz, 17.85 % of Earth left |
+| `location` | S6, or S9 after a blind match | 1° cells: a cell counts when any part of a country of that frequency lies in it, so it can reach up to about 100 km past a border | Cornell Lab stream (Ithaca, New York), no place wired: 60 Hz, 17.85 % of Earth left (with the old boxes; real borders leave less, not measured again) |
 | `quality` | S5 | thresholds are placeholders | synthetic hum: good, weak and none told apart (`drive.rs::enf_quality`) |
 | `hum track` | S1–S3 | each reading carries its own | synthetic hum in heavy noise: 22 readings, median 4 mHz off |
 | `audio start time` | S7, S8 | from the match's sharpness (S8) | Hillingdon council stream (7 July 2016, on-screen 18:29:08 UTC): found 18:29:07 UTC, 4.1 mHz against 37 mHz next best. Synthetic: ±0.31 s for a clean track, ±2.3 s with 20× the reading noise |
@@ -62,7 +62,6 @@ hover and nothing to wire. Their text is in `module.toml`; the research behind t
 - The start error assumes one independent reading per 16 s window and an honest log. A wrong log
   or a long stretch of wrong readings gives a confident wrong start; the runner-up and the margin
   are shown so a person can judge.
-- Grid data polygons that cross the 180° meridian are not handled.
 - The grid log store is not part of what the kept result is known by: after adding grid logs,
   Run again on the node (right-click) dates anew. That reads the hum again too.
 
@@ -149,39 +148,10 @@ as one match.
 
 ### Grid data file
 
-The same format the Grid frequencies node reads; swap the file to use other data. Format:
-
-```json
-{
-  "source": "where the data came from",
-  "regions": [
-    {"id": "Europe", "frequency_hz": 50, "bounds": [[lat, lon], [lat, lon], [lat, lon], ...]}
-  ]
-}
-```
-
-`bounds` is a polygon of at least three `[lat, lon]` points. A cell counts for a frequency when its
-centre is inside any region of that frequency, so overlapping regions allow both frequencies: the
-map never wrongly excludes a cell, it only fails to exclude one. The default file is rough boxes
-per country group.
-
-It also lists the **synchronous areas** (one grid, one frequency everywhere at any second: what a
-grid frequency log covers), each as location data that can change over time:
-
-```json
-"synchronous_areas": [
-  {"id": "CE", "name": "Continental Europe", "frequency_hz": 50, "parts": [
-    {"bounds": [[lat, lon], ...]},
-    {"from": "2022-03-16", "bounds": [...]},
-    {"from": "2025-02-09", "bounds": [...]}
-  ]}
-]
-```
-
-A part with `from`/`to` (UTC dates) belongs to the area only then: Ukraine and Moldova joined
-Continental Europe on 2022-03-16, the Baltic states on 2025-02-09 (before that `Baltic`, with
-Russia's grid). Shipped: GB, CE, Nordic, IE (Ireland), Baltic; outlines rough, at 1°. The `id` is
-the grid's folder in the grid log store.
+Which cells use 50 Hz and which 60 Hz, and the synchronous areas (one grid, one frequency
+everywhere at any second: what a grid log covers) with the dates parts joined or left. Its
+format, sources and how it is made: [Grid frequencies](<../Grid frequencies (50 or 60 Hz)/README.md>).
+An area's `id` is the grid's folder in the grid log store.
 
 ### Grid log store
 

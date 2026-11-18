@@ -15,7 +15,7 @@
 //! Audio and video are not values: audio is the raw stream fed to detectors.
 //! Time, location, text, json and file keep the latest value; event and track lists grow.
 
-use crate::area::{Area, WorldMask, COLS, ROWS};
+use crate::area::{Area, WorldMask};
 use crate::core::PortKind;
 use crate::plugin::{parse_json, Json};
 use crate::timebase::json_escape;
@@ -192,19 +192,7 @@ impl Data {
                 let cells = if let (Some(s), None) = (site, j.get("cells")) {
                     WorldMask::circle(s.lat, s.lon, num(j, "radius_km").unwrap_or(0.0).max(0.0))
                 } else {
-                    let mut m = WorldMask::none();
-                    let runs = j.get("cells").ok_or("location needs \"cells\" or \"lat\" and \"lon\"")?;
-                    for r in runs.arr() {
-                        let v: Vec<usize> = r.arr().iter().filter_map(Json::num).map(|x| x as usize).collect();
-                        let [row, a, b] = v[..] else { return Err("each cell run is [row, first_col, last_col]".into()) };
-                        if row >= ROWS || a > b || b >= COLS {
-                            return Err(format!("cell run [{row},{a},{b}] is outside the 180 × 360 grid"));
-                        }
-                        for c in a..=b {
-                            m.cells[row * COLS + c] = true;
-                        }
-                    }
-                    m
+                    WorldMask::from_runs(j.get("cells").ok_or("location needs \"cells\" or \"lat\" and \"lon\"")?)?
                 };
                 Ok(Data::Location { area: Arc::new(Area::new(cells)), note, site })
             }
