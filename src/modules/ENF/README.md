@@ -194,11 +194,18 @@ Filled from raw downloads (untrusted, many formats) by
 `corroborate-cli grid-logs <downloads folder>`, which reads only new or changed files
 (`imported.txt`): run it again after a download tops up (`grid_import.rs`).
 
-| Folder | Grid | Time stamps |
-|---|---|---|
-| `neso\` `f-YYYY-M.csv`, `fnew-…` (some zipped) | GB | with offset (`+0100`); 2014 `dd/mm/yyyy` UK local; `fnew` UTC |
-| `zenodo_2012_2021\YYYY_cleansed.zip` | CE (TransnetBW), Nordic (Fingrid) | naive local with summer time (CET, EET) |
-| `energy_charts\YYYY-MM-DD.json` | CE (Fraunhofer ISE, Freiburg) | unix seconds |
+The raw downloads are not kept: the store holds all of them (13 GB of downloads became 2 GB).
+To build the store again, download them with the scripts in this module's `grid logs\` folder
+(`bash dl_neso.sh` and so on, into folders beside them) and run `grid-logs` on that folder.
+
+| Folder | Grid | Years | Downloaded from | Time stamps |
+|---|---|---|---|---|
+| `neso\` `f-YYYY-M.csv`, `fnew-…` (some zipped) | GB | 2014–2026 | [NESO system frequency](https://www.neso.energy/data-portal/system-frequency-data); every file's URL is in `neso-urls.txt` (`dl_neso.sh`) | with offset (`+0100`); 2014 `dd/mm/yyyy` UK local; `fnew` UTC |
+| `zenodo_2012_2021\YYYY_cleansed.zip` | CE (TransnetBW), Nordic (Fingrid) | 2012–2021 | [Zenodo record 5105820](https://zenodo.org/records/5105820) (`dl_zenodo2.sh`) | naive local with summer time (CET, EET) |
+| `energy_charts\YYYY-MM-DD.json` | CE (Fraunhofer ISE, Freiburg) | 2022-05 – 2026-11 | [Energy-Charts API](https://api.energy-charts.info), `/frequency?start=…&end=…`, one UTC day per file (`dl_energy_charts.sh`) | unix seconds |
+
+Energy-Charts gave nothing for 438 of those days (rate limits and 404s): they are listed in
+`energy_charts-failed.txt`, and CE cannot be dated on them.
 
 Open grid frequency data:
 

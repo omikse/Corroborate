@@ -13,6 +13,7 @@ doppler-2*/
 *.doppler.json
 app/
 tests/data/
-# grid frequency logs (~55 GB): keep only the download scripts
+# raw grid frequency downloads (many GB): keep only the download scripts and their lists
 src/modules/ENF/grid logs/*
 !src/modules/ENF/grid logs/*.sh
+!src/modules/ENF/grid logs/*.txt

@@ -1,4 +1,5 @@
-cd "$(dirname "$0")/zenodo_2012_2021"
+# Zenodo record 5105820: Continental Europe (TransnetBW) and Nordic (Fingrid), 2012-2021, yearly zips.
+mkdir -p "$(dirname "$0")/zenodo_2012_2021" && cd "$(dirname "$0")/zenodo_2012_2021"
 curl -s "https://zenodo.org/api/records/5105820" | python -c "
 import sys,json
 for f in json.load(sys.stdin)['files']: print(f['key'])" | tr -d '\r' > files.txt
